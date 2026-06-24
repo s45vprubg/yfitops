@@ -52,10 +52,19 @@ If a new message type is needed:
 
 ## Definition of Done
 
-- Go: `go build ./...` and `go vet` clean.
+Run `scripts/preflight.sh` and get a green "PREFLIGHT PASSED" before claiming
+any change is done. It is the gate, and it must pass — not a `go test` alone.
+It does a CLEAN frontend reinstall + production build, which is the only thing
+that catches a dependency referenced in code but missing from node_modules /
+package.json (a dev server hides this until you load the page).
+
+The gate enforces:
+- Go: `go build ./...`, `go vet`, and `go test ./...` clean.
+- Each frontend (stage, mobile, admin): clean `npm install` + `npm run build`.
+
+Also required (not all machine-checkable):
 - Unit tests for non-trivial logic; table-driven.
 - No fixed contract files modified.
-- Frontends: `npm run build` succeeds.
 - Changes documented in `docs/CHANGELOG.md`.
 
 ## Dev Environment

@@ -80,9 +80,14 @@ echo " ready"
 start_web() {
   local app="$1" port="$2"
   local dir="${ROOT}/web/${app}"
-  if [ ! -d "${dir}/node_modules" ]; then
-    echo "==> installing deps for web/${app} (first run)"
-    (cd "${dir}" && npm install >/dev/null 2>&1)
+  # Always run install: it's a fast no-op when satisfied, but crucially it pulls
+  # deps that were ADDED to package.json since the last run (e.g. after a merge).
+  # The old "only if node_modules missing" check let new deps go uninstalled,
+  # which is exactly the @hello-pangea/dnd break we hit. Fail loudly if it can't.
+  echo "==> ensuring deps for web/${app}"
+  if ! (cd "${dir}" && npm install >/dev/null 2>&1); then
+    echo "ERROR: npm install failed for web/${app}" >&2
+    exit 1
   fi
   echo "==> starting web/${app} on :${port}"
   (cd "${dir}" && npm run dev -- --port "${port}" --strictPort >/dev/null 2>&1) &

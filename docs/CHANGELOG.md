@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] — 2026-06-24
 
+### Added — Preflight gate
+- `scripts/preflight.sh`: the "are we actually runnable?" check — Go
+  build/vet/test plus a CLEAN reinstall + production build of every frontend.
+  The clean build is what catches a dependency referenced in code but missing
+  from node_modules (the @hello-pangea/dnd break). Verified it fails loudly on
+  that exact bug class. Now the enforced Definition of Done (CLAUDE.md).
+
+### Fixed — launcher installs newly-added deps
+- `scripts/dev-up.sh`: always run `npm install` (was: only when node_modules
+  absent), so deps added since the last run — e.g. after a merge — actually get
+  installed instead of erroring at page load. Fails loudly if install fails.
+
 ### Added — Spotify token refresh for long games
 - `server/internal/spotify/spotify.go`: capture `expires_in`; new `ValidToken()`
   returns a non-expired access token, refreshing via the stored refresh token
