@@ -1,0 +1,163 @@
+# yfitops — Name That Spotify V2
+
+A real-time, ultra-low-latency multiplayer music guessing game built for a
+hacker-conference environment. A central **Stage** screen projects the music,
+synced lyrics, and a Jeopardy-style board; attendees join from their phones and
+use a **Mobile** web app as a pure physical buzzer; a host drives everything
+from an **Admin** Control Room. The whole system is built defensively around a
+zero-trust client model and server-authoritative anti-cheat.
+
+The full design and threat model live in [`design_doc.md`](./design_doc.md);
+the spec every build agent worked against is
+[`docs/BUILD_CONTRACT.md`](./docs/BUILD_CONTRACT.md).
+
+## Architecture
+
+| Layer            | Tech                                   | Role |
+| ---------------- | -------------------------------------- | ---- |
+| Backend engine   | Go 1.26                                | Concurrent buzz/scoring/state engine. |
+| Network          | WebTransport over QUIC (HTTP/3, UDP)   | No head-of-line blocking on congested venue Wi-Fi; survives IP migration. |
+| Real-time cache  | Redis                                  | Atomic single-winner buzz lock (`SET NX`). |
+| Persistence      | PostgreSQL                             | Audit log, scores, persistent track/board curation. |
+| Frontends        | React 19 + Vite + Tailwind (PWA)       | Stage, Mobile buzzer, Admin control room. |
+| Audio            | Spotify Web Playback SDK + Web API     | Stage tab is the "Virtual Device"; Go routes play/pause to it. Go never plays audio itself. |
+| Lyrics           | LRCLIB                                  | Synced timestamped lyrics for the karaoke phase. |
+
+Key design constraints (see design_doc §4, §9):
+
+- **Client sanitization (§4A):** mobile clients never receive track title,
+  artist, URI, or lyrics — only sanitized `GameState` flags. Reveal/lyrics data
+  goes to Stage/Admin only.
+- **Server arrival authority (§4B):** buzz ordering uses the server's arrival
+  clock; client timestamps are only used for RTT heartbeats.
+- **Atomic buzz (§4 / §3.4):** the first buzz to win the Redis lock flips state;
+  everyone else gets `buzzResult{won:false}`.
+- **Audio isolation (§9):** on buzz, Go sends a `pause` directly to the Stage
+  over WebTransport (~20ms) instead of waiting on a Spotify round-trip.
+
+## Repo layout
+
+```
+server/                 Go backend (module github.com/s45vprubg/yfitops/server)
+  cmd/gameserver/       main entrypoint
+  internal/             protocol, game engine, anticheat, transport, store,
+                        spotify, lyrics, config
+  test/                 integration tests
+web/
+  shared/               TS protocol types + scoring mirror + transport client
+  stage/                presentation screen (React + Vite + Tailwind)
+  mobile/               buzzer PWA
+  admin/                control room
+deploy/                 Dockerfile.server, docker-compose.yml, .env.example,
+                        Makefile, migrations/
+scripts/                helper scripts
+reference/legacy-core/  legacy banovik/NameThatSpotify for logic reference
+```
+
+## Running the backend
+
+Requires Docker (with Compose). From the repo root:
+
+```bash
+cd deploy
+cp .env.example .env          # then edit secrets / Spotify creds
+make up                       # build + start postgres, redis, gameserver
+make logs                     # tail logs
+make down                     # stop
+```
+
+Or without the Makefile: `docker compose up --build` from `deploy/`.
+
+This brings up three services:
+
+- **postgres** (`postgres:16-alpine`) — runs `deploy/migrations/0001_init.sql`
+  on first boot. To (re)apply the schema to an existing volume: `make migrate`.
+- **redis** (`redis:7-alpine`) — the atomic buzz lock.
+- **gameserver** — the Go engine, listening on:
+  - **`:4433/udp`** — WebTransport / QUIC / HTTP3 (note: UDP).
+  - **`:8777/tcp`** — plain HTTP: `/healthz`, Spotify OAuth
+    (`/auth/spotify`, `/auth/spotify/callback`), and `/cert-hash`.
+
+The server degrades gracefully: if Redis or Postgres are unreachable at boot it
+falls back to in-memory implementations and a seeded sample board, logging the
+mode of each subsystem (no silent degradation). This means the engine is
+demonstrable even without the full data layer.
+
+All env vars are documented in [`deploy/.env.example`](./deploy/.env.example)
+and read by `server/internal/config/config.go`.
+
+## Running the frontends
+
+Each app under `web/` is an independent Vite project (Node 24 recommended). For
+each of `stage`, `mobile`, `admin`:
+
+```bash
+cd web/stage   # or web/mobile, web/admin
+npm install
+npm run dev     # Vite dev server
+npm run build   # production build
+```
+
+- **stage** — the central presentation screen. Hosts the Spotify Web Playback
+  SDK and shows the board, timer, reveal, and karaoke lyrics.
+- **mobile** — the buzzer PWA attendees load via the lobby QR code.
+- **admin** — the host Control Room (grading, overrides, kick/ban, skip
+  threshold). Gated by `ADMIN_SECRET`.
+
+The apps share types and the transport client from `web/shared/` (a TS mirror of
+the Go protocol and scoring contracts).
+
+## Spotify (real audio) — required setup
+
+Real audio playback needs a **Spotify Premium** account on the Stage device and
+an app registered at <https://developer.spotify.com/dashboard>:
+
+1. Create an app, copy its Client ID / Secret into `deploy/.env`
+   (`SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`).
+2. Add the redirect URI verbatim to the app's allowlist — default
+   `http://localhost:8777/auth/spotify/callback`.
+3. From the Stage tab, hit `/auth/spotify` on the server (port 8777) to
+   authenticate; that tab becomes the routed Virtual Device (design_doc §6, §9).
+
+**Demo / mock fallback:** without Spotify credentials the system still runs end
+to end — the engine, buzzing, scoring, state machine, and a seeded sample board
+all work — but there is **no real audio**. This is the intended way to develop
+and demo the gameplay loop without a Premium account.
+
+## WebTransport self-signed cert (dev flow)
+
+WebTransport over QUIC requires TLS. In dev the server **auto-generates a
+self-signed cert** on first boot (`transport.GenerateSelfSigned`) into the
+`/certs` volume — a writable cert dir is all you need.
+
+Browsers won't trust that cert by default, so WebTransport clients connect using
+`serverCertificateHashes`. The server publishes the cert's base64 SHA-256 at:
+
+```
+http://localhost:8777/cert-hash
+```
+
+The web transport client (`web/shared/client.ts`) fetches that hash and pins it
+when opening the WebTransport session. The cert is persisted in the `certs`
+volume so the hash stays stable across restarts (use `make clean` to wipe it).
+
+## Known limitations / not runtime-verified
+
+Honest accounting of what is and isn't proven:
+
+- **Verified:** `docker compose config` parses cleanly, including the critical
+  `4433:4433/udp` mapping and the `migrations/` init-bind. The Go server image
+  builds from `deploy/Dockerfile.server` (pure Go, static, CGO off). Go unit
+  tests cover the fixed contracts (scoring, anticheat, nonce gate).
+- **Not runtime-verified (needs manual checking):**
+  - A full `docker compose up` with live gameplay end-to-end has **not** been
+    run here. Bring it up and watch the gameserver logs for the data-layer mode
+    lines.
+  - **Real Spotify playback** is untestable without Premium credentials and the
+    OAuth flow above — only the mock/no-audio path has been exercised.
+  - **WebTransport requires a Chromium-based browser** (Chrome/Edge). Firefox
+    and Safari support is incomplete; the self-signed `serverCertificateHashes`
+    flow is Chromium-specific. There is no fallback transport.
+  - The self-signed cert flow is a **dev convenience**. A real deployment needs
+    a proper cert and a reverse proxy / SSL termination story that preserves
+    HTTP/3 + UDP (design_doc §11) — not configured here.
