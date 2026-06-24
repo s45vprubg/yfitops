@@ -25,6 +25,7 @@ export default function App() {
             locked={view.buzzedAndLost}
             lockedBy={view.lockedBy}
             selfLost={view.buzzedAndLost}
+            judged={view.judgedThisRound}
             onBuzz={buzz}
           />
         );
@@ -35,6 +36,7 @@ export default function App() {
             locked
             lockedBy={view.lockedBy}
             selfLost={view.buzzedAndLost}
+            judged={view.judgedThisRound}
             onBuzz={buzz}
           />
         );

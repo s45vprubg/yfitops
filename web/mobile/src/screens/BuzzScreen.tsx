@@ -1,17 +1,14 @@
 import { useCallback } from "react";
 
 interface Props {
-  // locked: true => button disabled (someone else guessing / we lost / wrong).
   locked: boolean;
   lockedBy: string | null;
-  // distinguishes "I guessed wrong" from "someone else is guessing".
   selfLost: boolean;
+  judged: boolean;
   onBuzz: () => void;
 }
 
-export function BuzzScreen({ locked, lockedBy, selfLost, onBuzz }: Props) {
-  // pointerdown for lowest-latency input; preventDefault stops the synthetic
-  // 300ms click / double-tap-zoom on mobile.
+export function BuzzScreen({ locked, lockedBy, selfLost, judged, onBuzz }: Props) {
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
       e.preventDefault();
@@ -22,13 +19,14 @@ export function BuzzScreen({ locked, lockedBy, selfLost, onBuzz }: Props) {
   );
 
   if (locked) {
-    const overlay = selfLost
-      ? lockedBy
-        ? `Locked: ${lockedBy} is guessing!`
-        : "Incorrect — you're out this round"
-      : lockedBy
-        ? `Locked: ${lockedBy} is guessing!`
-        : "Locked out";
+    let overlay: string;
+    if (judged) {
+      overlay = "Incorrect — you're out this round";
+    } else if (selfLost) {
+      overlay = lockedBy ? `Locked: ${lockedBy} is guessing!` : "Locked out";
+    } else {
+      overlay = lockedBy ? `Locked: ${lockedBy} is guessing!` : "Locked out";
+    }
 
     return (
       <div className="flex flex-1 select-none flex-col items-center justify-center bg-locked animate-fadeIn">

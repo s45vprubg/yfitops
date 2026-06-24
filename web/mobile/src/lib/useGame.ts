@@ -31,6 +31,10 @@ export interface GameView {
   lockedBy: string | null;
   // This device's own buzz was rejected (lost the race or guessed wrong).
   buzzedAndLost: boolean;
+  // This player won the buzz this round (used to detect post-adjudication lockout).
+  wonBuzzThisRound: boolean;
+  // This player was judged incorrect/partial and is locked out for the rest of the round.
+  judgedThisRound: boolean;
   // Vote progress during KARAOKE.
   vote: VoteStateData | null;
   // Most recent server error message (e.g. bad nonce, kicked).
@@ -46,6 +50,8 @@ const INITIAL: GameView = {
   state: "LOBBY",
   lockedBy: null,
   buzzedAndLost: false,
+  wonBuzzThisRound: false,
+  judgedThisRound: false,
   vote: null,
   error: null,
   rttMs: null,
@@ -80,19 +86,31 @@ export function useGame() {
       c.on("state", (env: ServerEnvelope) => {
         const d = env.d as StateData | undefined;
         if (!d) return;
-        // On entering a fresh round, clear the per-track lost/lock flags.
-        // The nonce bump (handled by GameClient) plus this reset keeps the
-        // buzzer honest across transitions (§4D).
         setView((v) => {
           const next: Partial<GameView> = { state: d.state };
           if (d.state === "ROUND_ACTIVE") {
+            if (v.state === "ADJUDICATE" && v.wonBuzzThisRound) {
+              // We were the guesser and got judged incorrect/partial.
+              next.judgedThisRound = true;
+              next.buzzedAndLost = true;
+              next.wonBuzzThisRound = false;
+            } else if (v.state !== "ADJUDICATE") {
+              // Fresh round (from BOARD/TRANSITION) — reset everything.
+              next.buzzedAndLost = false;
+              next.judgedThisRound = false;
+              next.wonBuzzThisRound = false;
+              next.lockedBy = null;
+            }
+          }
+          if (d.state === "BOARD" || d.state === "LOBBY" || d.state === "TRANSITION") {
             next.buzzedAndLost = false;
+            next.judgedThisRound = false;
+            next.wonBuzzThisRound = false;
             next.lockedBy = null;
           }
           if (d.state !== "LOCKED_OUT") {
-            next.lockedBy = d.state === "ROUND_ACTIVE" ? null : v.lockedBy;
+            next.lockedBy = d.state === "ROUND_ACTIVE" ? (next.lockedBy ?? null) : v.lockedBy;
           }
-          // Leaving karaoke clears stale vote progress.
           if (d.state !== "KARAOKE") next.vote = null;
           return { ...v, ...next };
         });
@@ -105,8 +123,8 @@ export function useGame() {
 
       c.on("buzzResult", (env: ServerEnvelope) => {
         const d = env.d as BuzzResultData | undefined;
-        // won:false => we lost the atomic race or are otherwise locked out.
         if (d && !d.won) patch({ buzzedAndLost: true });
+        if (d && d.won) patch({ wonBuzzThisRound: true });
       });
 
       c.on("voteState", (env: ServerEnvelope) => {

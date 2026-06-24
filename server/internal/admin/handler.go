@@ -56,6 +56,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 
 	// Game-time
 	mux.Handle("POST /api/boards/{id}/attach", wrap(h.attachBoard))
+	mux.Handle("POST /api/game/start", wrap(h.startGame))
 
 	// Spotify
 	mux.Handle("GET /api/spotify/search", wrap(h.searchSpotify))

@@ -155,6 +155,27 @@ func (e *Engine) ReloadBoard(b *Board) {
 	})
 }
 
+// StartGame transitions the engine from LOBBY to BOARD. Returns an error if no
+// board is attached or the engine is not in LOBBY state. Safe from any goroutine.
+func (e *Engine) StartGame() error {
+	type result struct{ err error }
+	ch := make(chan result, 1)
+	e.cmds <- command{fn: func() {
+		if e.board == nil {
+			ch <- result{fmt.Errorf("no board attached")}
+			return
+		}
+		if e.state != protocol.StateLobby {
+			ch <- result{fmt.Errorf("game already started (state: %s)", e.state)}
+			return
+		}
+		e.transitionTo(protocol.StateBoard)
+		e.broadcastBoard()
+		ch <- result{}
+	}}
+	return (<-ch).err
+}
+
 // RoleSetter lets the engine promote a connection's authenticated role in the
 // transport layer after a validated Hello. The transport (*transport.Hub)
 // defaults every new connection to mobile (the safe default, §4A) and only the
@@ -565,7 +586,9 @@ func (e *Engine) gradeCorrect(winner *Player, elapsed int64) {
 	}
 	e.award(winner, pts)
 	e.cellPicker = winner.ID
+	e.buzzWinner = ""
 	e.lock.Release(context.Background(), e.roundKey)
+	e.bcast.Broadcast(protocol.RoleAdmin, e.adminViewEnvelope())
 
 	e.curTrack.Played = true // consume this track from the pool (§7)
 
@@ -580,8 +603,9 @@ func (e *Engine) gradeCorrect(winner *Player, elapsed int64) {
 // re-enables the buzzer for everyone EXCEPT players who already guessed this
 // track (§3.6, §7).
 func (e *Engine) gradePartial(winner *Player, elapsed int64) {
+	secondPartial := e.partial.active
 	awarded, remaining := PartialAward(e.curRow, elapsed)
-	if e.partial.active {
+	if secondPartial {
 		// Two partials should not exceed the pool; second partial claims the
 		// rest of the pool minus its own 50. Clamp at the leftover.
 		awarded = PartialPoints
@@ -593,9 +617,20 @@ func (e *Engine) gradePartial(winner *Player, elapsed int64) {
 	e.award(winner, awarded)
 	e.partial = pendingPartial{active: true, remaining: remaining}
 
+	if secondPartial {
+		// Two partials exhaust guessing; clear admin evaluation and enter karaoke.
+		e.buzzWinner = ""
+		e.lock.Release(context.Background(), e.roundKey)
+		e.bcast.Broadcast(protocol.RoleAdmin, e.adminViewEnvelope())
+		e.curTrack.Played = true
+		e.enterKaraoke()
+		return
+	}
+
 	e.resumeAudio()
 	e.buzzWinner = ""
 	e.lock.Release(context.Background(), e.roundKey)
+	e.bcast.Broadcast(protocol.RoleAdmin, e.adminViewEnvelope())
 	e.transitionTo(protocol.StateRoundActive)
 	e.reenableEligible()
 }
@@ -607,6 +642,7 @@ func (e *Engine) gradeIncorrect(winner *Player) {
 	e.resumeAudio()
 	e.buzzWinner = ""
 	e.lock.Release(context.Background(), e.roundKey)
+	e.bcast.Broadcast(protocol.RoleAdmin, e.adminViewEnvelope())
 	e.transitionTo(protocol.StateRoundActive)
 	e.reenableEligible()
 }

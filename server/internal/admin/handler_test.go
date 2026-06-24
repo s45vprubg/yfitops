@@ -60,6 +60,7 @@ func (m *mockStore) AttachBoard(_ context.Context, _, _ string) error { return n
 type mockEngine struct{ reloaded bool }
 
 func (m *mockEngine) ReloadBoard(_ *game.Board) { m.reloaded = true }
+func (m *mockEngine) StartGame() error           { return nil }
 
 func newTestHandler() (*Handler, *http.ServeMux) {
 	store := &mockStore{

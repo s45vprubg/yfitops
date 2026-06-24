@@ -9,13 +9,13 @@ export default function Board({ board }: { board: BoardData | null }) {
   }
 
   const { rows, cols, cells } = board;
-  // Index cells by row/col. Row 0 (or absent) = category headers; data rows 1..rows.
   const byKey = new Map<string, BoardCell>();
   for (const c of cells) byKey.set(`${c.row}:${c.col}`, c);
 
   // Categories: take the category string from the first cell in each column.
+  // Columns are 1-indexed from the server.
   const categories: string[] = [];
-  for (let col = 0; col < cols; col++) {
+  for (let col = 1; col <= cols; col++) {
     let cat = "";
     for (let r = 1; r <= rows; r++) {
       const c = byKey.get(`${r}:${col}`);
@@ -24,7 +24,7 @@ export default function Board({ board }: { board: BoardData | null }) {
         break;
       }
     }
-    categories.push(cat || `CAT ${col + 1}`);
+    categories.push(cat || `CAT ${col}`);
   }
 
   return (
@@ -44,7 +44,8 @@ export default function Board({ board }: { board: BoardData | null }) {
 
         {Array.from({ length: rows }).map((_, rIdx) => {
           const row = rIdx + 1;
-          return Array.from({ length: cols }).map((__, col) => {
+          return Array.from({ length: cols }).map((__, cIdx) => {
+            const col = cIdx + 1;
             const cell = byKey.get(`${row}:${col}`);
             const exhausted = cell?.exhausted ?? false;
             const points = cell?.points ?? 0;

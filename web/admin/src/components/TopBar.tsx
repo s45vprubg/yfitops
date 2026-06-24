@@ -50,6 +50,12 @@ export default function TopBar({
     setLoadingBoard(false);
   };
 
+  const handleStartGame = async () => {
+    try {
+      await api.startGame();
+    } catch { /* state broadcast will update UI */ }
+  };
+
   // The slider is uncontrolled by the server (the server is authoritative for
   // the effective threshold, but it does not echo a threshold payload back in
   // the contract). Debounce sends on change.
@@ -81,6 +87,14 @@ export default function TopBar({
             <option key={b.id} value={b.id}>{b.name}</option>
           ))}
         </select>
+        {gameState === "LOBBY" && (
+          <button
+            onClick={handleStartGame}
+            className="rounded border border-green-600 bg-green-950/50 px-3 py-1 text-xs font-bold uppercase text-green-300 hover:bg-green-900/60"
+          >
+            Start Game
+          </button>
+        )}
       </div>
 
       <div className="flex-1" />

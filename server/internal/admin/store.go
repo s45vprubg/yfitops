@@ -54,4 +54,5 @@ type SpotifyResult struct {
 // BoardReloader allows the admin handler to push a new board to the live engine.
 type BoardReloader interface {
 	ReloadBoard(b *game.Board)
+	StartGame() error
 }

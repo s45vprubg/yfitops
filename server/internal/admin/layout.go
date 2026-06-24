@@ -204,3 +204,11 @@ func (h *Handler) attachBoard(w http.ResponseWriter, r *http.Request) {
 	h.engine.ReloadBoard(board)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "attached"})
 }
+
+func (h *Handler) startGame(w http.ResponseWriter, r *http.Request) {
+	if err := h.engine.StartGame(); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "started"})
+}

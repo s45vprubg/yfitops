@@ -100,10 +100,11 @@ function AnswerCell({ label, value }: { label: string; value?: string }) {
 
 function GradeButtons({ actions, active }: { actions: AdminActions; active: boolean }) {
   const [partialOpen, setPartialOpen] = useState(false);
-  const dim = active ? "" : "opacity-60";
+
+  if (!active) return null;
 
   return (
-    <div className={`grid grid-cols-3 gap-3 ${dim}`}>
+    <div className="grid grid-cols-3 gap-3">
       <button
         onClick={() => actions.grade({ verdict: "correct" })}
         className="flex h-28 flex-col items-center justify-center rounded-lg border-2 border-emerald-500 bg-emerald-600/80 text-lg font-black uppercase tracking-wide text-white transition hover:bg-emerald-500 active:scale-[0.98]"

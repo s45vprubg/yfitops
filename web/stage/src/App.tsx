@@ -1,9 +1,8 @@
 // App — routes the stage view by GameState (§8A) and overlays the persistent
-// corner QR (late joiners), the Spotify/demo banner, and a connection dot.
+// corner QR (late joiners) and a connection dot.
 
 import { useGame } from "./net/useGame";
 import CornerJoin from "./components/CornerJoin";
-import SpotifyBanner from "./components/SpotifyBanner";
 import Lobby from "./views/Lobby";
 import Board from "./views/Board";
 import ActiveRound from "./views/ActiveRound";
@@ -14,7 +13,6 @@ export default function App() {
 
   return (
     <div className="crt-overlay relative h-full w-full overflow-hidden">
-      <SpotifyBanner mode={view.audioMode} state={view.spotifyConnectState} />
       <ConnDot connected={view.connected} />
 
       {renderView()}
