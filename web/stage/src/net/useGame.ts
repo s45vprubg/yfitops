@@ -27,7 +27,7 @@ import type {
   TrackStartData,
   WelcomeData,
 } from "@shared/protocol";
-import { WT_URL, STAGE_SECRET } from "../config";
+import { WT_URL, STAGE_SECRET, fetchSpotifyToken } from "../config";
 import { fetchCertHashes } from "./certHash";
 import { createAudioPlayer, SpotifyAudioPlayer, type AudioPlayer, type ConnectState } from "../audio";
 
@@ -162,9 +162,12 @@ export function useGame() {
       client.on("spotifyToken", (e: ServerEnvelope) => {
         const { token } = e.d as { token: string };
         if (!token) return;
-        // Replace the current audio player with a Spotify-backed one.
+        // Replace the current audio player with a Spotify-backed one. The token
+        // provider prefers a freshly-refreshed token from the backend endpoint
+        // (surviving the ~1h Spotify TTL across a long game) and falls back to
+        // the just-pushed token if that endpoint is unreachable.
         audioRef.current?.destroy();
-        const spotify = new SpotifyAudioPlayer(() => token);
+        const spotify = new SpotifyAudioPlayer(async () => (await fetchSpotifyToken()) ?? token);
         audioRef.current = spotify;
         patch({ audioMode: "spotify", spotifyConnectState: "connecting" });
         spotify.onReady((deviceId) => {

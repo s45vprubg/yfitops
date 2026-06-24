@@ -39,6 +39,10 @@ type AdminStore interface {
 type SpotifySearcher interface {
 	Search(ctx context.Context, query string, limit int) ([]SpotifyResult, error)
 	GetPlaylistTracks(ctx context.Context, playlistID string) ([]SpotifyResult, error)
+	// ValidToken returns a non-expired Spotify access token, refreshing first
+	// if needed. Served to the Stage so its Web Playback SDK getOAuthToken
+	// callback always has a live token through a multi-hour game.
+	ValidToken(ctx context.Context) (string, error)
 }
 
 // SpotifyResult mirrors spotify.SearchResult to avoid an import dependency on

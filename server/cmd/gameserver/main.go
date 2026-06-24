@@ -12,6 +12,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"log"
 	"net/http"
 	"os"
@@ -99,10 +102,38 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 	// Spotify OAuth (§6, §9): admin opens /auth/spotify on the stage tab.
+	// CSRF protection: mint a random state, stash it in a short-lived cookie,
+	// and require an exact match on the callback (replaces the old constant
+	// "yfitops" state, which offered no CSRF protection).
+	const stateCookie = "yfi_spotify_state"
 	mux.HandleFunc("/auth/spotify", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, audio.AuthURL("yfitops"), http.StatusFound)
+		state, err := randomState()
+		if err != nil {
+			http.Error(w, "state error", http.StatusInternalServerError)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     stateCookie,
+			Value:    state,
+			Path:     "/auth/spotify",
+			MaxAge:   600, // 10 minutes to complete the dance
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+		})
+		http.Redirect(w, r, audio.AuthURL(state), http.StatusFound)
 	})
 	mux.HandleFunc("/auth/spotify/callback", func(w http.ResponseWriter, r *http.Request) {
+		// Verify the state matches the cookie (constant-time) before doing
+		// anything with the code.
+		want, err := r.Cookie(stateCookie)
+		got := r.URL.Query().Get("state")
+		if err != nil || got == "" || subtle.ConstantTimeCompare([]byte(got), []byte(want.Value)) != 1 {
+			http.Error(w, "invalid OAuth state", http.StatusBadRequest)
+			return
+		}
+		// Clear the one-time state cookie.
+		http.SetCookie(w, &http.Cookie{Name: stateCookie, Value: "", Path: "/auth/spotify", MaxAge: -1})
+
 		code := r.URL.Query().Get("code")
 		if code == "" {
 			http.Error(w, "missing code", http.StatusBadRequest)
@@ -125,14 +156,21 @@ func main() {
 		})
 	}
 
-	// ---- Admin REST API (track/board management) ----
+	// ---- Spotify token endpoint (always available) ----
+	// The Stage's Web Playback SDK fetches a live token here on every
+	// getOAuthToken call (refreshed server-side). It depends only on the
+	// Spotify client, NOT the store, so it is registered even in the in-memory
+	// dev mode (dev-up.sh) where the board-management admin API is skipped.
+	admin.RegisterSpotifyToken(mux, &admin.SpotifyAdapter{Client: audio}, cfg.AdminSecret)
+
+	// ---- Admin REST API (board/track management — needs Postgres) ----
 	if pr, ok := repo.(*store.PostgresRepo); ok {
 		spotifyAdapter := &admin.SpotifyAdapter{Client: audio}
 		adminHandler := admin.NewHandler(pr, spotifyAdapter, eng, cfg.AdminSecret)
 		adminHandler.Register(mux)
 		log.Printf("admin API: registered on /api/*")
 	} else {
-		log.Printf("admin API: skipped (Postgres unavailable)")
+		log.Printf("admin API: board management skipped (Postgres unavailable); /api/spotify/token still active")
 	}
 
 	go func() {
@@ -152,4 +190,14 @@ func main() {
 	<-ctx.Done()
 	log.Println("shutting down")
 	_ = srv.Close()
+}
+
+// randomState returns a cryptographically random hex string for the OAuth
+// state parameter (CSRF protection on the Spotify callback).
+func randomState() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
 }

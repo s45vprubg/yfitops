@@ -36,6 +36,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/s45vprubg/yfitops/server/internal/config"
 	"github.com/s45vprubg/yfitops/server/internal/game"
@@ -86,9 +87,13 @@ type Client struct {
 	tokenURL     string
 	apiBase      string
 
+	// now is the clock used for token-expiry math, injectable for tests.
+	now func() time.Time
+
 	mu           sync.Mutex
 	accessToken  string
 	refreshToken string
+	expiresAt    time.Time // when the current access token dies (Spotify ~1h TTL)
 	deviceID     string
 }
 
@@ -103,6 +108,7 @@ func New(cfg *config.Config) *Client {
 		authorizeURL: authorizeURL,
 		tokenURL:     tokenURL,
 		apiBase:      apiBase,
+		now:          time.Now,
 	}
 }
 
@@ -134,6 +140,7 @@ func (c *Client) AuthURL(state string) string {
 type tokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int    `json:"expires_in"` // seconds until the access token dies (~3600)
 }
 
 // Exchange swaps an authorization code for access+refresh tokens
@@ -159,8 +166,27 @@ func (c *Client) ExchangeToken(ctx context.Context, code string) (string, error)
 	c.mu.Lock()
 	c.accessToken = tok.AccessToken
 	c.refreshToken = tok.RefreshToken
+	c.expiresAt = c.expiryFrom(tok.ExpiresIn)
 	c.mu.Unlock()
 	return tok.AccessToken, nil
+}
+
+// clock returns the client's clock, defaulting to time.Now when unset (e.g.
+// struct-literal construction in tests).
+func (c *Client) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+// expiryFrom converts a Spotify expires_in (seconds) into an absolute deadline.
+// Defaults to 3600s if the field is missing/zero.
+func (c *Client) expiryFrom(expiresIn int) time.Time {
+	if expiresIn <= 0 {
+		expiresIn = 3600
+	}
+	return c.clock().Add(time.Duration(expiresIn) * time.Second)
 }
 
 // refresh obtains a fresh access token using the stored refresh token,
@@ -188,8 +214,43 @@ func (c *Client) refresh(ctx context.Context) error {
 	if tok.RefreshToken != "" {
 		c.refreshToken = tok.RefreshToken
 	}
+	c.expiresAt = c.expiryFrom(tok.ExpiresIn)
 	c.mu.Unlock()
 	return nil
+}
+
+// ValidToken returns a non-expired access token, refreshing first if the
+// current one is missing or within the expiry skew window. This is what the
+// stage's token endpoint serves so the Web Playback SDK's getOAuthToken
+// callback always receives a live token, even hours into a game — Spotify
+// access tokens die ~1h after issue regardless of activity (so a long game
+// MUST refresh; switching tracks does not keep a token alive).
+func (c *Client) ValidToken(ctx context.Context) (string, error) {
+	c.mu.Lock()
+	tok := c.accessToken
+	exp := c.expiresAt
+	hasRefresh := c.refreshToken != ""
+	c.mu.Unlock()
+
+	// Refresh a bit early so an in-flight token never expires between the
+	// callback fetch and the SDK using it.
+	const skew = 2 * time.Minute
+	if tok != "" && c.clock().Before(exp.Add(-skew)) {
+		return tok, nil
+	}
+	if !hasRefresh {
+		if tok != "" {
+			return tok, nil // no way to refresh; hand back what we have
+		}
+		return "", fmt.Errorf("spotify: not authenticated")
+	}
+	if err := c.refresh(ctx); err != nil {
+		return "", err
+	}
+	c.mu.Lock()
+	tok = c.accessToken
+	c.mu.Unlock()
+	return tok, nil
 }
 
 // postToken posts a form-encoded grant to the token endpoint with the client

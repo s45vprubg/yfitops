@@ -37,6 +37,26 @@ func (h *Handler) searchSpotify(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, results)
 }
 
+// spotifyToken serves a currently-valid Spotify access token to the Stage so
+// its Web Playback SDK getOAuthToken callback can fetch a live token on demand.
+// The client refreshes behind ValidToken when the cached token is near expiry,
+// so audio survives a multi-hour game (Spotify access tokens die ~1h after
+// issue regardless of activity). Gated by the admin Bearer secret like every
+// other /api route — never exposed to mobile.
+func (h *Handler) spotifyToken(w http.ResponseWriter, r *http.Request) {
+	if h.spotify == nil {
+		http.Error(w, "Spotify not configured", http.StatusServiceUnavailable)
+		return
+	}
+	token, err := h.spotify.ValidToken(r.Context())
+	if err != nil {
+		// 409: authenticated to the API, but Spotify OAuth not completed yet.
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"token": token})
+}
+
 func (h *Handler) importPlaylist(w http.ResponseWriter, r *http.Request) {
 	if h.spotify == nil {
 		http.Error(w, "Spotify not configured", http.StatusServiceUnavailable)

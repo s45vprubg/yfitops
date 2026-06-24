@@ -61,6 +61,19 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	// Spotify
 	mux.Handle("GET /api/spotify/search", wrap(h.searchSpotify))
 	mux.Handle("POST /api/boards/{id}/import-playlist", wrap(h.importPlaylist))
+	// Note: GET /api/spotify/token is registered separately via
+	// RegisterSpotifyToken so it works without Postgres (the Stage needs it in
+	// in-memory dev mode too).
+}
+
+// RegisterSpotifyToken mounts ONLY the GET /api/spotify/token route, which
+// serves a live Spotify access token to the Stage's Web Playback SDK. It is
+// split out of Register because it depends solely on the Spotify client, not
+// the board store — so the entrypoint can expose it even when Postgres (and
+// thus the rest of the admin API) is unavailable. Gated by the admin secret.
+func RegisterSpotifyToken(mux *http.ServeMux, spotify SpotifySearcher, secret string) {
+	h := &Handler{spotify: spotify, secret: secret}
+	mux.Handle("GET /api/spotify/token", AdminAuth(secret)(http.HandlerFunc(h.spotifyToken)))
 }
 
 // CORSHandler returns an http.Handler that wraps the given handler with CORS

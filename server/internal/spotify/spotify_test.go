@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/s45vprubg/yfitops/server/internal/config"
 )
@@ -288,5 +289,66 @@ func TestRefreshWithoutTokenFails(t *testing.T) {
 
 	if err := c.Resume(context.Background()); err == nil {
 		t.Fatal("expected error refreshing without refresh token, got nil")
+	}
+}
+
+// TestValidToken_RefreshesNearExpiry covers the long-game token lifecycle:
+// a fresh token is returned as-is, but one inside the expiry skew window is
+// transparently refreshed (Spotify access tokens die ~1h after issue, so a
+// multi-hour game MUST refresh — see ValidToken doc).
+func TestValidToken_RefreshesNearExpiry(t *testing.T) {
+	var refreshes int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		form, _ := url.ParseQuery(string(body))
+		if form.Get("grant_type") == "refresh_token" {
+			refreshes++
+			json.NewEncoder(w).Encode(tokenResponse{AccessToken: "fresh-acc", ExpiresIn: 3600})
+			return
+		}
+		t.Errorf("unexpected grant_type %q", form.Get("grant_type"))
+	}))
+	defer srv.Close()
+
+	now := time.Unix(1_000_000, 0)
+	c := New(testConfig())
+	c.HTTPClient = &http.Client{Transport: rewriteTransport{base: srv.URL}}
+	c.now = func() time.Time { return now }
+
+	// Case 1: fresh token (expires in 1h) is returned without a refresh.
+	c.accessToken = "live-acc"
+	c.refreshToken = "ref-1"
+	c.expiresAt = now.Add(time.Hour)
+	got, err := c.ValidToken(context.Background())
+	if err != nil {
+		t.Fatalf("ValidToken (fresh): %v", err)
+	}
+	if got != "live-acc" {
+		t.Errorf("fresh token = %q, want live-acc", got)
+	}
+	if refreshes != 0 {
+		t.Errorf("fresh token should NOT refresh; got %d refreshes", refreshes)
+	}
+
+	// Case 2: token within the skew window (expires in 30s) triggers a refresh.
+	c.accessToken = "stale-acc"
+	c.expiresAt = now.Add(30 * time.Second)
+	got, err = c.ValidToken(context.Background())
+	if err != nil {
+		t.Fatalf("ValidToken (stale): %v", err)
+	}
+	if got != "fresh-acc" {
+		t.Errorf("stale token = %q, want fresh-acc (refreshed)", got)
+	}
+	if refreshes != 1 {
+		t.Errorf("expected exactly 1 refresh, got %d", refreshes)
+	}
+}
+
+// TestValidToken_NoAuth errors when there is neither a token nor a refresh token.
+func TestValidToken_NoAuth(t *testing.T) {
+	c := New(testConfig())
+	if _, err := c.ValidToken(context.Background()); err == nil {
+		t.Error("expected error when unauthenticated")
 	}
 }

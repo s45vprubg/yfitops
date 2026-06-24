@@ -17,8 +17,19 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Load Spotify creds + secrets from deploy/.env if present (not committed).
+# This is what lets real audio work via the launcher; without it the stage
+# falls back to demo mode.
+if [ -f "${ROOT}/deploy/.env" ]; then
+  echo "==> loading ${ROOT}/deploy/.env"
+  set -a; . "${ROOT}/deploy/.env"; set +a
+fi
+
 ADMIN_SECRET="${ADMIN_SECRET:-letmein}"
-HOST="localhost"
+# 127.0.0.1 (NOT localhost): Spotify requires loopback redirect URIs to use
+# 127.0.0.1, and the browser host must match the registered redirect exactly.
+HOST="127.0.0.1"
 
 # Ports
 HTTP_PORT=8777
@@ -40,14 +51,21 @@ trap cleanup EXIT INT TERM
 export VITE_WT_URL="https://${HOST}:${WT_PORT}/wt"
 export VITE_HTTP_URL="http://${HOST}:${HTTP_PORT}"
 export VITE_JOIN_URL="http://${HOST}:${MOBILE_PORT}"   # stage QR -> mobile buzzer
+# Stage authenticates to the backend (hello + /api/spotify/token) with this.
+export VITE_STAGE_SECRET="${ADMIN_SECRET}"
 
 echo "==> building + starting Go backend (in-memory, sample board)"
+[ -n "${SPOTIFY_CLIENT_ID:-}" ] && echo "    Spotify creds present — real audio available" \
+  || echo "    no Spotify creds — stage runs in demo mode (no audio)"
 cd "${ROOT}/server"
 ADMIN_SECRET="${ADMIN_SECRET}" \
 YFI_HTTP_ADDR=":${HTTP_PORT}" \
 YFI_LISTEN_ADDR=":${WT_PORT}" \
 YFI_CERT_FILE="${ROOT}/certs/cert.pem" \
 YFI_KEY_FILE="${ROOT}/certs/key.pem" \
+SPOTIFY_CLIENT_ID="${SPOTIFY_CLIENT_ID:-}" \
+SPOTIFY_CLIENT_SECRET="${SPOTIFY_CLIENT_SECRET:-}" \
+SPOTIFY_REDIRECT_URI="${SPOTIFY_REDIRECT_URI:-http://${HOST}:${HTTP_PORT}/auth/spotify/callback}" \
   go run ./cmd/gameserver &
 PIDS+=($!)
 

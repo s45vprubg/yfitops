@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] — 2026-06-24
 
+### Added — Spotify token refresh for long games
+- `server/internal/spotify/spotify.go`: capture `expires_in`; new `ValidToken()`
+  returns a non-expired access token, refreshing via the stored refresh token
+  inside a 2-minute skew window. Injectable clock for tests.
+- `server/internal/admin/`: `SpotifySearcher.ValidToken` + `RegisterSpotifyToken`
+  mounts `GET /api/spotify/token` (admin-Bearer gated) independently of Postgres
+  so the Stage can fetch tokens in in-memory dev mode too.
+- `web/stage`: `SpotifyAudioPlayer` now takes an async token provider; the SDK's
+  `getOAuthToken` fetches a fresh token from `/api/spotify/token` on every call,
+  so audio survives the ~1h Spotify access-token TTL across a multi-hour game.
+- `web/stage/src/config.ts`: `fetchSpotifyToken()` helper; JOIN_URL default fixed
+  to the mobile dev port (8780).
+
+### Security — OAuth state CSRF protection
+- `server/cmd/gameserver/main.go`: `/auth/spotify` now mints a random state in a
+  short-lived HttpOnly cookie and the callback verifies it (constant-time),
+  replacing the constant `"yfitops"` state.
+
+### Changed — dev launcher
+- `scripts/dev-up.sh`: sources `deploy/.env` for Spotify creds, uses 127.0.0.1
+  (Spotify loopback requirement), passes `VITE_STAGE_SECRET` + Spotify env to
+  the backend so real audio is testable via the launcher.
+
 ### Fixed — E2E test follows stage-secret gating
 - `server/test/e2e_webtransport_test.go`: the stage role is now gated by the
   shared secret (a trusted client that receives reveal data should be), so the

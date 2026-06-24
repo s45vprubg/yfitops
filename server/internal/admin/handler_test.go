@@ -199,3 +199,67 @@ func TestCORS_Headers(t *testing.T) {
 		t.Fatal("missing CORS Allow-Methods header")
 	}
 }
+
+// mockSpotify implements SpotifySearcher for token-endpoint tests.
+type mockSpotify struct {
+	token    string
+	tokenErr error
+}
+
+func (m *mockSpotify) Search(_ context.Context, _ string, _ int) ([]SpotifyResult, error) {
+	return nil, nil
+}
+func (m *mockSpotify) GetPlaylistTracks(_ context.Context, _ string) ([]SpotifyResult, error) {
+	return nil, nil
+}
+func (m *mockSpotify) ValidToken(_ context.Context) (string, error) {
+	return m.token, m.tokenErr
+}
+
+func TestSpotifyToken_Serves(t *testing.T) {
+	mux := http.NewServeMux()
+	RegisterSpotifyToken(mux, &mockSpotify{token: "live-token"}, "test-secret")
+
+	req := httptest.NewRequest("GET", "/api/spotify/token", nil)
+	req.Header.Set("Authorization", "Bearer test-secret")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "live-token") {
+		t.Errorf("body missing token: %s", w.Body.String())
+	}
+}
+
+func TestSpotifyToken_RequiresAuth(t *testing.T) {
+	mux := http.NewServeMux()
+	RegisterSpotifyToken(mux, &mockSpotify{token: "live-token"}, "test-secret")
+
+	// No Bearer -> must be rejected; the token must never leak unauthenticated.
+	req := httptest.NewRequest("GET", "/api/spotify/token", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	if strings.Contains(w.Body.String(), "live-token") {
+		t.Error("token leaked to unauthenticated request")
+	}
+}
+
+func TestSpotifyToken_NotConfigured(t *testing.T) {
+	mux := http.NewServeMux()
+	RegisterSpotifyToken(mux, nil, "test-secret") // nil spotify
+
+	req := httptest.NewRequest("GET", "/api/spotify/token", nil)
+	req.Header.Set("Authorization", "Bearer test-secret")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", w.Code)
+	}
+}

@@ -1,8 +1,15 @@
 // SpotifyAudioPlayer — wraps the Spotify Web Playback SDK so this browser tab
-// becomes a "Virtual Device" (design_doc §6). It loads the SDK script, waits for
-// the token (obtained out-of-band via the backend /auth/spotify OAuth flow),
-// initializes a Player, and surfaces device readiness + player_state_changed
-// events through the shared AudioPlayer interface.
+// becomes a "Virtual Device" (design_doc §6). It loads the SDK script, supplies
+// tokens via the SDK's getOAuthToken callback, initializes a Player, and
+// surfaces device readiness + player_state_changed events through the shared
+// AudioPlayer interface.
+//
+// TOKEN LIFECYCLE: the constructor takes an ASYNC token provider. The SDK calls
+// getOAuthToken every time it needs a token (including silently when the
+// current one nears expiry), so the provider fetches a fresh token from the
+// backend (/api/spotify/token), which refreshes server-side via the stored
+// refresh token. This is what keeps audio alive through a multi-hour game —
+// Spotify access tokens die ~1h after issue regardless of playback activity.
 //
 // HONESTY: this requires a real Spotify Premium account + valid token. If the
 // token is missing or auth fails, callers should fall back to MockAudioPlayer.
@@ -41,7 +48,10 @@ export class SpotifyAudioPlayer implements AudioPlayer {
   private stateSubs = new Set<(s: PlayerState) => void>();
   private readySubs = new Set<(deviceId: string) => void>();
 
-  constructor(private getToken: () => string) {}
+  // getToken returns a CURRENT access token, possibly async (it may hit the
+  // backend token endpoint, which refreshes server-side). A plain string return
+  // is also accepted for the simple/legacy case.
+  constructor(private getToken: () => string | Promise<string>) {}
 
   getConnectState(): ConnectState {
     return this.connectState;
@@ -59,7 +69,13 @@ export class SpotifyAudioPlayer implements AudioPlayer {
 
       const player = new window.Spotify.Player({
         name: DEVICE_NAME,
-        getOAuthToken: (cb) => cb(this.getToken()),
+        getOAuthToken: (cb) => {
+          // The SDK calls this whenever it needs a (fresh) token. Resolve the
+          // provider — async-safe — so token refresh is transparent.
+          Promise.resolve(this.getToken())
+            .then((tok) => cb(tok))
+            .catch((e) => console.warn("[spotify] token fetch failed:", e));
+        },
         volume: 0.8,
       });
       this.player = player;

@@ -11,6 +11,11 @@ type SpotifyAdapter struct {
 	Client *spotify.Client
 }
 
+// ValidToken returns a live Spotify access token, refreshing if near expiry.
+func (a *SpotifyAdapter) ValidToken(ctx context.Context) (string, error) {
+	return a.Client.ValidToken(ctx)
+}
+
 func (a *SpotifyAdapter) Search(ctx context.Context, query string, limit int) ([]SpotifyResult, error) {
 	results, err := a.Client.Search(ctx, query, limit)
 	if err != nil {

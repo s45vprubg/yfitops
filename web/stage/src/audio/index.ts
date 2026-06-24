@@ -14,6 +14,7 @@
 import type { AudioPlayer } from "./types";
 import { MockAudioPlayer } from "./mock";
 import { SpotifyAudioPlayer } from "./spotify";
+import { fetchSpotifyToken } from "../config";
 
 const TOKEN_KEY = "yfitops.spotifyToken";
 const TOKEN_EXP_KEY = "yfitops.spotifyTokenExp";
@@ -65,11 +66,20 @@ export function captureSpotifyToken(): string | null {
   return readPersistedToken();
 }
 
+// liveTokenProvider returns a token for the SDK's getOAuthToken callback. It
+// prefers a freshly-refreshed token from the backend (so audio survives the
+// ~1h Spotify token TTL across a long game), falling back to the cached token
+// from the OAuth redirect if the endpoint is unreachable.
+async function liveTokenProvider(initial: string): Promise<string> {
+  const fresh = await fetchSpotifyToken();
+  return fresh ?? readPersistedToken() ?? initial;
+}
+
 /** Build the right player. Returns a Spotify player if a token exists, else mock. */
 export function createAudioPlayer(): AudioPlayer {
   const token = captureSpotifyToken();
   if (token) {
-    return new SpotifyAudioPlayer(() => readPersistedToken() ?? token);
+    return new SpotifyAudioPlayer(() => liveTokenProvider(token));
   }
   return new MockAudioPlayer();
 }
