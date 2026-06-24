@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] — 2026-06-24
+
+### Fixed — E2E test follows stage-secret gating
+- `server/test/e2e_webtransport_test.go`: the stage role is now gated by the
+  shared secret (a trusted client that receives reveal data should be), so the
+  E2E test's stage Hello now sends `AdminSecret`. No production code changed.
+
 ## [Unreleased] — 2026-06-23
 
 ### Added — Track Management & Board Builder

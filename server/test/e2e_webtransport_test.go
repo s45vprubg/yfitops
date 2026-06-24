@@ -250,7 +250,9 @@ func TestE2E_RolePromotionAndSanitization(t *testing.T) {
 	stage := dialClient(t, ctx, url)
 	mobile := dialClient(t, ctx, url)
 
-	stageHello, _ := json.Marshal(protocol.HelloData{Role: protocol.RoleStage})
+	// Stage is a TRUSTED client (it receives reveal data), so it is now gated by
+	// the shared secret just like admin — send it.
+	stageHello, _ := json.Marshal(protocol.HelloData{Role: protocol.RoleStage, AdminSecret: "test-admin"})
 	stage.send(t, protocol.ClientEnvelope{Type: protocol.CMsgHello, Data: stageHello})
 	stage.waitFor(t, func(e protocol.ServerEnvelope) bool { return e.Type == protocol.SMsgWelcome }, "stage welcome")
 
