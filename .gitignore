@@ -22,3 +22,6 @@ certs/
 
 # vendored legacy reference (banovik/NameThatSpotify) — kept locally, not committed
 reference/legacy-core/
+
+# TS incremental build cache
+*.tsbuildinfo
