@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1
+#
+# yfitops V2 game server — multi-stage build (design_doc §11).
+# Pure Go (no cgo), so we build a fully static binary and ship it on a minimal
+# alpine base. Build context is the ./server directory (the Go module root):
+#
+#   docker build -f deploy/Dockerfile.server -t yfitops-server ./server
+#
+# (docker-compose.yml sets context: ../server, dockerfile: ../deploy/Dockerfile.server)
+
+# ---- Build stage --------------------------------------------------------------
+FROM golang:1.26-alpine AS build
+
+WORKDIR /src
+
+# Cache module downloads independently of source changes.
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Now the rest of the module source.
+COPY . .
+
+# Static, stripped binary. CGO is off (pure Go), so the result has no libc
+# dependency and runs on a bare alpine / scratch image.
+ENV CGO_ENABLED=0
+RUN go build -trimpath -ldflags="-s -w" -o /out/gameserver ./cmd/gameserver
+
+# ---- Runtime stage ------------------------------------------------------------
+# alpine (not distroless) so the image still has a shell + ca-certificates,
+# which matters because the server makes outbound TLS calls to Spotify and
+# LRCLIB over the public internet.
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates && \
+    adduser -D -u 10001 yfitops
+
+WORKDIR /app
+
+# Writable cert dir: the server auto-generates a self-signed cert here on first
+# boot (transport.GenerateSelfSigned) if YFI_CERT_FILE / YFI_KEY_FILE are absent.
+RUN mkdir -p /certs && chown yfitops:yfitops /certs
+
+COPY --from=build /out/gameserver /app/gameserver
+
+USER yfitops
+
+ENV YFI_CERT_FILE=/certs/cert.pem \
+    YFI_KEY_FILE=/certs/key.pem \
+    YFI_LISTEN_ADDR=:4433 \
+    YFI_HTTP_ADDR=:8777
+
+# QUIC / HTTP3 / WebTransport runs over UDP — 4433 MUST be exposed as UDP.
+EXPOSE 4433/udp
+# Plain HTTP for health, Spotify OAuth callback, and /cert-hash (TCP).
+EXPOSE 8777/tcp
+
+ENTRYPOINT ["/app/gameserver"]

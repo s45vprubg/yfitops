@@ -1,0 +1,79 @@
+# yfitops V2 — backend infrastructure (design_doc §2, §11).
+#
+#   postgres   durable audit + track curation; runs migrations/0001_init.sql on
+#              first boot via /docker-entrypoint-initdb.d.
+#   redis      atomic buzz lock (§4 single-winner SET NX).
+#   gameserver Go engine + WebTransport/QUIC (UDP 4433) + plain HTTP (TCP 8777).
+#
+# Run from the deploy/ directory:  docker compose up --build
+# Env (secrets, Spotify creds) is read from deploy/.env — copy .env.example.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: yfitops
+      POSTGRES_PASSWORD: yfitops
+      POSTGRES_DB: yfitops
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # *.sql here runs once, on an empty data dir (first boot only).
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yfitops -d yfitops"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  gameserver:
+    build:
+      context: ../server
+      dockerfile: ../deploy/Dockerfile.server
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # Data layer wiring (service DNS names on the compose network).
+      YFI_REDIS_ADDR: redis:6379
+      YFI_POSTGRES_DSN: postgres://yfitops:yfitops@postgres:5432/yfitops?sslmode=disable
+      # Network — must match the published ports below.
+      YFI_LISTEN_ADDR: ":4433"
+      YFI_HTTP_ADDR: ":8777"
+      YFI_CERT_FILE: /certs/cert.pem
+      YFI_KEY_FILE: /certs/key.pem
+      # Secrets / Spotify — pulled from deploy/.env (see .env.example).
+      ADMIN_SECRET: ${ADMIN_SECRET:-changeme-admin}
+      YFI_NONCE_SECRET: ${YFI_NONCE_SECRET:-dev-nonce-secret}
+      YFI_JOIN_SECRET: ${YFI_JOIN_SECRET:-dev-join-secret}
+      SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID:-}
+      SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET:-}
+      SPOTIFY_REDIRECT_URI: ${SPOTIFY_REDIRECT_URI:-http://localhost:8777/auth/spotify/callback}
+      YFI_LRCLIB_URL: ${YFI_LRCLIB_URL:-https://lrclib.net}
+      YFI_SKIP_THRESHOLD: ${YFI_SKIP_THRESHOLD:-50}
+      YFI_SESSION_ID: ${YFI_SESSION_ID:-session}
+    ports:
+      # WebTransport/QUIC is UDP — the /udp suffix is load-bearing.
+      - "4433:4433/udp"
+      # Health / OAuth / cert-hash over TCP.
+      - "8777:8777"
+    volumes:
+      # Persist the auto-generated self-signed dev cert across restarts so the
+      # /cert-hash served to browsers stays stable.
+      - certs:/certs
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  certs:
