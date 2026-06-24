@@ -145,6 +145,16 @@ func (e *Engine) Run(ctx context.Context) error {
 // SetBoard injects a board directly (test/admin bootstrap). Safe before Run.
 func (e *Engine) SetBoard(b *Board) { e.board = b }
 
+// ReloadBoard atomically replaces the active board via the Run loop's command
+// channel. Safe to call from any goroutine (e.g., the admin REST handler).
+// After replacement, broadcasts the new grid to stage/admin clients.
+func (e *Engine) ReloadBoard(b *Board) {
+	e.submit(func() {
+		e.board = b
+		e.broadcastBoard()
+	})
+}
+
 // RoleSetter lets the engine promote a connection's authenticated role in the
 // transport layer after a validated Hello. The transport (*transport.Hub)
 // defaults every new connection to mobile (the safe default, §4A) and only the
@@ -159,6 +169,19 @@ type RoleSetter interface {
 // SetRoleSetter wires the transport hub so the engine can promote roles on
 // Hello. Call once before Run; *transport.Hub satisfies RoleSetter.
 func (e *Engine) SetRoleSetter(rs RoleSetter) { e.roleSetter = rs }
+
+// CONTRACT-QUESTION: SMsgSpotifyToken is a new message type needed for pushing
+// OAuth tokens to the Stage client. It is defined here (not in protocol.go)
+// because protocol.go is a fixed contract. If accepted, it should be moved there.
+const smsgSpotifyToken protocol.ServerMsgType = "spotifyToken"
+
+// PushSpotifyToken sends the access token to all connected Stage clients so
+// they can initialize the Web Playback SDK without being in the OAuth loop.
+func (e *Engine) PushSpotifyToken(token string) {
+	e.submit(func() {
+		e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgSpotifyToken, map[string]string{"token": token}))
+	})
+}
 
 // submit enqueues fn for the Run loop. It does not wait.
 func (e *Engine) submit(fn func()) {
@@ -289,8 +312,8 @@ func (e *Engine) onHello(connID string, env protocol.ClientEnvelope) {
 		e.sendError(connID, "badHello", err.Error())
 		return
 	}
-	// Admin role is gated by the shared secret (§9 auth).
-	if h.Role == protocol.RoleAdmin && e.cfg.AdminSecret != "" && h.AdminSecret != e.cfg.AdminSecret {
+	// Admin and Stage roles are gated by the shared secret (§9 auth).
+	if (h.Role == protocol.RoleAdmin || h.Role == protocol.RoleStage) && e.cfg.AdminSecret != "" && h.AdminSecret != e.cfg.AdminSecret {
 		e.sendError(connID, "forbidden", "bad admin secret")
 		return
 	}

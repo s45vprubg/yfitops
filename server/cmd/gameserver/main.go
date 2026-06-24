@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/s45vprubg/yfitops/server/internal/admin"
 	"github.com/s45vprubg/yfitops/server/internal/anticheat"
 	"github.com/s45vprubg/yfitops/server/internal/config"
 	"github.com/s45vprubg/yfitops/server/internal/game"
@@ -43,13 +44,18 @@ func main() {
 	}
 
 	var repo game.GameRepo
+	var needSampleBoard bool
 	if pr, err := store.NewPostgresRepo(ctx, cfg.PostgresDSN); err == nil {
 		repo = pr
 		log.Printf("repo: Postgres")
+		if b, berr := pr.LoadBoard(ctx, cfg.SessionID()); berr != nil || b == nil {
+			log.Printf("repo: no board attached for session %q — use Board Builder to create and load one", cfg.SessionID())
+		}
 	} else {
 		mr := store.NewMemRepo()
 		mr.SeedSampleBoard(cfg.SessionID())
 		repo = mr
+		needSampleBoard = true
 		log.Printf("repo: IN-MEMORY + sample board (Postgres unavailable: %v)", err)
 	}
 
@@ -69,6 +75,10 @@ func main() {
 		AdminSecret:      cfg.AdminSecret,
 		SkipThresholdPct: cfg.DefaultSkipThresholdPct,
 	})
+	if needSampleBoard {
+		eng.SetBoard(store.SampleBoard())
+		log.Printf("engine: sample board injected (5×5, demo tracks)")
+	}
 	eng.SetRoleSetter(hub) // promote roles on validated Hello (§4A)
 	go func() {
 		if err := eng.Run(ctx); err != nil && ctx.Err() == nil {
@@ -98,11 +108,13 @@ func main() {
 			http.Error(w, "missing code", http.StatusBadRequest)
 			return
 		}
-		if err := audio.Exchange(r.Context(), code); err != nil {
+		token, err := audio.ExchangeToken(r.Context(), code)
+		if err != nil {
 			http.Error(w, "exchange failed: "+err.Error(), http.StatusBadGateway)
 			return
 		}
-		_, _ = w.Write([]byte("Spotify authenticated. You may close this tab and return to the stage."))
+		eng.PushSpotifyToken(token)
+		_, _ = w.Write([]byte("Spotify authenticated. Token pushed to Stage. You may close this tab."))
 	})
 	// Dev clients need the self-signed cert's SHA-256 for serverCertificateHashes.
 	// NewServer above has already generated the cert if it was missing.
@@ -113,9 +125,19 @@ func main() {
 		})
 	}
 
+	// ---- Admin REST API (track/board management) ----
+	if pr, ok := repo.(*store.PostgresRepo); ok {
+		spotifyAdapter := &admin.SpotifyAdapter{Client: audio}
+		adminHandler := admin.NewHandler(pr, spotifyAdapter, eng, cfg.AdminSecret)
+		adminHandler.Register(mux)
+		log.Printf("admin API: registered on /api/*")
+	} else {
+		log.Printf("admin API: skipped (Postgres unavailable)")
+	}
+
 	go func() {
-		log.Printf("HTTP (health/oauth) on %s", cfg.HTTPAddr)
-		if err := http.ListenAndServe(cfg.HTTPAddr, mux); err != nil && ctx.Err() == nil {
+		log.Printf("HTTP (health/oauth/admin) on %s", cfg.HTTPAddr)
+		if err := http.ListenAndServe(cfg.HTTPAddr, admin.CORSHandler(mux)); err != nil && ctx.Err() == nil {
 			log.Printf("http server: %v", err)
 		}
 	}()

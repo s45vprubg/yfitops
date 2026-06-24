@@ -71,17 +71,19 @@ Or without the Makefile: `docker compose up --build` from `deploy/`.
 This brings up three services:
 
 - **postgres** (`postgres:16-alpine`) — runs `deploy/migrations/0001_init.sql`
-  on first boot. To (re)apply the schema to an existing volume: `make migrate`.
+  and `0002_boards.sql` on first boot. To (re)apply the schema to an existing
+  volume: `make migrate`.
 - **redis** (`redis:7-alpine`) — the atomic buzz lock.
 - **gameserver** — the Go engine, listening on:
   - **`:4433/udp`** — WebTransport / QUIC / HTTP3 (note: UDP).
   - **`:8777/tcp`** — plain HTTP: `/healthz`, Spotify OAuth
-    (`/auth/spotify`, `/auth/spotify/callback`), and `/cert-hash`.
+    (`/auth/spotify`, `/auth/spotify/callback`), `/cert-hash`, and the Admin
+    REST API (`/api/*` — board/track CRUD, Spotify search proxy).
 
 The server degrades gracefully: if Redis or Postgres are unreachable at boot it
 falls back to in-memory implementations and a seeded sample board, logging the
-mode of each subsystem (no silent degradation). This means the engine is
-demonstrable even without the full data layer.
+mode of each subsystem (no silent degradation). When Postgres is available, the
+engine starts with no board — use the Board Builder to create and load one.
 
 All env vars are documented in [`deploy/.env.example`](./deploy/.env.example)
 and read by `server/internal/config/config.go`.
@@ -98,14 +100,36 @@ npm run dev     # Vite dev server
 npm run build   # production build
 ```
 
-- **stage** — the central presentation screen. Hosts the Spotify Web Playback
-  SDK and shows the board, timer, reveal, and karaoke lyrics.
-- **mobile** — the buzzer PWA attendees load via the lobby QR code.
-- **admin** — the host Control Room (grading, overrides, kick/ban, skip
-  threshold). Gated by `ADMIN_SECRET`.
+- **stage** (port 5174) — the central presentation screen. Hosts the Spotify
+  Web Playback SDK and shows the board, timer, reveal, and karaoke lyrics.
+  Requires `VITE_STAGE_SECRET` matching `ADMIN_SECRET`.
+- **mobile** (port 5173) — the buzzer PWA attendees load via the lobby QR code.
+- **admin** (port 8779) — the host Control Room (grading, overrides, kick/ban,
+  skip threshold) and Board Builder (track import, drag-and-drop grid). Gated
+  by `ADMIN_SECRET`. Login persists across page reloads via localStorage.
 
 The apps share types and the transport client from `web/shared/` (a TS mirror of
 the Go protocol and scoring contracts).
+
+## Board Builder — creating game boards
+
+The Board Builder (in the Admin UI) is how you curate the Jeopardy-style grid:
+
+1. **Create a board** — give it a name.
+2. **Add tracks** — search Spotify by artist/song, or paste a playlist URI to
+   bulk-import. Tracks are stored per-board (same song on different boards is
+   fine).
+3. **Build the grid** — add columns (categories), then drag-and-drop tracks from
+   the holding area into cells. Always 5 rows (scoring is fixed), up to 8
+   columns.
+4. **Load into the game** — in the Control Room, select a board from the "Load
+   board…" dropdown. The engine hot-reloads and the board appears in the Queuing
+   panel immediately.
+5. **Start a round** — click a cell in the Queuing panel to begin playing a
+   track from that cell.
+
+Boards auto-save on every action. Deleting a board cascade-deletes all its
+tracks and layout.
 
 ## Spotify (real audio) — required setup
 
@@ -115,9 +139,10 @@ an app registered at <https://developer.spotify.com/dashboard>:
 1. Create an app, copy its Client ID / Secret into `deploy/.env`
    (`SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`).
 2. Add the redirect URI verbatim to the app's allowlist — default
-   `http://localhost:8777/auth/spotify/callback`.
-3. From the Stage tab, hit `/auth/spotify` on the server (port 8777) to
-   authenticate; that tab becomes the routed Virtual Device (design_doc §6, §9).
+   `http://127.0.0.1:8777/auth/spotify/callback` (note: Spotify requires
+   `127.0.0.1`, not `localhost`).
+3. From the Admin Control Room, click "Connect Spotify" — this opens the OAuth
+   flow. The token is pushed to the Stage via WebTransport automatically.
 
 **Demo / mock fallback:** without Spotify credentials the system still runs end
 to end — the engine, buzzing, scoring, state machine, and a seeded sample board

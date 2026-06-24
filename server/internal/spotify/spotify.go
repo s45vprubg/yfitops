@@ -139,6 +139,13 @@ type tokenResponse struct {
 // Exchange swaps an authorization code for access+refresh tokens
 // (game.AudioDevice), porting authorizationCodeGrant (server.js:1216-1220).
 func (c *Client) Exchange(ctx context.Context, code string) error {
+	_, err := c.ExchangeToken(ctx, code)
+	return err
+}
+
+// ExchangeToken is like Exchange but also returns the access token so the HTTP
+// handler can pass it to the Stage frontend for the Web Playback SDK.
+func (c *Client) ExchangeToken(ctx context.Context, code string) (string, error) {
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
@@ -146,14 +153,14 @@ func (c *Client) Exchange(ctx context.Context, code string) error {
 
 	tok, err := c.postToken(ctx, form)
 	if err != nil {
-		return fmt.Errorf("spotify: exchange code: %w", err)
+		return "", fmt.Errorf("spotify: exchange code: %w", err)
 	}
 
 	c.mu.Lock()
 	c.accessToken = tok.AccessToken
 	c.refreshToken = tok.RefreshToken
 	c.mu.Unlock()
-	return nil
+	return tok.AccessToken, nil
 }
 
 // refresh obtains a fresh access token using the stored refresh token,

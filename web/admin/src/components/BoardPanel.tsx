@@ -13,8 +13,8 @@ export default function BoardPanel({ board, onSelect }: Props) {
     <section className="flex h-full flex-col border-r border-edge bg-panel2">
       <PanelHead title="Queuing" hint="select next cell" />
       <div className="flex-1 overflow-auto p-3">
-        {!board ? (
-          <Empty>Waiting for board…</Empty>
+        {!board || !board.cells?.length ? (
+          <Empty>No board loaded. Go to Board Builder → "Load into Game".</Empty>
         ) : (
           <BoardGrid board={board} onSelect={onSelect} />
         )}
@@ -26,13 +26,13 @@ export default function BoardPanel({ board, onSelect }: Props) {
 function BoardGrid({ board, onSelect }: { board: BoardData; onSelect: (r: number, c: number) => void }) {
   // Index cells by row/col for a stable grid even if the server omits some.
   const byKey = new Map<string, BoardCell>();
-  for (const c of board.cells) byKey.set(`${c.row},${c.col}`, c);
+  for (const c of board.cells ?? []) byKey.set(`${c.row},${c.col}`, c);
 
   // Category header per column (first row's category, falling back to any).
   const categories: string[] = [];
-  for (let col = 0; col < board.cols; col++) {
+  for (let col = 1; col <= board.cols; col++) {
     let cat = "";
-    for (let row = 0; row < board.rows; row++) {
+    for (let row = 1; row <= board.rows; row++) {
       const cell = byKey.get(`${row},${col}`);
       if (cell?.category) {
         cat = cell.category;
@@ -57,8 +57,8 @@ function BoardGrid({ board, onSelect }: { board: BoardData; onSelect: (r: number
         </div>
       ))}
 
-      {Array.from({ length: board.rows }).flatMap((_, row) =>
-        Array.from({ length: board.cols }).map((__, col) => {
+      {Array.from({ length: board.rows }, (_, ri) => ri + 1).flatMap((row) =>
+        Array.from({ length: board.cols }, (_, ci) => ci + 1).map((col) => {
           const cell = byKey.get(`${row},${col}`);
           const exhausted = !cell || cell.exhausted || cell.tracksLeft <= 0;
           return (

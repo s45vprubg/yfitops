@@ -1,0 +1,135 @@
+package admin
+
+import (
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+)
+
+var playlistIDPattern = regexp.MustCompile(`^[a-zA-Z0-9]+$`)
+
+func (h *Handler) searchSpotify(w http.ResponseWriter, r *http.Request) {
+	if h.spotify == nil {
+		http.Error(w, "Spotify not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		http.Error(w, "q parameter required", http.StatusBadRequest)
+		return
+	}
+
+	limit := 10
+	if ls := r.URL.Query().Get("limit"); ls != "" {
+		if l, err := strconv.Atoi(ls); err == nil {
+			limit = l
+		}
+	}
+
+	results, err := h.spotify.Search(r.Context(), query, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+
+func (h *Handler) importPlaylist(w http.ResponseWriter, r *http.Request) {
+	if h.spotify == nil {
+		http.Error(w, "Spotify not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	boardID := r.PathValue("id")
+
+	var body struct {
+		PlaylistURI string `json:"playlistUri"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	playlistID := extractPlaylistID(body.PlaylistURI)
+	if playlistID == "" {
+		http.Error(w, "invalid playlist URI/URL", http.StatusBadRequest)
+		return
+	}
+
+	tracks, err := h.spotify.GetPlaylistTracks(r.Context(), playlistID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	imported := 0
+	skipped := 0
+	for _, t := range tracks {
+		track := &Track{
+			ID:         generateID("trk"),
+			BoardID:    boardID,
+			SpotifyURI: t.URI,
+			Artist:     t.Artist,
+			Song:       t.Song,
+			AlbumArt:   t.AlbumArt,
+			DurationMs: t.DurationMs,
+			CreatedAt:  time.Now().UnixMilli(),
+		}
+		err := h.store.AddTrack(r.Context(), track)
+		if err != nil {
+			skipped++
+		} else {
+			imported++
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]int{
+		"imported": imported,
+		"skipped":  skipped,
+		"total":    len(tracks),
+	})
+}
+
+// extractPlaylistID parses a Spotify playlist ID from various input formats:
+//   - spotify:playlist:37i9dQZF1DXcBWIGoYBM5M
+//   - https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M
+//   - https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=...
+//   - 37i9dQZF1DXcBWIGoYBM5M (raw ID)
+func extractPlaylistID(input string) string {
+	input = strings.TrimSpace(input)
+
+	if strings.HasPrefix(input, "spotify:playlist:") {
+		id := strings.TrimPrefix(input, "spotify:playlist:")
+		if playlistIDPattern.MatchString(id) {
+			return id
+		}
+		return ""
+	}
+
+	if strings.Contains(input, "open.spotify.com/playlist/") {
+		parts := strings.Split(input, "open.spotify.com/playlist/")
+		if len(parts) < 2 {
+			return ""
+		}
+		id := parts[1]
+		if idx := strings.IndexByte(id, '?'); idx >= 0 {
+			id = id[:idx]
+		}
+		if idx := strings.IndexByte(id, '/'); idx >= 0 {
+			id = id[:idx]
+		}
+		if playlistIDPattern.MatchString(id) {
+			return id
+		}
+		return ""
+	}
+
+	if playlistIDPattern.MatchString(input) && len(input) >= 10 {
+		return input
+	}
+
+	return ""
+}

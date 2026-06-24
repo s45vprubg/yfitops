@@ -1,9 +1,7 @@
-// SpotifyBanner — honest status of the audio layer. When no token is present we
-// run in demo mode and say so plainly; the rest of the stage works regardless.
-// Offers a "Connect Spotify" action that redirects to the backend OAuth flow.
+// SpotifyBanner — honest status of the audio layer. Status-only; the Connect
+// Spotify action lives in the Admin control room.
 
 import type { ConnectState, AudioMode } from "../audio";
-import { SPOTIFY_AUTH_URL } from "../config";
 
 export default function SpotifyBanner({ mode, state }: { mode: AudioMode; state: ConnectState }) {
   if (mode === "spotify" && state === "ready") {
@@ -22,20 +20,10 @@ export default function SpotifyBanner({ mode, state }: { mode: AudioMode; state:
     );
   }
 
-  const connect = () => {
-    window.location.href = SPOTIFY_AUTH_URL;
-  };
-
   const errored = mode === "spotify" && state === "error";
   return (
-    <div className="fixed top-4 left-4 z-40 flex items-center gap-3 rounded-md border border-neon-magenta/40 bg-panel/80 px-3 py-1 text-xs text-neon-magenta backdrop-blur">
-      <span>{errored ? "Spotify auth failed — demo mode" : "Spotify not connected — demo mode"}</span>
-      <button
-        onClick={connect}
-        className="rounded border border-neon-green/50 px-2 py-0.5 text-neon-green transition hover:bg-neon-green/10"
-      >
-        Connect Spotify
-      </button>
+    <div className="fixed top-4 left-4 z-40 rounded-md border border-neon-magenta/40 bg-panel/80 px-3 py-1 text-xs text-neon-magenta backdrop-blur">
+      {errored ? "Spotify auth failed — demo mode" : "Demo mode — connect Spotify from Admin"}
     </div>
   );
 }

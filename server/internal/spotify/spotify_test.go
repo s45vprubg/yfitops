@@ -23,7 +23,7 @@ func testConfig() *config.Config {
 	return &config.Config{
 		SpotifyClientID:     "test-client-id",
 		SpotifyClientSecret: "test-client-secret",
-		SpotifyRedirectURI:  "http://localhost:8080/auth/spotify/callback",
+		SpotifyRedirectURI:  "http://127.0.0.1:8080/auth/spotify/callback",
 	}
 }
 
@@ -59,7 +59,7 @@ func TestAuthURL(t *testing.T) {
 	if q.Get("response_type") != "code" {
 		t.Errorf("response_type = %q", q.Get("response_type"))
 	}
-	if q.Get("redirect_uri") != "http://localhost:8080/auth/spotify/callback" {
+	if q.Get("redirect_uri") != "http://127.0.0.1:8080/auth/spotify/callback" {
 		t.Errorf("redirect_uri = %q", q.Get("redirect_uri"))
 	}
 	if q.Get("state") != "xyz-state" {

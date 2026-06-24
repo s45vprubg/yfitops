@@ -78,5 +78,6 @@ export function hasSpotifyToken(): boolean {
   return captureSpotifyToken() !== null;
 }
 
+export { SpotifyAudioPlayer } from "./spotify";
 export type { AudioPlayer } from "./types";
 export type { PlayerState, ConnectState, AudioMode } from "./types";

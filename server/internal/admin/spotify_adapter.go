@@ -1,0 +1,48 @@
+package admin
+
+import (
+	"context"
+
+	"github.com/s45vprubg/yfitops/server/internal/spotify"
+)
+
+// SpotifyAdapter wraps *spotify.Client to satisfy the SpotifySearcher interface.
+type SpotifyAdapter struct {
+	Client *spotify.Client
+}
+
+func (a *SpotifyAdapter) Search(ctx context.Context, query string, limit int) ([]SpotifyResult, error) {
+	results, err := a.Client.Search(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SpotifyResult, len(results))
+	for i, r := range results {
+		out[i] = SpotifyResult{
+			URI:        r.URI,
+			Artist:     r.Artist,
+			Song:       r.Song,
+			AlbumArt:   r.AlbumArt,
+			DurationMs: r.DurationMs,
+		}
+	}
+	return out, nil
+}
+
+func (a *SpotifyAdapter) GetPlaylistTracks(ctx context.Context, playlistID string) ([]SpotifyResult, error) {
+	results, err := a.Client.GetPlaylistTracks(ctx, playlistID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SpotifyResult, len(results))
+	for i, r := range results {
+		out[i] = SpotifyResult{
+			URI:        r.URI,
+			Artist:     r.Artist,
+			Song:       r.Song,
+			AlbumArt:   r.AlbumArt,
+			DurationMs: r.DurationMs,
+		}
+	}
+	return out, nil
+}

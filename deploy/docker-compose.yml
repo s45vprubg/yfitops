@@ -59,7 +59,7 @@ services:
       YFI_JOIN_SECRET: ${YFI_JOIN_SECRET:-dev-join-secret}
       SPOTIFY_CLIENT_ID: ${SPOTIFY_CLIENT_ID:-}
       SPOTIFY_CLIENT_SECRET: ${SPOTIFY_CLIENT_SECRET:-}
-      SPOTIFY_REDIRECT_URI: ${SPOTIFY_REDIRECT_URI:-http://localhost:8777/auth/spotify/callback}
+      SPOTIFY_REDIRECT_URI: ${SPOTIFY_REDIRECT_URI:-http://127.0.0.1:8777/auth/spotify/callback}
       YFI_LRCLIB_URL: ${YFI_LRCLIB_URL:-https://lrclib.net}
       YFI_SKIP_THRESHOLD: ${YFI_SKIP_THRESHOLD:-50}
       YFI_SESSION_ID: ${YFI_SESSION_ID:-session}

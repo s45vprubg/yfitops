@@ -54,7 +54,8 @@ export type ServerMsgType =
   | "board"
   | "audio"
   | "telemetry"
-  | "adminView";
+  | "adminView"
+  | "spotifyToken";
 
 export interface ClientEnvelope<D = unknown> {
   t: ClientMsgType;

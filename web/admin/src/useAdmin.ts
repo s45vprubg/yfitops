@@ -29,6 +29,7 @@ export interface AdminState {
   error?: string;
   connected: boolean;
   playerID?: string;
+  adminSecret?: string;
   gameState?: GameState;
   board?: BoardData;
   adminView?: AdminViewData;
@@ -51,6 +52,8 @@ export interface AdminActions {
   endGame: () => void;
 }
 
+const STORAGE_KEY = "yfitops_admin_secret";
+
 const initial: AdminState = {
   status: "idle",
   connected: false,
@@ -60,6 +63,8 @@ const initial: AdminState = {
 export function useAdmin(): [AdminState, AdminActions] {
   const [state, setState] = useState<AdminState>(initial);
   const clientRef = useRef<GameClient | null>(null);
+  const secretRef = useRef<string>("");
+  const autoLoginDone = useRef(false);
   const patch = useCallback((p: Partial<AdminState>) => {
     setState((s) => ({ ...s, ...p }));
   }, []);
@@ -76,7 +81,8 @@ export function useAdmin(): [AdminState, AdminActions] {
     (client: GameClient) => {
       client.on("welcome", (env: ServerEnvelope) => {
         const d = env.d as WelcomeData;
-        patch({ status: "authed", playerID: d.playerID, error: undefined });
+        try { localStorage.setItem(STORAGE_KEY, secretRef.current); } catch {}
+        patch({ status: "authed", playerID: d.playerID, error: undefined, adminSecret: secretRef.current });
       });
       client.on("error", (env: ServerEnvelope) => {
         const d = env.d as ErrorData;
@@ -129,6 +135,7 @@ export function useAdmin(): [AdminState, AdminActions] {
     async (secret: string) => {
       // Replace any prior connection.
       await clientRef.current?.close().catch(() => {});
+      secretRef.current = secret;
       patch({ status: "connecting", error: undefined });
 
       const certHashes = await fetchCertHash();
@@ -169,8 +176,18 @@ export function useAdmin(): [AdminState, AdminActions] {
   const logout = useCallback(() => {
     clientRef.current?.close().catch(() => {});
     clientRef.current = null;
+    try { localStorage.removeItem(STORAGE_KEY); } catch {}
     setState(initial);
   }, []);
+
+  useEffect(() => {
+    if (autoLoginDone.current) return;
+    autoLoginDone.current = true;
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) login(saved);
+    } catch {}
+  }, [login]);
 
   // Generic typed sender. GameClient stamps the latest nonce automatically.
   const sendAction = useCallback(<D>(t: ClientMsgType, d?: D) => {

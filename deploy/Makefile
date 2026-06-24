@@ -33,6 +33,8 @@ config:
 migrate:
 	$(COMPOSE) -f $(COMPOSE_FILE) exec -T postgres \
 		psql -v ON_ERROR_STOP=1 -U yfitops -d yfitops < migrations/0001_init.sql
+	$(COMPOSE) -f $(COMPOSE_FILE) exec -T postgres \
+		psql -v ON_ERROR_STOP=1 -U yfitops -d yfitops < migrations/0002_boards.sql
 
 test:
 	cd $(SERVER_DIR) && go test ./...

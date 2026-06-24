@@ -1,4 +1,4 @@
-// Resolves the backend endpoints. Defaults target a localhost dev backend;
+// Resolves the backend endpoints. Defaults target a 127.0.0.1 dev backend;
 // override with VITE_WT_URL / VITE_HTTP_URL at build/dev time.
 //
 // If the env vars are absent we derive from the current page host so the PWA
@@ -9,7 +9,7 @@ function deriveHost(): string {
   if (typeof window !== "undefined" && window.location?.hostname) {
     return window.location.hostname;
   }
-  return "localhost";
+  return "127.0.0.1";
 }
 
 const host = deriveHost();

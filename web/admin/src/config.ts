@@ -4,7 +4,7 @@
 //
 // Defaults assume the backend runs on the same host the dashboard is served from.
 
-const host = typeof location !== "undefined" ? location.hostname || "localhost" : "localhost";
+const host = typeof location !== "undefined" ? location.hostname || "127.0.0.1" : "127.0.0.1";
 
 export const WT_URL = import.meta.env.VITE_WT_URL ?? `https://${host}:4433/wt`;
 export const HTTP_URL = import.meta.env.VITE_HTTP_URL ?? `http://${host}:8777`;

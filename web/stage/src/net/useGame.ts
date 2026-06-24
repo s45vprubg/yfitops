@@ -27,9 +27,9 @@ import type {
   TrackStartData,
   WelcomeData,
 } from "@shared/protocol";
-import { WT_URL } from "../config";
+import { WT_URL, STAGE_SECRET } from "../config";
 import { fetchCertHashes } from "./certHash";
-import { createAudioPlayer, type AudioPlayer, type ConnectState } from "../audio";
+import { createAudioPlayer, SpotifyAudioPlayer, type AudioPlayer, type ConnectState } from "../audio";
 
 export interface TimerAnchor {
   // Row drives the decay ceiling/multiplier in scoring.currentPoints.
@@ -158,6 +158,30 @@ export function useGame() {
         else if (a.action === "resume") void audio.resume();
       });
 
+      // ---- spotifyToken: backend pushes token after admin completes OAuth ----
+      client.on("spotifyToken", (e: ServerEnvelope) => {
+        const { token } = e.d as { token: string };
+        if (!token) return;
+        // Replace the current audio player with a Spotify-backed one.
+        audioRef.current?.destroy();
+        const spotify = new SpotifyAudioPlayer(() => token);
+        audioRef.current = spotify;
+        patch({ audioMode: "spotify", spotifyConnectState: "connecting" });
+        spotify.onReady((deviceId) => {
+          patch({ spotifyConnectState: "ready" });
+          void client.send({ t: "stage.deviceReady", d: { spotifyDeviceID: deviceId } });
+        });
+        spotify.onStateChange((s) => {
+          void client.send({
+            t: "stage.playerState",
+            d: { positionMs: Math.round(s.positionMs), paused: s.paused, trackEnded: s.trackEnded },
+          });
+        });
+        void spotify.connect().then(() => {
+          if (!disposed) patch({ spotifyConnectState: spotify.getConnectState() });
+        });
+      });
+
       // ---- audio: local player -> backend reports ----
       audio.onReady((deviceId) => {
         patch({ spotifyConnectState: audio.getConnectState() });
@@ -177,10 +201,10 @@ export function useGame() {
         if (!disposed) patch({ spotifyConnectState: audio.getConnectState() });
       }
 
-      // Send hello as the stage role.
+      // Send hello as the stage role (gated by the same secret as admin).
       try {
         await client.connect();
-        await client.send({ t: "hello", d: { role: "stage" } });
+        await client.send({ t: "hello", d: { role: "stage", adminSecret: STAGE_SECRET } });
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn("[stage] connect failed (running offline/demo):", err);
