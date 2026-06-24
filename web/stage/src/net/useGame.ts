@@ -1,0 +1,199 @@
+// useGame — the brain of the stage. Connects a GameClient as role "stage"
+// (the TRUSTED client, §4A), subscribes to every server message the stage cares
+// about, and exposes a consolidated, render-ready view of the game.
+//
+// It also owns the audio layer wiring (§6, §9):
+//   - reports CMsgStageDeviceReady once the Spotify device registers
+//   - applies SMsgAudio play/pause/resume to the local player (the ~20ms buzz path)
+//   - reports CMsgStagePlayerState back on every player_state_changed
+//
+// Crucially it tracks the *clock skew* between the server's epoch (startTime in
+// trackStart) and the local clock, so the deterministic point timer in the UI
+// can compute elapsed = serverNow - startTime accurately. We approximate
+// serverNow with Date.now(); the design accepts minor skew because the visual
+// timer freezes on buzz to mask any discrepancy (§5).
+
+import { useEffect, useRef, useState } from "react";
+import { GameClient } from "@shared/client";
+import type {
+  AudioData,
+  BoardData,
+  GameState,
+  LyricsData,
+  RevealData,
+  ScoreboardData,
+  ServerEnvelope,
+  StateData,
+  TrackStartData,
+  WelcomeData,
+} from "@shared/protocol";
+import { WT_URL } from "../config";
+import { fetchCertHashes } from "./certHash";
+import { createAudioPlayer, type AudioPlayer, type ConnectState } from "../audio";
+
+export interface TimerAnchor {
+  // Row drives the decay ceiling/multiplier in scoring.currentPoints.
+  row: number;
+  maxPoints: number;
+  basePoints: number;
+  startTime: number; // server epoch ms
+  // True while a buzz has frozen the timer (§5 latency masking).
+  frozen: boolean;
+}
+
+export interface GameView {
+  connected: boolean;
+  state: GameState;
+  board: BoardData | null;
+  scoreboard: ScoreboardData | null;
+  trackStart: TrackStartData | null;
+  reveal: RevealData | null;
+  lyrics: LyricsData | null;
+  lockoutHandle: string | null;
+  timer: TimerAnchor | null;
+  audioMode: AudioPlayer["mode"];
+  spotifyConnectState: ConnectState;
+}
+
+// Infer the board row for a given selection so the timer uses the right
+// multiplier. trackStart carries maxPoints which encodes the row, but we map
+// maxPoints -> row to feed scoring.currentPoints (which keys off row).
+function rowFromMaxPoints(maxPoints: number): number {
+  // maxPointsForRow: 100,125,150,175,200 for rows 1..5.
+  const table = [100, 125, 150, 175, 200];
+  const idx = table.indexOf(maxPoints);
+  return idx >= 0 ? idx + 1 : 1;
+}
+
+export function useGame() {
+  const [view, setView] = useState<GameView>({
+    connected: false,
+    state: "LOBBY",
+    board: null,
+    scoreboard: null,
+    trackStart: null,
+    reveal: null,
+    lyrics: null,
+    lockoutHandle: null,
+    timer: null,
+    audioMode: "demo",
+    spotifyConnectState: "idle",
+  });
+
+  const clientRef = useRef<GameClient | null>(null);
+  const audioRef = useRef<AudioPlayer | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    const audio = createAudioPlayer();
+    audioRef.current = audio;
+
+    const patch = (p: Partial<GameView>) => setView((v) => ({ ...v, ...p }));
+    patch({ audioMode: audio.mode, spotifyConnectState: audio.getConnectState() });
+
+    (async () => {
+      const serverCertHashes = await fetchCertHashes();
+      if (disposed) return;
+
+      const client = new GameClient({
+        url: WT_URL,
+        serverCertHashes,
+        onState: (connected) => patch({ connected }),
+      });
+      clientRef.current = client;
+
+      // ---- server -> stage subscriptions ----
+      client.on("welcome", (e: ServerEnvelope) => {
+        const _d = e.d as WelcomeData; // role/playerID/nonce; nonce tracked by client
+        void _d;
+      });
+
+      client.on("state", (e: ServerEnvelope) => {
+        const next = (e.d as StateData).state;
+        setView((v) => {
+          const out: Partial<GameView> = { state: next };
+          // On a buzz the round freezes the visual timer instantly (§5).
+          if (next === "LOCKED_OUT" && v.timer) {
+            out.timer = { ...v.timer, frozen: true };
+          }
+          // Leaving the active loop clears stale per-round data.
+          if (next === "BOARD" || next === "LOBBY") {
+            out.reveal = null;
+            out.lyrics = null;
+            out.lockoutHandle = null;
+            out.trackStart = null;
+            out.timer = null;
+          }
+          return { ...v, ...out };
+        });
+      });
+
+      client.on("board", (e: ServerEnvelope) => patch({ board: e.d as BoardData }));
+      client.on("scoreboard", (e: ServerEnvelope) => patch({ scoreboard: e.d as ScoreboardData }));
+
+      client.on("trackStart", (e: ServerEnvelope) => {
+        const ts = e.d as TrackStartData;
+        const row = rowFromMaxPoints(ts.maxPoints);
+        patch({
+          trackStart: ts,
+          // A new trackStart (initial or post-partial recalibration) re-anchors
+          // the timer and un-freezes it (§5).
+          timer: { row, maxPoints: ts.maxPoints, basePoints: ts.basePoints, startTime: ts.startTime, frozen: false },
+          lockoutHandle: null,
+        });
+      });
+
+      client.on("reveal", (e: ServerEnvelope) => patch({ reveal: e.d as RevealData }));
+      client.on("lyrics", (e: ServerEnvelope) => patch({ lyrics: e.d as LyricsData }));
+      client.on("lockout", (e: ServerEnvelope) => {
+        const handle = (e.d as { byHandle: string }).byHandle;
+        setView((v) => ({ ...v, lockoutHandle: handle, timer: v.timer ? { ...v.timer, frozen: true } : v.timer }));
+      });
+
+      // ---- audio: backend commands -> local player (§9) ----
+      client.on("audio", (e: ServerEnvelope) => {
+        const a = e.d as AudioData;
+        if (a.action === "play") void audio.play(a.trackURI, a.positionMs);
+        else if (a.action === "pause") void audio.pause();
+        else if (a.action === "resume") void audio.resume();
+      });
+
+      // ---- audio: local player -> backend reports ----
+      audio.onReady((deviceId) => {
+        patch({ spotifyConnectState: audio.getConnectState() });
+        void client.send({ t: "stage.deviceReady", d: { spotifyDeviceID: deviceId } });
+      });
+      audio.onStateChange((s) => {
+        void client.send({
+          t: "stage.playerState",
+          d: { positionMs: Math.round(s.positionMs), paused: s.paused, trackEnded: s.trackEnded },
+        });
+      });
+
+      // If we have a Spotify token, kick off the SDK connect now.
+      if (audio.mode === "spotify") {
+        patch({ spotifyConnectState: "connecting" });
+        await audio.connect();
+        if (!disposed) patch({ spotifyConnectState: audio.getConnectState() });
+      }
+
+      // Send hello as the stage role.
+      try {
+        await client.connect();
+        await client.send({ t: "hello", d: { role: "stage" } });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn("[stage] connect failed (running offline/demo):", err);
+        patch({ connected: false });
+      }
+    })();
+
+    return () => {
+      disposed = true;
+      audioRef.current?.destroy();
+      void clientRef.current?.close();
+    };
+  }, []);
+
+  return { view, audio: audioRef };
+}

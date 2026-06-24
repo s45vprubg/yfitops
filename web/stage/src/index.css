@@ -1,0 +1,67 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: radial-gradient(circle at 50% 30%, #0a1020 0%, #04060a 70%);
+  color: #d7ffe9;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  overflow: hidden; /* projected fullscreen — never scroll */
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Faint CRT scanline overlay for the venue projection vibe. */
+.crt-overlay::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0) 0px,
+    rgba(0, 0, 0, 0) 2px,
+    rgba(0, 0, 0, 0.14) 3px,
+    rgba(0, 0, 0, 0.14) 4px
+  );
+  mix-blend-mode: multiply;
+  z-index: 50;
+}
+
+.neon-text {
+  text-shadow:
+    0 0 12px rgba(53, 255, 148, 0.6),
+    0 0 32px rgba(53, 255, 148, 0.3);
+}
+
+.neon-cyan {
+  text-shadow:
+    0 0 12px rgba(34, 211, 238, 0.6),
+    0 0 32px rgba(34, 211, 238, 0.3);
+}
+
+/* Horizontal marquee for the lobby username ticker. */
+@keyframes marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+/* Monospace tabular digits so the ticking timer doesn't reflow. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}

@@ -1,0 +1,198 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { GameClient } from "@shared/client";
+import type {
+  GameState,
+  HelloData,
+  HeartbeatData,
+  RateData,
+  ServerEnvelope,
+  StateData,
+  LockoutData,
+  BuzzResultData,
+  VoteStateData,
+  WelcomeData,
+  ErrorData,
+} from "@shared/protocol";
+import { WT_URL } from "./env";
+import { fetchCertHashes } from "./cert";
+import { getDeviceFP, saveHandle } from "./fingerprint";
+
+// Connection lifecycle, separate from game state so the UI can show a
+// reconnecting banner without losing the last-known screen.
+export type ConnStatus = "idle" | "connecting" | "connected" | "disconnected";
+
+// All state below is derived PURELY from server flags + sanitized payloads.
+// There is deliberately NO track title / artist / lyrics anywhere (§4A).
+export interface GameView {
+  conn: ConnStatus;
+  joined: boolean;
+  state: GameState;
+  // Who is currently guessing (from lockout payload), if any.
+  lockedBy: string | null;
+  // This device's own buzz was rejected (lost the race or guessed wrong).
+  buzzedAndLost: boolean;
+  // Vote progress during KARAOKE.
+  vote: VoteStateData | null;
+  // Most recent server error message (e.g. bad nonce, kicked).
+  error: string | null;
+  rttMs: number | null;
+}
+
+const HEARTBEAT_MS = 2000;
+
+const INITIAL: GameView = {
+  conn: "idle",
+  joined: false,
+  state: "LOBBY",
+  lockedBy: null,
+  buzzedAndLost: false,
+  vote: null,
+  error: null,
+  rttMs: null,
+};
+
+export function useGame() {
+  const [view, setView] = useState<GameView>(INITIAL);
+  const clientRef = useRef<GameClient | null>(null);
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Maps the clientTime we stamped to compute RTT when the echo returns.
+  const pendingPing = useRef<number | null>(null);
+
+  const patch = useCallback((p: Partial<GameView>) => {
+    setView((v) => ({ ...v, ...p }));
+  }, []);
+
+  const sendHeartbeat = useCallback(() => {
+    const c = clientRef.current;
+    if (!c) return;
+    const clientTime = Date.now();
+    pendingPing.current = clientTime;
+    void c.send<HeartbeatData>({ t: "heartbeat", d: { clientTime } });
+  }, []);
+
+  const wireHandlers = useCallback(
+    (c: GameClient) => {
+      c.on("welcome", (env: ServerEnvelope) => {
+        const d = env.d as WelcomeData | undefined;
+        if (d) patch({ joined: true, error: null });
+      });
+
+      c.on("state", (env: ServerEnvelope) => {
+        const d = env.d as StateData | undefined;
+        if (!d) return;
+        // On entering a fresh round, clear the per-track lost/lock flags.
+        // The nonce bump (handled by GameClient) plus this reset keeps the
+        // buzzer honest across transitions (§4D).
+        setView((v) => {
+          const next: Partial<GameView> = { state: d.state };
+          if (d.state === "ROUND_ACTIVE") {
+            next.buzzedAndLost = false;
+            next.lockedBy = null;
+          }
+          if (d.state !== "LOCKED_OUT") {
+            next.lockedBy = d.state === "ROUND_ACTIVE" ? null : v.lockedBy;
+          }
+          // Leaving karaoke clears stale vote progress.
+          if (d.state !== "KARAOKE") next.vote = null;
+          return { ...v, ...next };
+        });
+      });
+
+      c.on("lockout", (env: ServerEnvelope) => {
+        const d = env.d as LockoutData | undefined;
+        patch({ lockedBy: d?.byHandle ?? "another player" });
+      });
+
+      c.on("buzzResult", (env: ServerEnvelope) => {
+        const d = env.d as BuzzResultData | undefined;
+        // won:false => we lost the atomic race or are otherwise locked out.
+        if (d && !d.won) patch({ buzzedAndLost: true });
+      });
+
+      c.on("voteState", (env: ServerEnvelope) => {
+        const d = env.d as VoteStateData | undefined;
+        if (d) patch({ vote: d });
+      });
+
+      c.on("heartbeat", () => {
+        if (pendingPing.current != null) {
+          patch({ rttMs: Date.now() - pendingPing.current });
+          pendingPing.current = null;
+        }
+      });
+
+      c.on("error", (env: ServerEnvelope) => {
+        const d = env.d as ErrorData | undefined;
+        patch({ error: d?.message ?? "Server error" });
+      });
+    },
+    [patch],
+  );
+
+  const connect = useCallback(
+    async (handle: string) => {
+      if (clientRef.current) return;
+      patch({ conn: "connecting", error: null });
+      saveHandle(handle);
+
+      const serverCertHashes = await fetchCertHashes();
+      const client = new GameClient({
+        url: WT_URL,
+        serverCertHashes,
+        onState: (connected) =>
+          patch({ conn: connected ? "connected" : "disconnected" }),
+      });
+      clientRef.current = client;
+      wireHandlers(client);
+
+      try {
+        await client.connect();
+      } catch (e) {
+        patch({
+          conn: "disconnected",
+          error: e instanceof Error ? e.message : "Connection failed",
+        });
+        clientRef.current = null;
+        return;
+      }
+
+      await client.send<HelloData>({
+        t: "hello",
+        d: { role: "mobile", handle, deviceFP: getDeviceFP() },
+      });
+
+      sendHeartbeat();
+      heartbeatRef.current = setInterval(sendHeartbeat, HEARTBEAT_MS);
+    },
+    [patch, sendHeartbeat, wireHandlers],
+  );
+
+  const buzz = useCallback(() => {
+    const c = clientRef.current;
+    if (!c) return;
+    // Optimistically gray the button; the server's buzzResult confirms.
+    // GameClient auto-stamps the latest nonce (§4D / §4B ordering is server-side).
+    void c.send({ t: "buzz" });
+  }, []);
+
+  const vote = useCallback(() => {
+    const c = clientRef.current;
+    if (!c) return;
+    void c.send({ t: "vote" });
+  }, []);
+
+  const rate = useCallback((stars: number) => {
+    const c = clientRef.current;
+    if (!c) return;
+    void c.send<RateData>({ t: "rate", d: { stars } });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+      void clientRef.current?.close();
+    };
+  }, []);
+
+  return { view, connect, buzz, vote, rate };
+}

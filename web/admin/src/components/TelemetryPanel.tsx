@@ -1,0 +1,93 @@
+import type { TelemetryConn, TelemetryData } from "@shared/protocol";
+import type { AdminActions } from "../useAdmin";
+import { Empty, PanelHead } from "./BoardPanel";
+
+interface Props {
+  telemetry?: TelemetryData;
+  actions: AdminActions;
+}
+
+// Right column (Telemetry): live connection log with per-user RTT, score,
+// active flag, and Kick / Ban quick actions.
+export default function TelemetryPanel({ telemetry, actions }: Props) {
+  const conns = telemetry?.connections ?? [];
+  const activeCount = conns.filter((c) => c.active).length;
+
+  return (
+    <section className="flex h-full flex-col border-l border-edge bg-panel2">
+      <PanelHead title="Telemetry" hint={`${activeCount}/${conns.length} active`} />
+      <div className="flex-1 overflow-auto">
+        {conns.length === 0 ? (
+          <Empty>No connections</Empty>
+        ) : (
+          <table className="w-full border-collapse text-xs">
+            <thead className="sticky top-0 bg-panel3 text-[10px] uppercase tracking-wide text-slate-400">
+              <tr>
+                <th className="px-2 py-1.5 text-left font-semibold">Handle</th>
+                <th className="px-2 py-1.5 text-right font-semibold">RTT</th>
+                <th className="px-2 py-1.5 text-right font-semibold">Score</th>
+                <th className="px-2 py-1.5 text-right font-semibold">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {conns.map((c) => (
+                <Row key={c.id} c={c} actions={actions} />
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function rttColor(rtt: number): string {
+  if (rtt <= 0) return "text-slate-600";
+  if (rtt < 60) return "text-emerald-400";
+  if (rtt < 150) return "text-amber-400";
+  return "text-red-400";
+}
+
+function Row({ c, actions }: { c: TelemetryConn; actions: AdminActions }) {
+  return (
+    <tr className="border-b border-edge/50 hover:bg-panel3/40">
+      <td className="px-2 py-1.5">
+        <div className="flex items-center gap-1.5">
+          <span
+            className={`inline-block h-2 w-2 shrink-0 rounded-full ${c.active ? "bg-emerald-400" : "bg-slate-600"}`}
+            title={c.active ? "active" : "inactive"}
+          />
+          <span className="truncate font-medium text-slate-100" title={c.handle}>
+            {c.handle || "—"}
+          </span>
+        </div>
+      </td>
+      <td className={`px-2 py-1.5 text-right font-mono ${rttColor(c.rttMs)}`}>
+        {c.rttMs > 0 ? `${Math.round(c.rttMs)}ms` : "—"}
+      </td>
+      <td className="px-2 py-1.5 text-right font-mono text-slate-200">{c.score}</td>
+      <td className="px-2 py-1.5 text-right">
+        <div className="flex justify-end gap-1">
+          <button
+            onClick={() => actions.kick({ playerID: c.id, ban: false })}
+            className="rounded border border-edge bg-panel px-2 py-0.5 text-[10px] font-semibold uppercase text-amber-300 hover:border-amber-500"
+            title="Disconnect this player"
+          >
+            Kick
+          </button>
+          <button
+            onClick={() => {
+              if (confirm(`Ban ${c.handle}? They will not be able to rejoin.`)) {
+                actions.kick({ playerID: c.id, ban: true });
+              }
+            }}
+            className="rounded border border-red-800 bg-red-950/40 px-2 py-0.5 text-[10px] font-bold uppercase text-red-300 hover:bg-red-900/50"
+            title="Ban this player"
+          >
+            Ban
+          </button>
+        </div>
+      </td>
+    </tr>
+  );
+}
