@@ -38,6 +38,11 @@ STAGE_PORT=8778
 ADMIN_PORT=8779
 MOBILE_PORT=8780
 
+# Logs: each service writes here so a death is visible (not swallowed by
+# /dev/null). Tail any of these if something doesn't come up.
+LOG_DIR="${ROOT}/scripts/_work/logs"
+mkdir -p "${LOG_DIR}"
+
 PIDS=()
 cleanup() {
   echo ""
@@ -46,6 +51,38 @@ cleanup() {
   wait >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
+
+# Free a TCP port before we bind it. Vite runs with --strictPort (so it fails
+# fast rather than silently hopping to another port), which means a leftover
+# process from a previous run would kill the new one. Clear it first.
+free_port() {
+  local p="$1"
+  local pids
+  pids=$(lsof -ti tcp:"${p}" 2>/dev/null || true)
+  if [ -n "${pids}" ]; then
+    echo "==> port ${p} busy — clearing (pids: ${pids})"
+    echo "${pids}" | xargs kill -9 2>/dev/null || true
+    sleep 1
+  fi
+}
+
+# If a previous dev-up.sh is still running, stop it (and its children) so this
+# launch cleanly replaces it instead of colliding on ports.
+SELF_PID=$$
+PRIOR=$(pgrep -f "dev-up.sh" 2>/dev/null | grep -v "^${SELF_PID}$" || true)
+if [ -n "${PRIOR}" ]; then
+  echo "==> a previous dev-up is running (pids: ${PRIOR}) — stopping it"
+  # Kill each prior launcher's process group so its child servers die too.
+  for pid in ${PRIOR}; do
+    kill -- "-$(ps -o pgid= "${pid}" 2>/dev/null | tr -d ' ')" 2>/dev/null || kill "${pid}" 2>/dev/null || true
+  done
+  sleep 1
+fi
+
+echo "==> pre-clearing ports"
+for p in "${HTTP_PORT}" "${WT_PORT}" "${STAGE_PORT}" "${ADMIN_PORT}" "${MOBILE_PORT}"; do
+  free_port "${p}"
+done
 
 # Endpoints the browser clients use (passed as Vite env).
 export VITE_WT_URL="https://${HOST}:${WT_PORT}/wt"
@@ -66,7 +103,7 @@ YFI_KEY_FILE="${ROOT}/certs/key.pem" \
 SPOTIFY_CLIENT_ID="${SPOTIFY_CLIENT_ID:-}" \
 SPOTIFY_CLIENT_SECRET="${SPOTIFY_CLIENT_SECRET:-}" \
 SPOTIFY_REDIRECT_URI="${SPOTIFY_REDIRECT_URI:-http://${HOST}:${HTTP_PORT}/auth/spotify/callback}" \
-  go run ./cmd/gameserver &
+  go run ./cmd/gameserver > "${LOG_DIR}/backend.log" 2>&1 &
 PIDS+=($!)
 
 # Wait for the backend HTTP health endpoint.
@@ -89,8 +126,8 @@ start_web() {
     echo "ERROR: npm install failed for web/${app}" >&2
     exit 1
   fi
-  echo "==> starting web/${app} on :${port}"
-  (cd "${dir}" && npm run dev -- --port "${port}" --strictPort >/dev/null 2>&1) &
+  echo "==> starting web/${app} on :${port} (log: ${LOG_DIR}/${app}.log)"
+  (cd "${dir}" && npm run dev -- --port "${port}" --strictPort > "${LOG_DIR}/${app}.log" 2>&1) &
   PIDS+=($!)
 }
 
@@ -98,7 +135,24 @@ start_web stage  "${STAGE_PORT}"
 start_web admin  "${ADMIN_PORT}"
 start_web mobile "${MOBILE_PORT}"
 
-sleep 2
+# Verify each frontend actually came up; report (don't silently continue) if not.
+echo "==> verifying frontends"
+for pair in "stage:${STAGE_PORT}" "admin:${ADMIN_PORT}" "mobile:${MOBILE_PORT}"; do
+  app="${pair%%:*}"; port="${pair##*:}"
+  up=0
+  for _ in $(seq 1 20); do
+    if curl -sf -o /dev/null "http://${HOST}:${port}/"; then up=1; break; fi
+    sleep 0.5
+  done
+  if [ "${up}" -eq 1 ]; then
+    echo "    web/${app} :${port} ✅"
+  else
+    echo "    web/${app} :${port} ❌ NOT responding — last log lines:"
+    tail -8 "${LOG_DIR}/${app}.log" 2>/dev/null | sed 's/^/        /'
+  fi
+done
+
+sleep 1
 cat <<EOF
 
 ============================================================
@@ -112,16 +166,34 @@ cat <<EOF
 ============================================================
 
   Try this:
-    1. Open ADMIN, log in with the password above.
-    2. Open STAGE — you'll see the board + a join QR.
+    1. Open STAGE first (leave it open) — board + join QR.
+    2. Open ADMIN, log in with the password above.
     3. Open MOBILE (or scan the QR with your phone on the
        same Wi-Fi), enter a handle, Join.
     4. In ADMIN, click a board cell -> STAGE runs the
        decryption animation + point timer, MOBILE shows GUESS.
     5. Tap GUESS on mobile -> STAGE freezes, ADMIN shows the
        buzz + correct answer -> grade Correct/Partial/Incorrect.
+EOF
 
-  No sound = expected (demo mode, no Spotify creds).
+# Spotify status: creds present is NOT the same as authenticated.
+if [ -n "${SPOTIFY_CLIENT_ID:-}" ]; then
+  cat <<EOF
+  AUDIO: Spotify creds loaded, but NOT yet authenticated. To enable sound:
+    - In ADMIN, click "Connect Spotify" and complete login.
+    - The STAGE browser must be logged into a Spotify PREMIUM account.
+    - Until then the stage uses the mock player (no audio).
+EOF
+else
+  cat <<EOF
+  AUDIO: no Spotify creds in deploy/.env — stage runs in demo mode (no sound).
+    Add SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET to enable real audio.
+EOF
+fi
+
+cat <<EOF
+
+  Logs: ${LOG_DIR}/{backend,stage,admin,mobile}.log
   Ctrl-C here stops everything.
 
 EOF

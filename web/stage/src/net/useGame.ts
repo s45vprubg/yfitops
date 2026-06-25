@@ -82,6 +82,7 @@ export function useGame() {
 
   const clientRef = useRef<GameClient | null>(null);
   const audioRef = useRef<AudioPlayer | null>(null);
+  const spotifyInitedRef = useRef(false); // guard against double-init (push + full-sync)
 
   useEffect(() => {
     let disposed = false;
@@ -158,16 +159,14 @@ export function useGame() {
         else if (a.action === "resume") void audio.resume();
       });
 
-      // ---- spotifyToken: backend pushes token after admin completes OAuth ----
-      client.on("spotifyToken", (e: ServerEnvelope) => {
-        const { token } = e.d as { token: string };
-        if (!token) return;
-        // Replace the current audio player with a Spotify-backed one. The token
-        // provider prefers a freshly-refreshed token from the backend endpoint
-        // (surviving the ~1h Spotify TTL across a long game) and falls back to
-        // the just-pushed token if that endpoint is unreachable.
+      // initSpotify swaps in a Spotify-backed player. The token provider always
+      // pulls a fresh token from the backend (/api/spotify/token, refreshed
+      // server-side), falling back to a pushed token only if that fails.
+      const initSpotify = (pushedToken: string) => {
+        if (spotifyInitedRef.current) return; // idempotent — push + full-sync may both fire
+        spotifyInitedRef.current = true;
         audioRef.current?.destroy();
-        const spotify = new SpotifyAudioPlayer(async () => (await fetchSpotifyToken()) ?? token);
+        const spotify = new SpotifyAudioPlayer(async () => (await fetchSpotifyToken()) ?? pushedToken);
         audioRef.current = spotify;
         patch({ audioMode: "spotify", spotifyConnectState: "connecting" });
         spotify.onReady((deviceId) => {
@@ -183,6 +182,15 @@ export function useGame() {
         void spotify.connect().then(() => {
           if (!disposed) patch({ spotifyConnectState: spotify.getConnectState() });
         });
+      };
+
+      // ---- spotifyToken: backend signals Spotify is authenticated. Fires both
+      // when the admin completes OAuth AND on full-sync if a stage connects
+      // afterward. The token may be empty (a "go fetch it" signal) — initSpotify
+      // pulls the real token from the endpoint regardless.
+      client.on("spotifyToken", (e: ServerEnvelope) => {
+        const { token } = (e.d as { token?: string }) ?? {};
+        initSpotify(token ?? "");
       });
 
       // ---- audio: local player -> backend reports ----

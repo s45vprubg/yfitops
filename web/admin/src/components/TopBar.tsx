@@ -30,7 +30,28 @@ export default function TopBar({
   const [volume, setVolume] = useState(100);
   const [boards, setBoards] = useState<BoardSummary[]>([]);
   const [loadingBoard, setLoadingBoard] = useState(false);
+  // Real Spotify auth state, polled from the backend token endpoint: 200 means
+  // authenticated (the server holds a usable/refreshable token), 409 means not.
+  const [spotifyConnected, setSpotifyConnected] = useState(false);
   const api = useMemo(() => createAdminApi(adminSecret), [adminSecret]);
+
+  useEffect(() => {
+    let stop = false;
+    const check = async () => {
+      try {
+        const res = await fetch(`${HTTP_URL}/api/spotify/token`, {
+          headers: { Authorization: `Bearer ${adminSecret}` },
+          cache: "no-store",
+        });
+        if (!stop) setSpotifyConnected(res.ok);
+      } catch {
+        if (!stop) setSpotifyConnected(false);
+      }
+    };
+    check();
+    const id = setInterval(check, 5000); // reflect connect/disconnect within 5s
+    return () => { stop = true; clearInterval(id); };
+  }, [adminSecret]);
 
   const refreshBoards = useCallback(async () => {
     try {
@@ -129,12 +150,21 @@ export default function TopBar({
         <span className="w-10 font-mono font-semibold text-accent">{thresh}%</span>
       </label>
 
-      <button
-        onClick={() => window.open(`${HTTP_URL}/auth/spotify`, "_blank", "noopener")}
-        className="rounded border border-edge bg-panel px-3 py-1.5 text-xs font-semibold text-green-300 hover:bg-green-950/40"
-      >
-        Connect Spotify
-      </button>
+      {spotifyConnected ? (
+        <span
+          className="rounded border border-green-700 bg-green-950/40 px-3 py-1.5 text-xs font-semibold text-green-300"
+          title="Spotify is authenticated on the backend"
+        >
+          ● Spotify connected
+        </span>
+      ) : (
+        <button
+          onClick={() => window.open(`${HTTP_URL}/auth/spotify`, "_blank", "noopener")}
+          className="rounded border border-edge bg-panel px-3 py-1.5 text-xs font-semibold text-green-300 hover:bg-green-950/40"
+        >
+          Connect Spotify
+        </button>
+      )}
       <button
         onClick={() => actions.playback("pause")}
         className="rounded border border-edge bg-panel px-3 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-950/40"

@@ -27,6 +27,7 @@ export type ConnStatus = "idle" | "connecting" | "authed" | "error" | "closed";
 export interface AdminState {
   status: ConnStatus;
   error?: string;
+  notice?: string; // transient operational message (e.g. "busy"); does NOT log out
   connected: boolean;
   playerID?: string;
   adminSecret?: string;
@@ -41,6 +42,7 @@ export interface AdminState {
 export interface AdminActions {
   login: (secret: string) => Promise<void>;
   logout: () => void;
+  clearNotice: () => void;
   select: (d: AdminSelectData) => void;
   grade: (d: AdminGradeData) => void;
   playback: (action: AdminPlaybackData["action"]) => void;
@@ -86,11 +88,16 @@ export function useAdmin(): [AdminState, AdminActions] {
       });
       client.on("error", (env: ServerEnvelope) => {
         const d = env.d as ErrorData;
-        // A forbidden error during auth means the secret was rejected.
-        patch({
-          status: "error",
-          error: `${d.code}: ${d.message}`,
-        });
+        // Only auth failures should de-authenticate (bounce to the login
+        // screen). Operational errors — e.g. "busy: round in progress",
+        // "badCell" — are transient and must NOT log the admin out; surface
+        // them as a dismissable notice while keeping the session.
+        const isAuthError = d.code === "forbidden" || d.code === "banned" || d.code === "unauthorized";
+        if (isAuthError) {
+          patch({ status: "error", error: `${d.code}: ${d.message}` });
+        } else {
+          patch({ notice: `${d.code}: ${d.message}` });
+        }
       });
       client.on("state", (env: ServerEnvelope) => {
         patch({ gameState: (env.d as { state: GameState }).state });
@@ -180,6 +187,8 @@ export function useAdmin(): [AdminState, AdminActions] {
     setState(initial);
   }, []);
 
+  const clearNotice = useCallback(() => patch({ notice: undefined }), [patch]);
+
   useEffect(() => {
     if (autoLoginDone.current) return;
     autoLoginDone.current = true;
@@ -199,6 +208,7 @@ export function useAdmin(): [AdminState, AdminActions] {
   const actions: AdminActions = {
     login,
     logout,
+    clearNotice,
     select: (d) => sendAction<AdminSelectData>("admin.select", d),
     grade: (d) => sendAction<AdminGradeData>("admin.grade", d),
     playback: (action) =>

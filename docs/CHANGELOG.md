@@ -4,6 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] — 2026-06-24
 
+### Fixed — admin no longer logs out on operational errors
+- `web/admin`: only auth errors (forbidden/banned/unauthorized) de-authenticate;
+  operational errors like "busy: round in progress" now show a dismissable
+  notice toast and keep the session. Previously any error bounced the admin to
+  the login screen.
+
+### Fixed — Spotify connects even if the stage joins after OAuth
+- `server/internal/game/engine.go`: the engine remembers Spotify is
+  authenticated (`spotifyAuthed`) and re-signals a stage that connects later via
+  full-sync, so the stage initializes the SDK and fetches the live token. Fixes
+  the case where the token broadcast hit no listening stage.
+- `web/stage`: spotifyToken handler accepts an empty-token "go fetch it" signal
+  and is idempotent (push + full-sync can't double-init).
+
+### Changed — clearer status surfaces
+- `web/admin` TopBar: polls `/api/spotify/token` and shows "● Spotify connected"
+  vs "Connect Spotify" instead of a static button.
+- `web/stage`: audio badge moved top-right, restyled as a "LIVE / tunes" label.
+
+### Changed — launcher robustness + honest messaging
+- `scripts/dev-up.sh`: kills any prior dev-up run, pre-clears all ports (so a
+  leftover process can't silently kill a new server via --strictPort), logs each
+  service to scripts/_work/logs/, verifies each frontend with ✅/❌, and prints
+  accurate Spotify status (creds-loaded ≠ authenticated) instead of a hardcoded
+  "demo mode" line.
+
 ### Added — Preflight gate
 - `scripts/preflight.sh`: the "are we actually runnable?" check — Go
   build/vet/test plus a CLEAN reinstall + production build of every frontend.

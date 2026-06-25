@@ -75,6 +75,19 @@ export default function App() {
             <TelemetryPanel telemetry={state.telemetry} actions={actions} />
           </main>
 
+          {/* Transient operational notice (e.g. "busy: round in progress").
+              Does NOT log the admin out — just informs and can be dismissed. */}
+          {state.notice && (
+            <div className="pointer-events-none fixed inset-x-0 bottom-0 flex justify-center p-3">
+              <div className="pointer-events-auto rounded border border-amber-700 bg-amber-950/85 px-4 py-2 text-sm text-amber-100 shadow-xl">
+                {state.notice}
+                <button onClick={actions.clearNotice} className="ml-3 underline">
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          )}
+
           {!state.connected && (
             <div className="pointer-events-none fixed inset-x-0 bottom-0 flex justify-center p-3">
               <div className="pointer-events-auto rounded border border-red-800 bg-red-950/80 px-4 py-2 text-sm text-red-200 shadow-xl">

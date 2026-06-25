@@ -89,6 +89,11 @@ type Engine struct {
 	// daily double (§7)
 	ratingPool map[string]bool
 	ratings    map[string]int // playerID -> stars
+
+	// spotifyAuthed records that the admin completed Spotify OAuth, so a stage
+	// that connects AFTER the OAuth dance still learns to initialize the Web
+	// Playback SDK (it then fetches the live token from /api/spotify/token).
+	spotifyAuthed bool
 }
 
 // NewEngine wires the engine to its dependencies (all injected for testing).
@@ -200,6 +205,7 @@ const smsgSpotifyToken protocol.ServerMsgType = "spotifyToken"
 // they can initialize the Web Playback SDK without being in the OAuth loop.
 func (e *Engine) PushSpotifyToken(token string) {
 	e.submit(func() {
+		e.spotifyAuthed = true // remember so a stage connecting LATER also learns
 		e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgSpotifyToken, map[string]string{"token": token}))
 	})
 }
@@ -391,6 +397,13 @@ func (e *Engine) sendFullSync(connID string, role protocol.Role) {
 		if e.curTrack != nil {
 			e.bcast.SendTo(connID, e.trackStartEnvelope())
 		}
+	}
+	// If Spotify OAuth already happened, tell a freshly-connected stage to
+	// initialize the Web Playback SDK. We send an empty-token signal: the stage
+	// fetches the actual (live, refreshed) token from /api/spotify/token. This
+	// fixes the case where the stage connects AFTER the admin clicked Connect.
+	if role == protocol.RoleStage && e.spotifyAuthed {
+		e.bcast.SendTo(connID, e.envelope(smsgSpotifyToken, map[string]string{"token": ""}))
 	}
 }
 
