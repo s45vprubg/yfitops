@@ -54,9 +54,10 @@ const (
 	apiBase      = "https://api.spotify.com/v1"
 )
 
-// scopes match the legacy core exactly (server.js:1207): read playback state,
-// modify playback state, and read currently-playing.
 var scopes = []string{
+	"streaming",
+	"user-read-email",
+	"user-read-private",
 	"user-read-playback-state",
 	"user-modify-playback-state",
 	"user-read-currently-playing",
@@ -131,6 +132,7 @@ func (c *Client) AuthURL(state string) string {
 	q.Set("redirect_uri", c.redirectURI)
 	q.Set("scope", strings.Join(scopes, " "))
 	q.Set("state", state)
+	q.Set("show_dialog", "true")
 	return c.authorizeURL + "?" + q.Encode()
 }
 

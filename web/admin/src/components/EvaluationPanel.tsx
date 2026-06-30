@@ -16,6 +16,14 @@ interface Props {
 
 type Phase = "waiting" | "round" | "buzzed";
 
+const ROUND_STATES: GameState[] = [
+  "ROUND_ACTIVE",
+  "LOCKED_OUT",
+  "ADJUDICATE",
+  "KARAOKE",
+  "DAILY_DOUBLE",
+];
+
 function derivePhase(gameState?: GameState, view?: AdminViewData): Phase {
   if (gameState === "ADJUDICATE" || view?.buzzedHandle) return "buzzed";
   if (
@@ -29,7 +37,10 @@ function derivePhase(gameState?: GameState, view?: AdminViewData): Phase {
   return "waiting";
 }
 
-// Center column (Evaluation). Admin SEES the correct answer to grade.
+function isRoundActive(s?: GameState): boolean {
+  return !!s && ROUND_STATES.includes(s);
+}
+
 export default function EvaluationPanel({ gameState, adminView, players, actions }: Props) {
   const phase = derivePhase(gameState, adminView);
 
@@ -40,7 +51,7 @@ export default function EvaluationPanel({ gameState, adminView, players, actions
         <PhaseBanner phase={phase} />
         <BuzzCard view={adminView} />
         <GradeButtons actions={actions} active={phase === "buzzed"} />
-        <Overrides actions={actions} players={players} />
+        <Overrides actions={actions} players={players} roundActive={isRoundActive(gameState)} />
       </div>
     </section>
   );
@@ -78,7 +89,6 @@ function BuzzCard({ view }: { view?: AdminViewData }) {
         {handle ?? "— no buzz —"}
       </div>
 
-      {/* The correct answer, visible to admin only (TrustedReveal). */}
       <div className="grid grid-cols-2 gap-3">
         <AnswerCell label="Artist" value={view?.correctArtist} />
         <AnswerCell label="Song" value={view?.correctSong} />
@@ -91,7 +101,7 @@ function AnswerCell({ label, value }: { label: string; value?: string }) {
   return (
     <div className="rounded border border-edge bg-panel px-3 py-2">
       <div className="text-[10px] uppercase tracking-wide text-slate-500">{label}</div>
-      <div className="truncate text-sm font-semibold text-emerald-300" title={value}>
+      <div className="truncate text-lg font-semibold text-slate-200" title={value}>
         {value ?? "—"}
       </div>
     </div>
@@ -156,7 +166,7 @@ function GradeButtons({ actions, active }: { actions: AdminActions; active: bool
   );
 }
 
-function Overrides({ actions, players }: { actions: AdminActions; players: ScoreEntry[] }) {
+function Overrides({ actions, players, roundActive }: { actions: AdminActions; players: ScoreEntry[]; roundActive: boolean }) {
   const [playerID, setPlayerID] = useState("");
   const [delta, setDelta] = useState(0);
 
@@ -166,14 +176,16 @@ function Overrides({ actions, players }: { actions: AdminActions; players: Score
 
       <div className="mb-3 grid grid-cols-2 gap-2">
         <button
+          disabled={!roundActive}
           onClick={() => actions.endRound()}
-          className="rounded border border-edge bg-panel py-2 text-xs font-semibold uppercase text-slate-200 hover:border-amber-500 hover:text-amber-300"
+          className="rounded border border-edge bg-panel py-2 text-xs font-semibold uppercase text-slate-200 hover:border-amber-500 hover:text-amber-300 disabled:pointer-events-none disabled:opacity-30"
         >
           Force End Round
         </button>
         <button
+          disabled={!roundActive}
           onClick={() => actions.reveal()}
-          className="rounded border border-edge bg-panel py-2 text-xs font-semibold uppercase text-slate-200 hover:border-accent hover:text-accent"
+          className="rounded border border-edge bg-panel py-2 text-xs font-semibold uppercase text-slate-200 hover:border-accent hover:text-accent disabled:pointer-events-none disabled:opacity-30"
         >
           Reveal
         </button>

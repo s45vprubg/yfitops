@@ -9,7 +9,7 @@
 // between sparse SDK events or dropped frames (§6).
 
 import { useEffect, useRef, useState } from "react";
-import type { LyricsData, RevealData, ScoreboardData } from "@shared/protocol";
+import type { GameState, LyricsData, RevealData, ScoreboardData } from "@shared/protocol";
 import type { AudioPlayer } from "../audio";
 
 interface Props {
@@ -17,10 +17,11 @@ interface Props {
   lyrics: LyricsData | null;
   scoreboard: ScoreboardData | null;
   lockoutHandle: string | null;
+  gameState: GameState;
   audio: React.RefObject<AudioPlayer | null>;
 }
 
-export default function Karaoke({ reveal, lyrics, scoreboard, lockoutHandle, audio }: Props) {
+export default function Karaoke({ reveal, lyrics, scoreboard, lockoutHandle, gameState, audio }: Props) {
   const [activeIdx, setActiveIdx] = useState(-1);
   const containerRef = useRef<HTMLDivElement>(null);
   const lineRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -59,14 +60,17 @@ export default function Karaoke({ reveal, lyrics, scoreboard, lockoutHandle, aud
     }
   }, [activeIdx]);
 
+  const isAdjudicating = gameState === "ADJUDICATE";
   const topGuesser = lockoutHandle ?? scoreboard?.players?.[0]?.handle ?? null;
 
   return (
     <div className="flex h-full w-full flex-col">
-      {/* Winner flash */}
+      {/* Guesser/Winner banner */}
       {topGuesser && (
         <div className="flex flex-col items-center pt-8">
-          <div className="text-sm uppercase tracking-[0.5em] text-neon-amber/70">winner</div>
+          <div className="text-sm uppercase tracking-[0.5em] text-neon-amber/70">
+            {isAdjudicating ? "now guessing" : "winner"}
+          </div>
           <div className="text-5xl font-extrabold text-neon-amber neon-text animate-winnerPop">{topGuesser}</div>
         </div>
       )}

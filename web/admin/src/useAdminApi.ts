@@ -93,6 +93,7 @@ function api(secret: string) {
     // Game-time
     attachBoard: (boardId: string, sessionId: string) => req<{ status: string }>("POST", `/api/boards/${boardId}/attach`, { sessionId }),
     startGame: () => req<{ status: string }>("POST", "/api/game/start"),
+    resetGame: () => req<{ status: string }>("POST", "/api/game/reset"),
 
     // Spotify
     searchSpotify: (q: string, limit = 10) => req<SpotifyResult[]>("GET", `/api/spotify/search?q=${encodeURIComponent(q)}&limit=${limit}`),

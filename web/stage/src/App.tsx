@@ -9,11 +9,15 @@ import ActiveRound from "./views/ActiveRound";
 import Karaoke from "./views/Karaoke";
 
 export default function App() {
-  const { view, audio } = useGame();
+  const { view, audio, activateAudio } = useGame();
+
+  const needsActivation = view.spotifyConnectState === "ready" && !view.audioActivated;
 
   return (
     <div className="crt-overlay relative h-full w-full overflow-hidden">
       <ConnDot connected={view.connected} />
+
+      {needsActivation && <AudioActivationOverlay onActivate={activateAudio} />}
 
       {renderView()}
 
@@ -35,19 +39,21 @@ export default function App() {
       case "ROUND_ACTIVE":
       case "LOCKED_OUT":
       case "DAILY_DOUBLE":
+      case "ADJUDICATE":
         if (view.trackStart && view.timer) {
           return (
             <ActiveRound
               trackStart={view.trackStart}
               timer={view.timer}
               reveal={view.reveal}
+              revealedArtist={view.revealedArtist}
+              revealedSong={view.revealedSong}
               lockoutHandle={view.lockoutHandle}
             />
           );
         }
         return <Board board={view.board} />;
 
-      case "ADJUDICATE":
       case "KARAOKE":
         return (
           <Karaoke
@@ -55,6 +61,7 @@ export default function App() {
             lyrics={view.lyrics}
             scoreboard={view.scoreboard}
             lockoutHandle={view.lockoutHandle}
+            gameState={view.state}
             audio={audio}
           />
         );
@@ -78,6 +85,21 @@ function ConnDot({ connected }: { connected: boolean }) {
         ].join(" ")}
       />
       {connected ? "live" : "offline"}
+    </div>
+  );
+}
+
+function AudioActivationOverlay({ onActivate }: { onActivate: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+      <button
+        onClick={onActivate}
+        className="rounded-xl border-2 border-neon-green bg-panel px-12 py-8 text-center shadow-[0_0_30px_rgba(53,255,148,0.3)] transition hover:shadow-[0_0_60px_rgba(53,255,148,0.6)]"
+      >
+        <div className="mb-3 text-5xl">🔊</div>
+        <div className="text-2xl font-bold tracking-wide text-neon-green">Enable Audio</div>
+        <div className="mt-2 text-sm text-slate-400">Click to unlock Spotify playback</div>
+      </button>
     </div>
   );
 }

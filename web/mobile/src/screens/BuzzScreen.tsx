@@ -8,7 +8,7 @@ interface Props {
   onBuzz: () => void;
 }
 
-export function BuzzScreen({ locked, lockedBy, selfLost, judged, onBuzz }: Props) {
+export function BuzzScreen({ locked, lockedBy, judged, onBuzz }: Props) {
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
       e.preventDefault();
@@ -20,18 +20,22 @@ export function BuzzScreen({ locked, lockedBy, selfLost, judged, onBuzz }: Props
 
   if (locked) {
     let overlay: string;
+    let icon: string;
+    let themeClass: string;
     if (judged) {
-      overlay = "Incorrect — you're out this round";
-    } else if (selfLost) {
-      overlay = lockedBy ? `Locked: ${lockedBy} is guessing!` : "Locked out";
+      overlay = "Good job — sit tight for the next one";
+      icon = "⏳";
+      themeClass = "text-amber-400/80";
     } else {
-      overlay = lockedBy ? `Locked: ${lockedBy} is guessing!` : "Locked out";
+      overlay = lockedBy ? `${lockedBy} is guessing…` : "Locked out";
+      icon = "🔒";
+      themeClass = "text-danger/80";
     }
 
     return (
       <div className="flex flex-1 select-none flex-col items-center justify-center bg-locked animate-fadeIn">
-        <div className="text-6xl font-black tracking-tight text-danger/80">
-          ✕
+        <div className={`text-6xl font-black tracking-tight ${themeClass}`}>
+          {icon}
         </div>
         <div className="mt-6 px-8 text-center text-xl font-semibold text-neutral-200">
           {overlay}

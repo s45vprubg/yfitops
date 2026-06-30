@@ -1,34 +1,55 @@
 import type { ReactNode } from "react";
-import type { BoardCell, BoardData } from "@shared/protocol";
+import type { BoardCell, BoardData, GameState } from "@shared/protocol";
 
 interface Props {
   board?: BoardData;
+  gameState?: GameState;
+  spotifyConnected: boolean;
   onSelect: (row: number, col: number) => void;
 }
 
-// Left column (Queuing): interactive board miniature. Clicking a live cell
-// sends admin.select{row,col}. Exhausted cells are disabled.
-export default function BoardPanel({ board, onSelect }: Props) {
+const SELECTABLE_STATES: GameState[] = [
+  "BOARD",
+  "KARAOKE",
+  "TRANSITION",
+];
+
+function canSelectCell(gameState?: GameState, spotifyConnected?: boolean): boolean {
+  if (!gameState || !SELECTABLE_STATES.includes(gameState)) return false;
+  if (!spotifyConnected) return false;
+  return true;
+}
+
+export default function BoardPanel({ board, gameState, spotifyConnected, onSelect }: Props) {
+  const selectable = canSelectCell(gameState, spotifyConnected);
+
+  let hint = "select next cell";
+  if (!board || !board.cells?.length) {
+    hint = "no board";
+  } else if (!spotifyConnected) {
+    hint = "connect spotify first";
+  } else if (!selectable) {
+    hint = "waiting";
+  }
+
   return (
     <section className="flex h-full flex-col border-r border-edge bg-panel2">
-      <PanelHead title="Queuing" hint="select next cell" />
+      <PanelHead title="Queuing" hint={hint} />
       <div className="flex-1 overflow-auto p-3">
         {!board || !board.cells?.length ? (
           <Empty>No board loaded. Go to Board Builder → "Load into Game".</Empty>
         ) : (
-          <BoardGrid board={board} onSelect={onSelect} />
+          <BoardGrid board={board} selectable={selectable} onSelect={onSelect} />
         )}
       </div>
     </section>
   );
 }
 
-function BoardGrid({ board, onSelect }: { board: BoardData; onSelect: (r: number, c: number) => void }) {
-  // Index cells by row/col for a stable grid even if the server omits some.
+function BoardGrid({ board, selectable, onSelect }: { board: BoardData; selectable: boolean; onSelect: (r: number, c: number) => void }) {
   const byKey = new Map<string, BoardCell>();
   for (const c of board.cells ?? []) byKey.set(`${c.row},${c.col}`, c);
 
-  // Category header per column (first row's category, falling back to any).
   const categories: string[] = [];
   for (let col = 1; col <= board.cols; col++) {
     let cat = "";
@@ -61,10 +82,11 @@ function BoardGrid({ board, onSelect }: { board: BoardData; onSelect: (r: number
         Array.from({ length: board.cols }, (_, ci) => ci + 1).map((col) => {
           const cell = byKey.get(`${row},${col}`);
           const exhausted = !cell || cell.exhausted || cell.tracksLeft <= 0;
+          const disabled = exhausted || !selectable;
           return (
             <button
               key={`${row},${col}`}
-              disabled={exhausted}
+              disabled={disabled}
               onClick={() => onSelect(row, col)}
               title={
                 cell
@@ -73,7 +95,7 @@ function BoardGrid({ board, onSelect }: { board: BoardData; onSelect: (r: number
               }
               className={[
                 "flex aspect-[5/4] flex-col items-center justify-center rounded border text-center transition",
-                exhausted
+                disabled
                   ? "cursor-not-allowed border-edge/50 bg-panel/40 text-slate-700"
                   : "border-edge bg-panel text-accent hover:border-accent hover:bg-accent/10 active:scale-[0.97]",
               ].join(" ")}
@@ -82,7 +104,7 @@ function BoardGrid({ board, onSelect }: { board: BoardData; onSelect: (r: number
                 {cell ? cell.points : "—"}
               </span>
               {cell && !exhausted && (
-                <span className="mt-0.5 text-[9px] text-slate-500">
+                <span className="mt-0.5 text-base font-semibold text-slate-400">
                   ×{cell.tracksLeft}
                 </span>
               )}

@@ -13,10 +13,34 @@ interface Props {
   actions: AdminActions;
   onLogout: () => void;
   adminSecret: string;
+  spotifyConnected: boolean;
 }
 
-// Top bar: global controls (Volume best-effort, Pause/Resume, End Game) and the
-// Skip Voting Threshold slider (50%-100%).
+const ACTIVE_GAME_STATES: GameState[] = [
+  "BOARD",
+  "ROUND_ACTIVE",
+  "LOCKED_OUT",
+  "ADJUDICATE",
+  "KARAOKE",
+  "DAILY_DOUBLE",
+  "TRANSITION",
+];
+
+const PLAYING_STATES: GameState[] = [
+  "ROUND_ACTIVE",
+  "LOCKED_OUT",
+  "KARAOKE",
+  "DAILY_DOUBLE",
+];
+
+function isGameActive(s?: GameState): boolean {
+  return !!s && ACTIVE_GAME_STATES.includes(s);
+}
+
+function isPlaying(s?: GameState): boolean {
+  return !!s && PLAYING_STATES.includes(s);
+}
+
 export default function TopBar({
   status,
   connected,
@@ -25,33 +49,12 @@ export default function TopBar({
   actions,
   onLogout,
   adminSecret,
+  spotifyConnected,
 }: Props) {
   const [thresh, setThresh] = useState(50);
-  const [volume, setVolume] = useState(100);
   const [boards, setBoards] = useState<BoardSummary[]>([]);
   const [loadingBoard, setLoadingBoard] = useState(false);
-  // Real Spotify auth state, polled from the backend token endpoint: 200 means
-  // authenticated (the server holds a usable/refreshable token), 409 means not.
-  const [spotifyConnected, setSpotifyConnected] = useState(false);
   const api = useMemo(() => createAdminApi(adminSecret), [adminSecret]);
-
-  useEffect(() => {
-    let stop = false;
-    const check = async () => {
-      try {
-        const res = await fetch(`${HTTP_URL}/api/spotify/token`, {
-          headers: { Authorization: `Bearer ${adminSecret}` },
-          cache: "no-store",
-        });
-        if (!stop) setSpotifyConnected(res.ok);
-      } catch {
-        if (!stop) setSpotifyConnected(false);
-      }
-    };
-    check();
-    const id = setInterval(check, 5000); // reflect connect/disconnect within 5s
-    return () => { stop = true; clearInterval(id); };
-  }, [adminSecret]);
 
   const refreshBoards = useCallback(async () => {
     try {
@@ -77,13 +80,21 @@ export default function TopBar({
     } catch { /* state broadcast will update UI */ }
   };
 
-  // The slider is uncontrolled by the server (the server is authoritative for
-  // the effective threshold, but it does not echo a threshold payload back in
-  // the contract). Debounce sends on change.
+  const handleResetGame = async () => {
+    try {
+      await api.resetGame();
+    } catch { /* state broadcast will update UI */ }
+  };
+
   useEffect(() => {
     const id = setTimeout(() => actions.setThresh(thresh), 120);
     return () => clearTimeout(id);
   }, [thresh, actions]);
+
+  const gameActive = isGameActive(gameState);
+  const trackPlaying = isPlaying(gameState);
+  const canPause = trackPlaying && spotifyConnected;
+  const canResume = gameActive && !trackPlaying && spotifyConnected;
 
   return (
     <header className="flex items-center gap-4 border-b border-edge bg-panel2 px-4 py-2.5">
@@ -98,58 +109,36 @@ export default function TopBar({
 
       <div className="flex items-center gap-1">
         <select
-          disabled={loadingBoard || boards.length === 0}
+          disabled={loadingBoard || boards.length === 0 || gameActive}
           onChange={(e) => handleLoadBoard(e.target.value)}
           defaultValue=""
-          className="rounded border border-edge bg-panel px-2 py-1 text-xs text-slate-200 outline-none focus:border-accent"
+          className="rounded border border-edge bg-panel px-2 py-1 text-xs text-slate-200 outline-none focus:border-accent disabled:opacity-40"
         >
           <option value="" disabled>Load board…</option>
           {boards.map((b) => (
             <option key={b.id} value={b.id}>{b.name}</option>
           ))}
         </select>
-        {gameState === "LOBBY" && (
-          <button
-            onClick={handleStartGame}
-            className="rounded border border-green-600 bg-green-950/50 px-3 py-1 text-xs font-bold uppercase text-green-300 hover:bg-green-900/60"
-          >
-            Start Game
-          </button>
-        )}
       </div>
 
       <div className="flex-1" />
 
-      {/* Volume — best-effort / optional. No protocol message exists for it, so
-          this is a local UI affordance only and is purely cosmetic. */}
-      <label className="flex items-center gap-2 text-xs text-slate-400">
-        <span className="uppercase tracking-wide">Vol</span>
-        <input
-          type="range"
-          min={0}
-          max={100}
-          value={volume}
-          onChange={(e) => setVolume(Number(e.target.value))}
-          className="w-24 accent-slate-400"
-          title="Best-effort volume (UI only — no backend channel in protocol)"
-        />
-        <span className="w-8 font-mono text-slate-500">{volume}</span>
-      </label>
-
-      {/* Skip Voting Threshold slider 50%–100%. */}
-      <label className="flex items-center gap-2 text-xs text-slate-300">
+      {/* Skip Voting Threshold slider 50%–100%. Only useful during a game. */}
+      <label className={`flex items-center gap-2 text-xs ${gameActive ? "text-slate-300" : "text-slate-600"}`}>
         <span className="uppercase tracking-wide">Skip thresh</span>
         <input
           type="range"
           min={0}
           max={100}
           value={thresh}
+          disabled={!gameActive}
           onChange={(e) => setThresh(Number(e.target.value))}
-          className="w-32 accent-accent"
+          className="w-32 accent-accent disabled:opacity-40"
         />
         <span className="w-10 font-mono font-semibold text-accent">{thresh}%</span>
       </label>
 
+      {/* Spotify status */}
       {spotifyConnected ? (
         <span
           className="rounded border border-green-700 bg-green-950/40 px-3 py-1.5 text-xs font-semibold text-green-300"
@@ -165,28 +154,60 @@ export default function TopBar({
           Connect Spotify
         </button>
       )}
-      <button
-        onClick={() => actions.playback("pause")}
-        className="rounded border border-edge bg-panel px-3 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-950/40"
-      >
-        Pause
-      </button>
-      <button
-        onClick={() => actions.playback("resume")}
-        className="rounded border border-edge bg-panel px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-950/40"
-      >
-        Resume
-      </button>
-      <button
-        onClick={() => {
-          if (confirm("End the entire game? This cannot be undone.")) {
-            actions.endGame();
-          }
-        }}
-        className="rounded border border-red-800 bg-red-950/40 px-3 py-1.5 text-xs font-bold uppercase text-red-300 hover:bg-red-900/50"
-      >
-        End Game
-      </button>
+
+      {/* Play/Pause toggle */}
+      {canPause ? (
+        <button
+          onClick={() => actions.playback("pause")}
+          className="rounded border border-edge bg-panel px-3 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-950/40"
+        >
+          Pause
+        </button>
+      ) : canResume ? (
+        <button
+          onClick={() => actions.playback("resume")}
+          className="rounded border border-edge bg-panel px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-950/40"
+        >
+          Play
+        </button>
+      ) : (
+        <button
+          disabled
+          className="rounded border border-edge bg-panel px-3 py-1.5 text-xs font-semibold text-slate-500 disabled:pointer-events-none disabled:opacity-30"
+        >
+          Pause
+        </button>
+      )}
+
+      {/* Single game action button: Start Game / End Game / New Game */}
+      {gameState === "GAME_OVER" ? (
+        <button
+          onClick={handleResetGame}
+          className="rounded border border-amber-600 bg-amber-950/50 px-3 py-1.5 text-xs font-bold uppercase text-amber-300 hover:bg-amber-900/60"
+        >
+          New Game
+        </button>
+      ) : gameActive ? (
+        <button
+          onClick={() => {
+            if (confirm("End the entire game? This cannot be undone.")) {
+              actions.endGame();
+            }
+          }}
+          className="rounded border border-red-800 bg-red-950/40 px-3 py-1.5 text-xs font-bold uppercase text-red-300 hover:bg-red-900/50"
+        >
+          End Game
+        </button>
+      ) : gameState === "LOBBY" ? (
+        <button
+          onClick={handleStartGame}
+          disabled={!spotifyConnected}
+          title={spotifyConnected ? undefined : "Connect Spotify before starting"}
+          className="rounded border border-green-600 bg-green-950/50 px-3 py-1.5 text-xs font-bold uppercase text-green-300 hover:bg-green-900/60 disabled:pointer-events-none disabled:opacity-30"
+        >
+          Start Game
+        </button>
+      ) : null}
 
       <StatusPill status={status} connected={connected} nonce={nonce} />
 

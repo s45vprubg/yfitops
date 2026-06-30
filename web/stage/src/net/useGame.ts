@@ -48,11 +48,14 @@ export interface GameView {
   scoreboard: ScoreboardData | null;
   trackStart: TrackStartData | null;
   reveal: RevealData | null;
+  revealedArtist: boolean;
+  revealedSong: boolean;
   lyrics: LyricsData | null;
   lockoutHandle: string | null;
   timer: TimerAnchor | null;
   audioMode: AudioPlayer["mode"];
   spotifyConnectState: ConnectState;
+  audioActivated: boolean;
 }
 
 // Infer the board row for a given selection so the timer uses the right
@@ -73,11 +76,14 @@ export function useGame() {
     scoreboard: null,
     trackStart: null,
     reveal: null,
+    revealedArtist: false,
+    revealedSong: false,
     lyrics: null,
     lockoutHandle: null,
     timer: null,
     audioMode: "demo",
     spotifyConnectState: "idle",
+    audioActivated: false,
   });
 
   const clientRef = useRef<GameClient | null>(null);
@@ -117,9 +123,15 @@ export function useGame() {
           if (next === "LOCKED_OUT" && v.timer) {
             out.timer = { ...v.timer, frozen: true };
           }
+          // Unfreeze when round resumes after an incorrect/partial grade.
+          if (next === "ROUND_ACTIVE" && v.timer && v.timer.frozen) {
+            out.timer = { ...v.timer, frozen: false };
+          }
           // Leaving the active loop clears stale per-round data.
           if (next === "BOARD" || next === "LOBBY") {
             out.reveal = null;
+            out.revealedArtist = false;
+            out.revealedSong = false;
             out.lyrics = null;
             out.lockoutHandle = null;
             out.trackStart = null;
@@ -135,16 +147,24 @@ export function useGame() {
       client.on("trackStart", (e: ServerEnvelope) => {
         const ts = e.d as TrackStartData;
         const row = rowFromMaxPoints(ts.maxPoints);
-        patch({
-          trackStart: ts,
-          // A new trackStart (initial or post-partial recalibration) re-anchors
-          // the timer and un-freezes it (§5).
-          timer: { row, maxPoints: ts.maxPoints, basePoints: ts.basePoints, startTime: ts.startTime, frozen: false },
-          lockoutHandle: null,
+        setView((v) => {
+          const isNewTrack = !v.trackStart || v.trackStart.startTime !== ts.startTime;
+          return {
+            ...v,
+            trackStart: ts,
+            timer: { row, maxPoints: ts.maxPoints, basePoints: ts.basePoints, startTime: ts.startTime, frozen: false },
+            lockoutHandle: null,
+            ...(isNewTrack ? { lyrics: null, revealedArtist: false, revealedSong: false } : {}),
+          };
         });
       });
 
       client.on("reveal", (e: ServerEnvelope) => patch({ reveal: e.d as RevealData }));
+      client.on("partialReveal", (e: ServerEnvelope) => {
+        const { field } = e.d as { field: string };
+        if (field === "artist") patch({ revealedArtist: true });
+        else if (field === "song") patch({ revealedSong: true });
+      });
       client.on("lyrics", (e: ServerEnvelope) => patch({ lyrics: e.d as LyricsData }));
       client.on("lockout", (e: ServerEnvelope) => {
         const handle = (e.d as { byHandle: string }).byHandle;
@@ -154,9 +174,11 @@ export function useGame() {
       // ---- audio: backend commands -> local player (§9) ----
       client.on("audio", (e: ServerEnvelope) => {
         const a = e.d as AudioData;
-        if (a.action === "play") void audio.play(a.trackURI, a.positionMs);
-        else if (a.action === "pause") void audio.pause();
-        else if (a.action === "resume") void audio.resume();
+        const player = audioRef.current;
+        if (!player) return;
+        if (a.action === "play") void player.play(a.trackURI, a.positionMs);
+        else if (a.action === "pause") void player.pause();
+        else if (a.action === "resume") void player.resume();
       });
 
       // initSpotify swaps in a Spotify-backed player. The token provider always
@@ -230,5 +252,13 @@ export function useGame() {
     };
   }, []);
 
-  return { view, audio: audioRef };
+  const activateAudio = async () => {
+    const player = audioRef.current;
+    if (player) {
+      await player.activate();
+      setView((v) => ({ ...v, audioActivated: true }));
+    }
+  };
+
+  return { view, audio: audioRef, activateAudio };
 }

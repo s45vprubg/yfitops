@@ -1,19 +1,47 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAdmin } from "./useAdmin";
+import type { GameState } from "@shared/protocol";
 import Login from "./components/Login";
 import TopBar from "./components/TopBar";
 import BoardPanel from "./components/BoardPanel";
 import EvaluationPanel from "./components/EvaluationPanel";
 import TelemetryPanel from "./components/TelemetryPanel";
 import BoardBuilderPage from "./components/BoardBuilderPage";
+import { HTTP_URL } from "./config";
+
+const ACTIVE_GAME_STATES: GameState[] = [
+  "BOARD", "ROUND_ACTIVE", "LOCKED_OUT", "ADJUDICATE",
+  "KARAOKE", "DAILY_DOUBLE", "TRANSITION",
+];
 
 type Page = "control" | "builder";
 
 export default function App() {
   const [state, actions] = useAdmin();
   const [page, setPage] = useState<Page>("control");
+  const [spotifyConnected, setSpotifyConnected] = useState(false);
 
   const authed = state.status === "authed";
+  const secret = state.adminSecret ?? "";
+
+  useEffect(() => {
+    if (!authed || !secret) return;
+    let stop = false;
+    const check = async () => {
+      try {
+        const res = await fetch(`${HTTP_URL}/api/spotify/token`, {
+          headers: { Authorization: `Bearer ${secret}` },
+          cache: "no-store",
+        });
+        if (!stop) setSpotifyConnected(res.ok);
+      } catch {
+        if (!stop) setSpotifyConnected(false);
+      }
+    };
+    check();
+    const id = setInterval(check, 5000);
+    return () => { stop = true; clearInterval(id); };
+  }, [authed, secret]);
 
   if (!authed) {
     return (
@@ -58,12 +86,15 @@ export default function App() {
             gameState={state.gameState}
             actions={actions}
             onLogout={actions.logout}
-            adminSecret={state.adminSecret ?? ""}
+            adminSecret={secret}
+            spotifyConnected={spotifyConnected}
           />
 
           <main className="grid min-h-0 flex-1 grid-cols-[minmax(260px,1fr)_minmax(420px,1.6fr)_minmax(300px,1fr)]">
             <BoardPanel
               board={state.board}
+              gameState={state.gameState}
+              spotifyConnected={spotifyConnected}
               onSelect={(row, col) => actions.select({ row, col })}
             />
             <EvaluationPanel
@@ -74,6 +105,15 @@ export default function App() {
             />
             <TelemetryPanel telemetry={state.telemetry} actions={actions} />
           </main>
+
+          {/* Spotify disconnected mid-game warning */}
+          {!spotifyConnected && !!state.gameState && ACTIVE_GAME_STATES.includes(state.gameState) && (
+            <div className="pointer-events-none fixed inset-x-0 top-24 flex justify-center p-3 z-50">
+              <div className="pointer-events-auto rounded border border-amber-600 bg-amber-950/90 px-5 py-2.5 text-sm font-semibold text-amber-200 shadow-xl">
+                Spotify disconnected — audio commands will fail. Reconnect via the button above.
+              </div>
+            </div>
+          )}
 
           {/* Transient operational notice (e.g. "busy: round in progress").
               Does NOT log the admin out — just informs and can be dismissed. */}
@@ -103,7 +143,7 @@ export default function App() {
 
       {page === "builder" && (
         <div className="min-h-0 flex-1">
-          <BoardBuilderPage secret={state.adminSecret ?? ""} />
+          <BoardBuilderPage secret={secret} />
         </div>
       )}
     </div>

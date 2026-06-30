@@ -29,6 +29,7 @@ interface SpotifyError {
 interface SpotifyPlayer {
   connect(): Promise<boolean>;
   disconnect(): void;
+  activateElement(): Promise<void>;
   pause(): Promise<void>;
   resume(): Promise<void>;
   togglePlay(): Promise<void>;
@@ -38,7 +39,7 @@ interface SpotifyPlayer {
   addListener(event: "ready" | "not_ready", cb: (i: SpotifyWebPlaybackInstance) => void): boolean;
   addListener(event: "player_state_changed", cb: (s: SpotifyPlaybackState | null) => void): boolean;
   addListener(
-    event: "initialization_error" | "authentication_error" | "account_error" | "playback_error",
+    event: "initialization_error" | "authentication_error" | "account_error" | "playback_error" | "autoplay_failed",
     cb: (e: SpotifyError) => void,
   ): boolean;
   removeListener(event: string): boolean;

@@ -99,6 +99,9 @@ export class SpotifyAudioPlayer implements AudioPlayer {
       player.addListener("authentication_error", fail);
       player.addListener("account_error", fail);
       player.addListener("playback_error", fail);
+      player.addListener("autoplay_failed", () => {
+        console.warn("[spotify] autoplay blocked by browser — activateElement() needed");
+      });
 
       const ok = await player.connect();
       if (!ok) this.connectState = "error";
@@ -107,6 +110,10 @@ export class SpotifyAudioPlayer implements AudioPlayer {
       // eslint-disable-next-line no-console
       console.warn("[spotify] connect failed:", e);
     }
+  }
+
+  async activate(): Promise<void> {
+    await this.player?.activateElement().catch(() => {});
   }
 
   async play(_trackURI?: string, _positionMs?: number): Promise<void> {

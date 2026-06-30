@@ -212,3 +212,11 @@ func (h *Handler) startGame(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "started"})
 }
+
+func (h *Handler) resetGame(w http.ResponseWriter, r *http.Request) {
+	if err := h.engine.ResetToLobby(); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "reset"})
+}

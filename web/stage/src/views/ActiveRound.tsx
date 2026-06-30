@@ -23,7 +23,9 @@ import type { TimerAnchor } from "../net/useGame";
 interface Props {
   trackStart: TrackStartData;
   timer: TimerAnchor;
-  reveal: RevealData | null; // present once true strings are known
+  reveal: RevealData | null;
+  revealedArtist: boolean;
+  revealedSong: boolean;
   lockoutHandle: string | null;
 }
 
@@ -31,34 +33,56 @@ interface Props {
 const ARTIST_SEED = 1337;
 const SONG_SEED = 8675309;
 
-export default function ActiveRound({ trackStart, timer, reveal, lockoutHandle }: Props) {
+export default function ActiveRound({ trackStart, timer, reveal, revealedArtist, revealedSong, lockoutHandle }: Props) {
   const artistRef = useRef<HTMLDivElement>(null);
   const songRef = useRef<HTMLDivElement>(null);
   const pointsRef = useRef<HTMLDivElement>(null);
   const [phaseGlow, setPhaseGlow] = useState(false);
 
-  // Hold the latest props in refs so the rAF loop never restarts (and never
-  // closes over stale values) as messages stream in.
-  const stateRef = useRef({ trackStart, timer, reveal, lockoutHandle });
-  stateRef.current = { trackStart, timer, reveal, lockoutHandle };
+  const stateRef = useRef({ trackStart, timer, reveal, revealedArtist, revealedSong, lockoutHandle });
+  stateRef.current = { trackStart, timer, reveal, revealedArtist, revealedSong, lockoutHandle };
 
   useEffect(() => {
     let raf = 0;
     let lastPoints = -1;
     let lastGlow = false;
+    let frozenElapsed = -1;
 
     const tick = () => {
-      const { trackStart: ts, timer: tm, reveal: rv } = stateRef.current;
-      const now = Date.now(); // serverNow approximation; skew is masked on buzz
+      const { trackStart: ts, timer: tm, reveal: rv, revealedArtist: ra, revealedSong: rs } = stateRef.current;
+      const now = Date.now();
       const elapsed = Math.max(0, now - ts.startTime);
 
-      // --- decryption text ---
-      const af = computeFrame({ elapsedMs: elapsed, targetLen: ts.artistLen, target: rv?.artist, seed: ARTIST_SEED });
-      const sf = computeFrame({ elapsedMs: elapsed, targetLen: ts.songLen, target: rv?.song, seed: SONG_SEED });
-      if (artistRef.current) artistRef.current.textContent = af.text;
-      if (songRef.current) songRef.current.textContent = sf.text;
+      // Freeze the animation clock when the timer is frozen (buzz in progress).
+      let animElapsed: number;
+      if (tm.frozen) {
+        if (frozenElapsed < 0) frozenElapsed = elapsed;
+        animElapsed = frozenElapsed;
+      } else {
+        frozenElapsed = -1;
+        animElapsed = elapsed;
+      }
 
-      const inReveal = af.phase >= 3 || sf.phase >= 3;
+      // --- decryption text ---
+      // If a field was force-revealed (partial grade), show it directly.
+      let artistPhase = 4;
+      let songPhase = 4;
+      if (ra && rv?.artist) {
+        if (artistRef.current) artistRef.current.textContent = rv.artist;
+      } else {
+        const af = computeFrame({ elapsedMs: animElapsed, targetLen: ts.artistLen, target: rv?.artist, seed: ARTIST_SEED });
+        if (artistRef.current) artistRef.current.textContent = af.text;
+        artistPhase = af.phase;
+      }
+      if (rs && rv?.song) {
+        if (songRef.current) songRef.current.textContent = rv.song;
+      } else {
+        const sf = computeFrame({ elapsedMs: animElapsed, targetLen: ts.songLen, target: rv?.song, seed: SONG_SEED });
+        if (songRef.current) songRef.current.textContent = sf.text;
+        songPhase = sf.phase;
+      }
+
+      const inReveal = artistPhase >= 3 || songPhase >= 3;
       if (inReveal !== lastGlow) {
         lastGlow = inReveal;
         setPhaseGlow(inReveal);

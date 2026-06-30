@@ -3,7 +3,8 @@
 // VITE_HTTP_URL  — plain-HTTP backend for cert-hash + Spotify OAuth (default http://<host>:8777)
 // VITE_JOIN_URL  — mobile buzzer URL encoded in the QR (default http://<host>:8780)
 
-const host = window.location.hostname || "127.0.0.1";
+const browserHost = window.location.hostname || "127.0.0.1";
+const host = browserHost === "localhost" ? "127.0.0.1" : browserHost;
 
 function env(key: string): string | undefined {
   const v = (import.meta.env as Record<string, string | undefined>)[key];

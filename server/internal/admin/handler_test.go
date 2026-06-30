@@ -61,6 +61,7 @@ type mockEngine struct{ reloaded bool }
 
 func (m *mockEngine) ReloadBoard(_ *game.Board) { m.reloaded = true }
 func (m *mockEngine) StartGame() error           { return nil }
+func (m *mockEngine) ResetToLobby() error        { return nil }
 
 func newTestHandler() (*Handler, *http.ServeMux) {
 	store := &mockStore{

@@ -35,6 +35,9 @@ export interface AudioPlayer {
   /** The Spotify Virtual Device id, once ready. */
   getDeviceId(): string | null;
 
+  /** Unlock browser autoplay by calling activateElement(). Must be called from a user gesture. */
+  activate(): Promise<void>;
+
   /** Apply a backend audio command (the ~20ms local pause-on-buzz path, §9). */
   play(trackURI?: string, positionMs?: number): Promise<void>;
   pause(): Promise<void>;

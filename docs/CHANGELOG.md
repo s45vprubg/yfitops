@@ -2,6 +2,85 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] — 2026-06-29
+
+### Added — New Game reset
+- `server/internal/game/engine.go`: `ResetToLobby()` clears round state, resets
+  all scores to 0, resets track Played flags, unloads board, transitions to LOBBY.
+- `server/internal/admin/`: REST endpoint `POST /api/game/reset` calls ResetToLobby.
+- `web/admin`: TopBar shows "New Game" button when state is GAME_OVER.
+
+### Added — Spotify Web Playback SDK audio activation
+- `web/stage/src/audio/spotify.ts`: calls `activateElement()` to unlock browser
+  autoplay policy; listens for `autoplay_failed` event.
+- `web/stage/src/App.tsx`: one-time "Enable Audio" overlay appears when Spotify
+  SDK connects; a click activates the player and dismisses the overlay.
+
+### Added — Partial reveal on stage
+- `server/internal/game/engine.go`: `gradePartial` now sends a `partialReveal`
+  message to the stage indicating which field (artist/song) was correctly guessed.
+- `web/stage`: on `partialReveal`, the guessed field is displayed in full while
+  the other continues its cycling animation.
+
+### Added — Track-end auto-ends round
+- `server/internal/game/engine.go`: `onStagePlayerState` now handles `trackEnded`
+  during ROUND_ACTIVE (in addition to KARAOKE), calling `endRound()` so a song
+  that finishes without anyone buzzing returns to the board automatically.
+
+### Changed — Admin UI state awareness overhaul
+- `web/admin/src/components/TopBar.tsx`: single game action button (Start/End/New);
+  Start Game disabled until Spotify connected; Pause/Play merged into one toggle
+  button; board selector disabled during active game.
+- `web/admin/src/components/BoardPanel.tsx`: cells only clickable when state is
+  BOARD/KARAOKE/TRANSITION and Spotify connected; track counts enlarged.
+- `web/admin/src/components/EvaluationPanel.tsx`: grade buttons only active during
+  ADJUDICATE; artist/song fields enlarged with softer color.
+- `web/admin/src/App.tsx`: mid-game Spotify disconnect warning banner.
+
+### Changed — Stage animation rewrite (decrypt.ts)
+- Phase 1 (0–5s): 20 random characters cycling at ~5fps.
+- Phase 2 (5s): snaps to exact answer length, spaces shown.
+- Phase 3 (5s+): one random character revealed every 2s. Spaces free.
+- Animation freezes when a player buzzes and resumes on grade.
+- Server now sends reveal data to stage at track start (stage is trusted).
+
+### Changed — Stage view routing
+- ADJUDICATE state now stays on ActiveRound (timer frozen, "{handle} is
+  guessing…") instead of switching to the Karaoke/reveal view prematurely.
+- Karaoke view shows "now guessing" during ADJUDICATE, "winner" during KARAOKE.
+
+### Changed — Admin Reveal enters karaoke
+- `server/internal/game/engine.go`: admin "Reveal" now enters karaoke mode (shows
+  lyrics, disables guessing, marks track played) instead of just showing the text.
+
+### Changed — Timer resume after incorrect/partial grade
+- `server/internal/game/engine.go`: `resumeAudio()` re-broadcasts `trackStart`
+  with re-anchored time so the stage timer unfreezes correctly.
+- `web/stage`: state handler also unfreezes timer on ROUND_ACTIVE transition.
+
+### Changed — Mobile buzz result messaging
+- `web/mobile/src/screens/BuzzScreen.tsx`: judged-out message changed from
+  "Incorrect — you're out this round" (red) to "Good job — sit tight for the
+  next one" (amber) for a more neutral tone.
+
+### Changed — Lyrics cleared on new track
+- `web/stage/src/net/useGame.ts`: `trackStart` with a new startTime clears
+  stale lyrics and partial-reveal flags, preventing bleed between tracks.
+
+### Fixed — Spotify OAuth scopes
+- `server/internal/spotify/spotify.go`: added `user-read-email` and
+  `user-read-private` scopes as required by the Web Playback SDK (documented in
+  Spotify's "Building a Spotify Player" how-to).
+
+### Fixed — OAuth cookie domain mismatch
+- `web/admin/src/config.ts`, `web/stage/src/config.ts`: normalize `localhost` →
+  `127.0.0.1` so cookies set on the IP match the Spotify callback redirect.
+
+### Fixed — Stage audio commands hitting dead player
+- `web/stage/src/net/useGame.ts`: audio message handler now reads `audioRef.current`
+  instead of capturing the original player in a closure, so pause/resume/play
+  reach the active Spotify player after hot-swap.
+
 ## [Unreleased] — 2026-06-24
 
 ### Fixed — admin no longer logs out on operational errors

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/rand"
 	"time"
 
@@ -181,6 +182,59 @@ func (e *Engine) StartGame() error {
 	return (<-ch).err
 }
 
+// ResetToLobby transitions the engine from GAME_OVER back to LOBBY, clearing
+// all game state (scores, played tracks, round state) for a fresh start.
+// Safe from any goroutine.
+func (e *Engine) ResetToLobby() error {
+	type result struct{ err error }
+	ch := make(chan result, 1)
+	e.cmds <- command{fn: func() {
+		if e.state != protocol.StateGameOver {
+			ch <- result{fmt.Errorf("can only reset from GAME_OVER (state: %s)", e.state)}
+			return
+		}
+		// Clear round state
+		e.curCell = nil
+		e.curTrack = nil
+		e.curRow = 0
+		e.roundKey = ""
+		e.trackStartMs = 0
+		e.pausedAtMs = 0
+		e.buzzWinner = ""
+		e.cellPicker = ""
+		e.votingPool = nil
+		e.votes = nil
+		e.ratingPool = nil
+		e.ratings = nil
+		// Reset all player scores
+		for _, p := range e.reg.players {
+			p.Score = 0
+			p.GuessedThisTrack = false
+			p.IdleRounds = 0
+		}
+		// Reset board track played state
+		if e.board != nil {
+			for _, row := range e.board.Cells {
+				for _, cell := range row {
+					if cell == nil {
+						continue
+					}
+					for _, t := range cell.Tracks {
+						t.Played = false
+					}
+				}
+			}
+		}
+		// Unload the board so admin must explicitly re-attach
+		e.board = nil
+		e.transitionTo(protocol.StateLobby)
+		e.broadcastScoreboard()
+		e.broadcastBoard()
+		ch <- result{}
+	}}
+	return (<-ch).err
+}
+
 // RoleSetter lets the engine promote a connection's authenticated role in the
 // transport layer after a validated Hello. The transport (*transport.Hub)
 // defaults every new connection to mobile (the safe default, §4A) and only the
@@ -200,6 +254,10 @@ func (e *Engine) SetRoleSetter(rs RoleSetter) { e.roleSetter = rs }
 // OAuth tokens to the Stage client. It is defined here (not in protocol.go)
 // because protocol.go is a fixed contract. If accepted, it should be moved there.
 const smsgSpotifyToken protocol.ServerMsgType = "spotifyToken"
+
+// CONTRACT-QUESTION: partialReveal signals the stage to fully reveal one field
+// (artist or song) after a partial grade, so the animation settles that field.
+const smsgPartialReveal protocol.ServerMsgType = "partialReveal"
 
 // PushSpotifyToken sends the access token to all connected Stage clients so
 // they can initialize the Web Playback SDK without being in the OAuth loop.
@@ -317,8 +375,7 @@ func (e *Engine) dispatchAdmin(connID string, env protocol.ClientEnvelope) {
 	case protocol.CMsgAdminKick:
 		e.onAdminKick(connID, env)
 	case protocol.CMsgAdminReveal:
-		e.revealTo(protocol.RoleStage)
-		e.revealTo(protocol.RoleAdmin)
+		e.adminReveal()
 	case protocol.CMsgAdminEndRound:
 		e.endRound()
 	case protocol.CMsgAdminSetThresh:
@@ -466,13 +523,16 @@ func (e *Engine) startTrack(cell *Cell, track *Track) {
 
 	e.transitionTo(protocol.StateRoundActive)
 
-	// trackStart is trusted-ish: it carries point ceilings + answer LENGTHS for
-	// the masked-decryption animation (§5), never the answer text. Stage only.
+	// trackStart carries point ceilings + answer LENGTHS for the decryption
+	// animation. The reveal (actual text) follows immediately — stage is trusted.
 	e.bcast.Broadcast(protocol.RoleStage, e.trackStartEnvelope())
+	e.revealTo(protocol.RoleStage)
 	e.bcast.Broadcast(protocol.RoleAdmin, e.adminViewEnvelope())
 
 	// Route playback to the stage's virtual device (§6, §9).
-	_ = e.audio.Play(context.Background(), track.SpotifyURI, 0)
+	if err := e.audio.Play(context.Background(), track.SpotifyURI, 0); err != nil {
+		log.Printf("[engine] audio.Play failed: %v", err)
+	}
 	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{
 		Action: "play", TrackURI: track.SpotifyURI, PositionMs: 0,
 	}))
@@ -576,7 +636,7 @@ func (e *Engine) onGrade(connID string, env protocol.ClientEnvelope) {
 	case protocol.VerdictCorrect:
 		e.gradeCorrect(winner, elapsed)
 	case protocol.VerdictPartial:
-		e.gradePartial(winner, elapsed)
+		e.gradePartial(winner, elapsed, d.PartialKind)
 	case protocol.VerdictIncorrect:
 		e.gradeIncorrect(winner)
 	default:
@@ -615,7 +675,7 @@ func (e *Engine) gradeCorrect(winner *Player, elapsed int64) {
 // gradePartial awards 50, keeps the remaining pool alive, resumes audio, and
 // re-enables the buzzer for everyone EXCEPT players who already guessed this
 // track (§3.6, §7).
-func (e *Engine) gradePartial(winner *Player, elapsed int64) {
+func (e *Engine) gradePartial(winner *Player, elapsed int64, kind string) {
 	secondPartial := e.partial.active
 	awarded, remaining := PartialAward(e.curRow, elapsed)
 	if secondPartial {
@@ -640,6 +700,10 @@ func (e *Engine) gradePartial(winner *Player, elapsed int64) {
 		return
 	}
 
+	// Tell stage which field to force-reveal.
+	if kind != "" {
+		e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgPartialReveal, map[string]string{"field": kind}))
+	}
 	e.resumeAudio()
 	e.buzzWinner = ""
 	e.lock.Release(context.Background(), e.roundKey)
@@ -682,6 +746,8 @@ func (e *Engine) resumeAudio() {
 	}))
 	// Re-anchor the timer so decay continues from where it paused (§5).
 	e.trackStartMs = nowMs() - e.pausedAtMs
+	// Send re-anchored trackStart so the stage timer unfreezes correctly.
+	e.bcast.Broadcast(protocol.RoleStage, e.trackStartEnvelope())
 }
 
 // award credits points and broadcasts the updated scoreboard (trusted only).
@@ -694,6 +760,17 @@ func (e *Engine) award(p *Player, pts int) {
 // ---------------------------------------------------------------------------
 // Karaoke + skip voting (§3.7, §3.8)
 // ---------------------------------------------------------------------------
+
+// adminReveal is the admin force-revealing the answer mid-round. It enters
+// karaoke (shows answer + lyrics, disables guessing) without awarding points.
+func (e *Engine) adminReveal() {
+	if e.curTrack != nil {
+		e.curTrack.Played = true
+	}
+	e.buzzWinner = ""
+	e.lock.Release(context.Background(), e.roundKey)
+	e.enterKaraoke()
+}
 
 // enterKaraoke resumes audio, reveals the answer + lyrics to STAGE only, and
 // opens the skip vote. The active pool is snapshotted at this instant (§3.8).
@@ -1015,9 +1092,14 @@ func (e *Engine) onStagePlayerState(connID string, env protocol.ClientEnvelope) 
 	if err := json.Unmarshal(env.Data, &d); err != nil {
 		return
 	}
-	// Track-ended during karaoke behaves like a satisfied skip (move on).
-	if d.TrackEnded && e.state == protocol.StateKaraoke {
+	if !d.TrackEnded {
+		return
+	}
+	switch e.state {
+	case protocol.StateKaraoke:
 		e.beginTransition()
+	case protocol.StateRoundActive:
+		e.endRound()
 	}
 }
 

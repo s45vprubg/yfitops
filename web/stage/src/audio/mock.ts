@@ -22,6 +22,10 @@ export class MockAudioPlayer implements AudioPlayer {
     // No Spotify in demo mode.
   }
 
+  async activate(): Promise<void> {
+    // No-op in demo mode.
+  }
+
   getDeviceId(): string | null {
     return null;
   }

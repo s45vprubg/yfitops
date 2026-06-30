@@ -59,4 +59,5 @@ type SpotifyResult struct {
 type BoardReloader interface {
 	ReloadBoard(b *game.Board)
 	StartGame() error
+	ResetToLobby() error
 }
