@@ -65,19 +65,21 @@ function BoardGrid({ board, selectable, onSelect }: { board: BoardData; selectab
 
   return (
     <div
-      className="grid gap-1.5"
+      className="grid gap-1"
       style={{ gridTemplateColumns: `repeat(${board.cols}, minmax(0, 1fr))` }}
     >
+      {/* Category header row — the Jeopardy column titles. */}
       {categories.map((cat, i) => (
         <div
           key={`cat-${i}`}
-          className="truncate rounded bg-panel3 px-1 py-1.5 text-center text-[10px] font-semibold uppercase tracking-wide text-slate-300"
+          className="flex h-12 items-center justify-center rounded-sm bg-accent/15 px-1 text-center text-[10px] font-bold uppercase leading-tight tracking-wide text-accent"
           title={cat}
         >
-          {cat || "—"}
+          <span className="line-clamp-2">{cat || "—"}</span>
         </div>
       ))}
 
+      {/* Point tiles: one column of descending values per category. */}
       {Array.from({ length: board.rows }, (_, ri) => ri + 1).flatMap((row) =>
         Array.from({ length: board.cols }, (_, ci) => ci + 1).map((col) => {
           const cell = byKey.get(`${row},${col}`);
@@ -94,22 +96,25 @@ function BoardGrid({ board, selectable, onSelect }: { board: BoardData; selectab
                   : "empty"
               }
               className={[
-                "flex h-9 items-center justify-center gap-1 rounded border text-center transition",
-                disabled
-                  ? "cursor-not-allowed border-edge/50 bg-panel/40 text-slate-700"
-                  : "border-edge bg-panel text-accent hover:border-accent hover:bg-accent/10 active:scale-[0.97]",
+                "relative flex aspect-[4/3] items-center justify-center rounded-sm border transition",
+                exhausted
+                  ? "border-edge/40 bg-panel/30 text-slate-700"
+                  : disabled
+                    ? "border-edge/60 bg-panel/60 text-amber-300/60"
+                    : "border-edge bg-panel text-amber-300 hover:border-accent hover:bg-accent/10 active:scale-[0.97]",
               ].join(" ")}
             >
-              <span className="text-xs font-bold leading-none">
-                {cell ? cell.points : "—"}
-              </span>
-              {cell && !exhausted && (
-                <span className="text-[10px] font-medium text-slate-500">
-                  ×{cell.tracksLeft}
-                </span>
-              )}
-              {exhausted && cell && (
-                <span className="text-[8px] uppercase text-slate-600">done</span>
+              {exhausted ? (
+                <span className="text-[9px] uppercase tracking-wide text-slate-600">done</span>
+              ) : (
+                <>
+                  <span className="text-lg font-extrabold leading-none">{cell ? cell.points : "—"}</span>
+                  {cell && (
+                    <span className="absolute bottom-0.5 right-1 text-[9px] font-medium text-slate-500">
+                      ×{cell.tracksLeft}
+                    </span>
+                  )}
+                </>
               )}
             </button>
           );
