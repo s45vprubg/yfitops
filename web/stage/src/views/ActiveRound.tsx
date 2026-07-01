@@ -60,11 +60,16 @@ export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHa
     let tick = 0;
     let prevPhase = 0;
     let lengthFlashUntil = 0; // performance.now() deadline for the amber flash
+    let morphStart = -1;      // performance.now() when the char-drop morph began
+    let blockWidth = 20;      // slot count we were showing during the block phase
+    let prevBlockLen = 20;    // last-seen phase-1 block width (from mask lengths)
 
     // Render one field's row of per-character spans into `el`. Revealed slots
     // use the mask char + locked color; hidden slots cycle noise. When the
     // real length was just confirmed (block collapse) hidden slots briefly
     // flash the LENGTH color so the room sees "this is the right length now".
+    // renderLen lets the caller override the slot count (for the char-drop
+    // morph); when undefined the mask/real length is used and mask chars render.
     const renderField = (
       el: HTMLDivElement | null,
       mask: string[] | undefined,
@@ -72,13 +77,14 @@ export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHa
       seed: number,
       t: number,
       lengthFlash: boolean,
+      renderLen?: number,
     ) => {
       if (!el) return;
-      // Determine the slot count: mask length once known, else the noise block.
-      const len = mask ? mask.length : fallbackLen > 0 ? fallbackLen : NOISE_WIDTH;
+      const realLen = mask ? mask.length : fallbackLen > 0 ? fallbackLen : NOISE_WIDTH;
+      const len = renderLen ?? realLen;
+      const morphing = renderLen !== undefined; // during the drop, ignore mask chars (all noise)
       const hiddenCls = lengthFlash ? LENGTH_CLS : NOISE_CLS;
 
-      // (Re)build the span row if the length changed.
       if (el.childElementCount !== len) {
         el.textContent = "";
         for (let i = 0; i < len; i++) {
@@ -88,20 +94,27 @@ export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHa
 
       for (let i = 0; i < len; i++) {
         const span = el.children[i] as HTMLSpanElement;
-        const cell = mask ? mask[i] : "";
+        const cell = !morphing && mask ? mask[i] : "";
         if (cell === " ") {
           if (span.textContent !== " ") span.textContent = " ";
           if (span.className !== hiddenCls) span.className = hiddenCls;
         } else if (cell) {
-          // Revealed/locked letter.
           if (span.textContent !== cell) span.textContent = cell;
           if (span.className !== LOCKED_CLS) span.className = LOCKED_CLS;
         } else {
-          // Hidden slot -> cosmetic noise (or amber during the length flash).
           span.textContent = glyphAt(seed + i, t);
           if (span.className !== hiddenCls) span.className = hiddenCls;
         }
       }
+    };
+
+    // morphLen interpolates the rendered slot count from the phase-1 block width
+    // down to the field's real length over easeMs, so the block visibly "drops"
+    // characters until it hits the correct length (then the flash fires).
+    const morphLen = (fromLen: number, toLen: number, elapsed: number, easeMs: number): number | undefined => {
+      if (easeMs <= 0 || elapsed >= easeMs || fromLen <= toLen) return undefined; // done: real length
+      const p = elapsed / easeMs;
+      return Math.max(toLen, Math.round(fromLen - (fromLen - toLen) * p));
     };
 
     const loop = () => {
@@ -111,17 +124,33 @@ export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHa
       // ~5fps noise cycling, frozen while the timer is frozen (buzz).
       if (!tm.frozen) tick = Math.floor(now / 200);
 
-      // Detect the block -> skeleton collapse (phase 1 -> 2): the real length is
-      // now known, so flash the slots to signal "correct length".
+      // Detect the block -> skeleton collapse (phase 1 -> 2): start the char-drop
+      // morph, and after it lands flash the "correct length" color.
       const phase = mr?.phase ?? 0;
       if (prevPhase === 1 && phase >= 2) {
-        lengthFlashUntil = performance.now() + LENGTH_FLASH_MS;
+        morphStart = performance.now();
+        blockWidth = prevBlockLen; // the phase-1 block width we were showing
       }
       prevPhase = phase;
-      const lengthFlash = performance.now() < lengthFlashUntil;
+      prevBlockLen = mr?.artistLen ?? prevBlockLen;
 
-      renderField(artistRef.current, mr?.artist, mr?.artistLen ?? ts.artistLen, ARTIST_SEED, tick, lengthFlash);
-      renderField(songRef.current, mr?.song, mr?.songLen ?? ts.songLen, SONG_SEED, tick, lengthFlash);
+      const easeMs = mr?.easeMs ?? 0;
+      const nowP = performance.now();
+      const morphElapsed = morphStart >= 0 ? nowP - morphStart : Infinity;
+      const morphing = morphStart >= 0 && morphElapsed < easeMs;
+      // Flash starts the instant the morph completes.
+      if (morphStart >= 0 && !morphing && lengthFlashUntil === 0) {
+        lengthFlashUntil = nowP + LENGTH_FLASH_MS;
+      }
+      const lengthFlash = lengthFlashUntil > 0 && nowP < lengthFlashUntil;
+
+      const aReal = mr?.artist?.length ?? mr?.artistLen ?? ts.artistLen;
+      const sReal = mr?.song?.length ?? mr?.songLen ?? ts.songLen;
+      const aLen = morphing ? morphLen(blockWidth, aReal, morphElapsed, easeMs) : undefined;
+      const sLen = morphing ? morphLen(blockWidth, sReal, morphElapsed, easeMs) : undefined;
+
+      renderField(artistRef.current, mr?.artist, mr?.artistLen ?? ts.artistLen, ARTIST_SEED, tick, lengthFlash, aLen);
+      renderField(songRef.current, mr?.song, mr?.songLen ?? ts.songLen, SONG_SEED, tick, lengthFlash, sLen);
 
       // --- point timer (local, deterministic; honors reduced pool post-partial) ---
       if (pointsRef.current && !tm.frozen) {

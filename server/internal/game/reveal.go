@@ -46,44 +46,54 @@ const smsgLyricsStatus protocol.ServerMsgType = "lyricsStatus"
 // web/stage/src/anim/decrypt.ts (PHASE1_MS, REVEAL_INTERVAL_MS). Overridable
 // per-deploy via env (see cmd/gameserver) and live via the admin knob.
 const (
-	defaultRevealIntervalMs = 3000  // ms between revealed letters
-	defaultRevealPhase1Ms   = 10000 // letters start streaming after this
-	defaultRevealBlockMs    = 15000 // hide the real length behind a block until this
-	defaultRevealEaseMs     = 3000  // soft morph when the block collapses to real length
-	revealBlockWidth        = 16    // fixed-width noise block shown during the block phase
+	defaultRevealIntervalMs   = 3000  // ms between revealed letters
+	defaultRevealPhase1Ms     = 10000 // letters start streaming after this
+	defaultRevealBlockMs      = 15000 // hide the real length behind a block until this
+	defaultRevealEaseMs       = 3000  // char-drop morph from block width to real length
+	defaultRevealLockoutChars = 2     // lock buzzing + zero points when this many hidden letters remain
+	defaultAutoKaraokeMs      = 3000  // after full reveal, wait this long then auto-enter karaoke
+	revealBlockWidth          = 16    // fixed-width noise block shown during the block phase
 )
 
 // Clamp bounds for the live knob so a fat-fingered slider can't wedge the game.
 const (
-	minRevealIntervalMs = 250
-	maxRevealIntervalMs = 10000
-	minRevealPhase1Ms   = 0
-	maxRevealPhase1Ms   = 20000
-	minRevealBlockMs    = 0
-	maxRevealBlockMs    = 20000
-	minRevealEaseMs     = 0
-	maxRevealEaseMs     = 5000
+	minRevealIntervalMs   = 250
+	maxRevealIntervalMs   = 10000
+	minRevealPhase1Ms     = 0
+	maxRevealPhase1Ms     = 20000
+	minRevealBlockMs      = 0
+	maxRevealBlockMs      = 20000
+	minRevealEaseMs       = 0
+	maxRevealEaseMs       = 10000
+	minRevealLockoutChars = 0
+	maxRevealLockoutChars = 20
+	minAutoKaraokeMs      = 0
+	maxAutoKaraokeMs      = 15000
 )
 
 // revealConfig holds the tunable reveal-timing knobs. Stored on the engine and
 // mutated by the admin handler; snapshotted into revealClock at startTrack so a
 // mid-round change applies to the next round, not the running ticker.
 type revealConfig struct {
-	IntervalMs int  // ms between revealed letters
-	Phase1Ms   int  // time before letters start streaming
-	BlockMs    int  // hide the real length behind a fixed-width block until this time (0 = off)
-	EaseMs     int  // soft morph duration when the block collapses to the real length
-	Alternate  bool // true: one field per tick (artist,song,artist,...); false: one from each per tick
+	IntervalMs   int  // ms between revealed letters
+	Phase1Ms     int  // time before letters start streaming
+	BlockMs      int  // hide the real length behind a fixed-width block until this time (0 = off)
+	EaseMs       int  // char-drop morph duration when the block collapses to the real length
+	LockoutChars int  // lock buzzing + zero points when <= this many hidden letters remain (total across artist+song)
+	AutoKaraokeMs int // after the reveal fully completes, delay this long then auto-enter karaoke (0 = off)
+	Alternate    bool // true: one field per tick (artist,song,artist,...); false: one from each per tick
 }
 
 // defaultRevealConfig returns the built-in defaults.
 func defaultRevealConfig() revealConfig {
 	return revealConfig{
-		IntervalMs: defaultRevealIntervalMs,
-		Phase1Ms:   defaultRevealPhase1Ms,
-		BlockMs:    defaultRevealBlockMs,
-		EaseMs:     defaultRevealEaseMs,
-		Alternate:  true,
+		IntervalMs:    defaultRevealIntervalMs,
+		Phase1Ms:      defaultRevealPhase1Ms,
+		BlockMs:       defaultRevealBlockMs,
+		EaseMs:        defaultRevealEaseMs,
+		LockoutChars:  defaultRevealLockoutChars,
+		AutoKaraokeMs: defaultAutoKaraokeMs,
+		Alternate:     true,
 	}
 }
 
@@ -102,10 +112,12 @@ func (c revealConfig) clamp() revealConfig {
 	c.Phase1Ms = clampInt(c.Phase1Ms, minRevealPhase1Ms, maxRevealPhase1Ms)
 	c.BlockMs = clampInt(c.BlockMs, minRevealBlockMs, maxRevealBlockMs)
 	c.EaseMs = clampInt(c.EaseMs, minRevealEaseMs, maxRevealEaseMs)
+	c.LockoutChars = clampInt(c.LockoutChars, minRevealLockoutChars, maxRevealLockoutChars)
+	c.AutoKaraokeMs = clampInt(c.AutoKaraokeMs, minAutoKaraokeMs, maxAutoKaraokeMs)
 	return c
 }
 
-// letterStartDelay is when letter streaming begins: after the phase-1 delay, but
+// letterStartMs is when letter streaming begins: after the phase-1 delay, but
 // never before the block has collapsed to the real length.
 func (c revealConfig) letterStartMs() int {
 	if c.BlockMs > c.Phase1Ms {
@@ -142,6 +154,7 @@ type revealClock struct {
 	phase1Done bool // the noise one-shot has fired
 	finalizing bool // a final (KARAOKE/daily-double) full reveal is in flight
 	nextField  int  // 0 = artist's turn, 1 = song's turn (alternation cursor)
+	lockedOut  bool // the lockout gate already fired this round (fire-once)
 
 	cfg revealConfig // snapshot of the knobs for THIS round
 }
@@ -215,21 +228,25 @@ type maskedRevealData struct {
 
 // adminRevealCfgData echoes the current knob values to the admin UI.
 type adminRevealCfgData struct {
-	IntervalMs int  `json:"intervalMs"`
-	Phase1Ms   int  `json:"phase1Ms"`
-	BlockMs    int  `json:"blockMs"`
-	EaseMs     int  `json:"easeMs"`
-	Alternate  bool `json:"alternate"`
+	IntervalMs    int  `json:"intervalMs"`
+	Phase1Ms      int  `json:"phase1Ms"`
+	BlockMs       int  `json:"blockMs"`
+	EaseMs        int  `json:"easeMs"`
+	LockoutChars  int  `json:"lockoutChars"`
+	AutoKaraokeMs int  `json:"autoKaraokeMs"`
+	Alternate     bool `json:"alternate"`
 }
 
 // adminSetRevealCfgData is the admin -> server knob update. Pointer fields let
 // the client send a partial update (only the sliders it touched).
 type adminSetRevealCfgData struct {
-	IntervalMs *int  `json:"intervalMs"`
-	Phase1Ms   *int  `json:"phase1Ms"`
-	BlockMs    *int  `json:"blockMs"`
-	EaseMs     *int  `json:"easeMs"`
-	Alternate  *bool `json:"alternate"`
+	IntervalMs    *int  `json:"intervalMs"`
+	Phase1Ms      *int  `json:"phase1Ms"`
+	BlockMs       *int  `json:"blockMs"`
+	EaseMs        *int  `json:"easeMs"`
+	LockoutChars  *int  `json:"lockoutChars"`
+	AutoKaraokeMs *int  `json:"autoKaraokeMs"`
+	Alternate     *bool `json:"alternate"`
 }
 
 // currentMask builds the frame for the current reveal state. During the block
@@ -267,6 +284,16 @@ func (rc *revealClock) currentMask() maskedRevealData {
 func (rc *revealClock) artistDone() bool { return rc.artistRevealed >= len(rc.artistOrder) }
 func (rc *revealClock) songDone() bool   { return rc.songRevealed >= len(rc.songOrder) }
 func (rc *revealClock) allDone() bool    { return rc.artistDone() && rc.songDone() }
+
+// remainingHidden is the total number of still-hidden letters across BOTH
+// fields — drives the lockout gate ("lock when <= N letters remain").
+func (rc *revealClock) remainingHidden() int {
+	rem := (len(rc.artistOrder) - rc.artistRevealed) + (len(rc.songOrder) - rc.songRevealed)
+	if rem < 0 {
+		rem = 0
+	}
+	return rem
+}
 
 // revealOneLetter advances the reveal by a single letter, honoring the
 // alternation setting. Returns false if there was nothing left to reveal.

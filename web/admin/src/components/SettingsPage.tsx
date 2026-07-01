@@ -17,7 +17,9 @@ const B = {
   interval: [250, 10000, 250] as const,
   phase1: [0, 20000, 500] as const,
   block: [0, 20000, 500] as const,
-  ease: [0, 5000, 100] as const,
+  ease: [0, 10000, 100] as const,
+  lockout: [0, 20, 1] as const,
+  autoKaraoke: [0, 15000, 500] as const,
 };
 
 export default function SettingsPage({ revealCfg, actions }: Props) {
@@ -35,6 +37,8 @@ export default function SettingsPage({ revealCfg, actions }: Props) {
   const [phase1Ms, setPhase1Ms] = useState(revealCfg?.phase1Ms ?? 10000);
   const [blockMs, setBlockMs] = useState(revealCfg?.blockMs ?? 15000);
   const [easeMs, setEaseMs] = useState(revealCfg?.easeMs ?? 3000);
+  const [lockoutChars, setLockoutChars] = useState(revealCfg?.lockoutChars ?? 2);
+  const [autoKaraokeMs, setAutoKaraokeMs] = useState(revealCfg?.autoKaraokeMs ?? 3000);
   const [alternate, setAlternate] = useState(revealCfg?.alternate ?? true);
   const revealTouched = useRef(false);
 
@@ -44,14 +48,19 @@ export default function SettingsPage({ revealCfg, actions }: Props) {
     setPhase1Ms(revealCfg.phase1Ms);
     setBlockMs(revealCfg.blockMs);
     setEaseMs(revealCfg.easeMs);
+    setLockoutChars(revealCfg.lockoutChars);
+    setAutoKaraokeMs(revealCfg.autoKaraokeMs);
     setAlternate(revealCfg.alternate);
   }, [revealCfg]);
 
   useEffect(() => {
     if (!revealTouched.current) return;
-    const id = setTimeout(() => actions.setRevealCfg({ intervalMs, phase1Ms, blockMs, easeMs }), 150);
+    const id = setTimeout(
+      () => actions.setRevealCfg({ intervalMs, phase1Ms, blockMs, easeMs, lockoutChars, autoKaraokeMs }),
+      150,
+    );
     return () => clearTimeout(id);
-  }, [intervalMs, phase1Ms, blockMs, easeMs, actions]);
+  }, [intervalMs, phase1Ms, blockMs, easeMs, lockoutChars, autoKaraokeMs, actions]);
 
   const edit = <T,>(setter: (v: T) => void) => (v: T) => { revealTouched.current = true; setter(v); };
 
@@ -79,6 +88,10 @@ export default function SettingsPage({ revealCfg, actions }: Props) {
               fmt={(v) => (v === 0 ? "off" : `${(v / 1000).toFixed(1)}s`)} onChange={edit(setBlockMs)} />
             <Fader label="Morph" sub="length ease" value={easeMs} min={B.ease[0]} max={B.ease[1]} step={B.ease[2]}
               fmt={(v) => `${(v / 1000).toFixed(1)}s`} onChange={edit(setEaseMs)} />
+            <Fader label="Lockout" sub="chars left" value={lockoutChars} min={B.lockout[0]} max={B.lockout[1]} step={B.lockout[2]}
+              fmt={(v) => `${v}`} onChange={edit(setLockoutChars)} />
+            <Fader label="Auto lyrics" sub="after reveal" value={autoKaraokeMs} min={B.autoKaraoke[0]} max={B.autoKaraoke[1]} step={B.autoKaraoke[2]}
+              fmt={(v) => (v === 0 ? "off" : `${(v / 1000).toFixed(1)}s`)} onChange={edit(setAutoKaraokeMs)} />
 
             <Switch label="Alt" sub="artist/song" checked={alternate}
               onChange={(v) => { revealTouched.current = true; setAlternate(v); actions.setRevealCfg({ alternate: v }); }} />

@@ -131,6 +131,9 @@ type Engine struct {
 	revealCfg   revealConfig
 	rc          revealClock
 	revealTimer *time.Timer
+	// revealLocked: the reveal got close enough to complete that buzzing is
+	// closed and points are zeroed for the rest of this round. Reset each track.
+	revealLocked bool
 }
 
 // NewEngine wires the engine to its dependencies (all injected for testing).
@@ -690,6 +693,11 @@ func (e *Engine) trackStartEnvelope() protocol.ServerEnvelope {
 
 func (e *Engine) onBuzz(connID string, env protocol.ClientEnvelope, arrivalMs int64) {
 	if e.state != protocol.StateRoundActive {
+		e.bcast.SendTo(connID, e.envelope(protocol.SMsgBuzzResult, protocol.BuzzResultData{Won: false}))
+		return
+	}
+	// Reveal lockout gate: the answer is essentially shown, so buzzing is closed.
+	if e.revealLocked {
 		e.bcast.SendTo(connID, e.envelope(protocol.SMsgBuzzResult, protocol.BuzzResultData{Won: false}))
 		return
 	}
@@ -1274,11 +1282,13 @@ func (e *Engine) onAdminSetThresh(connID string, env protocol.ClientEnvelope) {
 func (e *Engine) revealCfgData() adminRevealCfgData {
 	c := e.revealCfg
 	return adminRevealCfgData{
-		IntervalMs: c.IntervalMs,
-		Phase1Ms:   c.Phase1Ms,
-		BlockMs:    c.BlockMs,
-		EaseMs:     c.EaseMs,
-		Alternate:  c.Alternate,
+		IntervalMs:    c.IntervalMs,
+		Phase1Ms:      c.Phase1Ms,
+		BlockMs:       c.BlockMs,
+		EaseMs:        c.EaseMs,
+		LockoutChars:  c.LockoutChars,
+		AutoKaraokeMs: c.AutoKaraokeMs,
+		Alternate:     c.Alternate,
 	}
 }
 
@@ -1303,6 +1313,12 @@ func (e *Engine) onAdminSetRevealCfg(connID string, env protocol.ClientEnvelope)
 	}
 	if d.EaseMs != nil {
 		cfg.EaseMs = *d.EaseMs
+	}
+	if d.LockoutChars != nil {
+		cfg.LockoutChars = *d.LockoutChars
+	}
+	if d.AutoKaraokeMs != nil {
+		cfg.AutoKaraokeMs = *d.AutoKaraokeMs
 	}
 	if d.Alternate != nil {
 		cfg.Alternate = *d.Alternate
@@ -1387,6 +1403,7 @@ func (e *Engine) startReveal() {
 		return
 	}
 	e.stopRevealTimer()
+	e.revealLocked = false // fresh round: buzzing open, points live
 	cfg := e.revealCfg.clamp()
 	// Start in the fixed-width block phase if the block knob is set (hides the
 	// real answer length until it collapses); otherwise show the real-length
@@ -1474,11 +1491,76 @@ func (e *Engine) revealTick(rk string) {
 		}
 		e.broadcastMask()
 	}
+
+	// Lockout gate: once few enough letters remain hidden the answer is
+	// effectively shown — close buzzing and zero the points (fire once).
+	if !e.rc.lockedOut && e.rc.remainingHidden() <= e.rc.cfg.LockoutChars {
+		e.rc.lockedOut = true
+		e.lockOutReveal()
+	}
+
 	if e.rc.allDone() {
 		e.rc.active = false
-		return // fully revealed; stop (no re-arm)
+		e.scheduleAutoKaraoke(rk) // after full reveal, auto-show lyrics
+		return                    // fully revealed; stop the letter ticker
 	}
 	e.startRevealTicker(rk)
+}
+
+// lockOutReveal closes buzzing and zeroes the points for the rest of the round:
+// the answer is essentially on screen. Marks every mobile player guessed (so
+// their buzzers grey out) and re-broadcasts trackStart with a zero pool so the
+// stage/point timer reads 0.
+func (e *Engine) lockOutReveal() {
+	e.revealLocked = true
+	for _, p := range e.reg.mobilePlayers() {
+		p.GuessedThisTrack = true
+	}
+	// Zero-pool trackStart: stage shows 0 points; carry the real lengths.
+	artistLen, songLen := 0, 0
+	if e.curTrack != nil {
+		artistLen, songLen = len(e.curTrack.Artist), len(e.curTrack.Song)
+	}
+	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgTrackStart, protocol.TrackStartData{
+		MaxPoints:  0,
+		BasePoints: 0,
+		StartTime:  e.trackStartMs,
+		ArtistLen:  artistLen,
+		SongLen:    songLen,
+	}))
+	// Grey out every mobile buzzer (fresh buzzResult{won:false} clears/locks it).
+	for _, p := range e.reg.mobilePlayers() {
+		for _, cid := range e.reg.connIDs(p.ID) {
+			e.bcast.SendTo(cid, e.envelope(protocol.SMsgBuzzResult, protocol.BuzzResultData{Won: false}))
+		}
+	}
+}
+
+// scheduleAutoKaraoke waits cfg.AutoKaraokeMs after the reveal fully completes,
+// then auto-enters karaoke (shows lyrics) — no admin Reveal click needed. Guards
+// on roundKey + that we're still in the active round loop.
+func (e *Engine) scheduleAutoKaraoke(rk string) {
+	if e.rc.cfg.AutoKaraokeMs <= 0 {
+		return
+	}
+	delay := time.Duration(e.rc.cfg.AutoKaraokeMs) * time.Millisecond
+	time.AfterFunc(delay, func() {
+		e.submit(func() {
+			if e.roundKey != rk {
+				return // round moved on
+			}
+			// Only auto-advance from the live-round states; if an admin already
+			// graded/revealed/ended, do nothing.
+			if e.state == protocol.StateRoundActive || e.state == protocol.StateLocked {
+				if e.curTrack != nil {
+					e.curTrack.Played = true
+				}
+				e.buzzWinner = ""
+				e.lock.Release(context.Background(), e.roundKey)
+				e.enterKaraoke()
+			}
+		})
+	})
 }
 
 // broadcastMask builds ONE envelope and fans the identical frame to stage,

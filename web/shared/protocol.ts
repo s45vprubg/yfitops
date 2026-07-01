@@ -113,6 +113,8 @@ export interface AdminSetRevealCfgData {
   phase1Ms?: number;
   blockMs?: number;
   easeMs?: number;
+  lockoutChars?: number;
+  autoKaraokeMs?: number;
   alternate?: boolean;
 }
 export interface RateData { stars: number; }
@@ -156,6 +158,8 @@ export interface AdminRevealCfgData {
   phase1Ms: number;
   blockMs: number;
   easeMs: number;
+  lockoutChars: number;
+  autoKaraokeMs: number;
   alternate: boolean;
 }
 export interface LyricLine { timeMs: number; text: string; }

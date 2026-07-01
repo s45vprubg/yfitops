@@ -87,7 +87,11 @@ func (h *Handler) importPlaylist(w http.ResponseWriter, r *http.Request) {
 
 	imported := 0
 	skipped := 0
-	for _, t := range tracks {
+	// Stamp created_at as base+index so the library preserves the Spotify
+	// playlist order (a tight loop would otherwise collide on the same
+	// millisecond and lose ordering). Track lists sort by created_at ASC.
+	base := time.Now().UnixMilli()
+	for i, t := range tracks {
 		track := &Track{
 			ID:         generateID("trk"),
 			BoardID:    boardID,
@@ -96,7 +100,7 @@ func (h *Handler) importPlaylist(w http.ResponseWriter, r *http.Request) {
 			Song:       t.Song,
 			AlbumArt:   t.AlbumArt,
 			DurationMs: t.DurationMs,
-			CreatedAt:  time.Now().UnixMilli(),
+			CreatedAt:  base + int64(i),
 		}
 		h.probeLyrics(r.Context(), track)
 		err := h.store.AddTrack(r.Context(), track)

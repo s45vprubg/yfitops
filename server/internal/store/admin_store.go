@@ -115,7 +115,7 @@ func (r *PostgresRepo) SetTrackLyrics(ctx context.Context, trackID string, hasSy
 func (r *PostgresRepo) ListTracks(ctx context.Context, boardID string) ([]admin.Track, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT id, board_id, spotify_uri, artist, song, album_art, duration_ms, created_at, has_synced_lyrics, lyrics_override
-		   FROM board_tracks WHERE board_id = $1 ORDER BY created_at DESC`, boardID)
+		   FROM board_tracks WHERE board_id = $1 ORDER BY created_at ASC`, boardID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list tracks: %w", err)
 	}
@@ -140,7 +140,7 @@ func (r *PostgresRepo) UnplacedTracks(ctx context.Context, boardID string) ([]ad
 		    AND bt.id NOT IN (
 		        SELECT blct.track_id FROM board_layout_cell_tracks blct WHERE blct.board_id = $1
 		    )
-		  ORDER BY bt.created_at DESC`, boardID)
+		  ORDER BY bt.created_at ASC`, boardID)
 	if err != nil {
 		return nil, fmt.Errorf("store: unplaced tracks: %w", err)
 	}
