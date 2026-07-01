@@ -60,6 +60,12 @@ export default function BoardBuilderPage({ secret }: Props) {
     refresh();
   };
 
+  const handleToggleOverride = async (trackId: string, override: boolean) => {
+    if (!selectedId) return;
+    await api.setTrackOverride(selectedId, trackId, override);
+    refresh();
+  };
+
   const handleAddColumn = async () => {
     if (!selectedId) return;
     const name = await promptText({ title: "New category", placeholder: "Category name", confirmLabel: "Add" });
@@ -156,6 +162,7 @@ export default function BoardBuilderPage({ secret }: Props) {
             tracks={unplaced}
             onRefresh={refresh}
             onDeleteTrack={handleDeleteTrack}
+            onToggleOverride={handleToggleOverride}
           />
           <BuilderGrid
             cols={cols}
@@ -163,6 +170,7 @@ export default function BoardBuilderPage({ secret }: Props) {
             onRenameCategory={handleRenameCategory}
             onRemoveColumn={handleRemoveColumn}
             onAddColumn={handleAddColumn}
+            onToggleOverride={handleToggleOverride}
           />
         </div>
       </div>

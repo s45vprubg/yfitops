@@ -147,6 +147,7 @@ func SampleBoard() *game.Board {
 					Artist:     fmt.Sprintf("Artist %d-%d-%d", row, col, k),
 					Song:       fmt.Sprintf("Song %d-%d-%d", row, col, k),
 					DurationMs: 180_000,
+					Playable:   true, // demo tracks are always playable
 				}
 			}
 			grid[ri][ci] = &game.Cell{

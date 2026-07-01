@@ -217,6 +217,7 @@ func testBoard() *Board {
 				Song:       "Rollin",
 				AlbumArt:   "art.jpg",
 				DurationMs: 200000,
+				Playable:   true,
 			})
 		}
 		return c

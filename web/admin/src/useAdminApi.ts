@@ -17,6 +17,10 @@ export interface TrackData {
   albumArt: string;
   durationMs: number;
   createdAt: number;
+  // null = not yet probed; true/false = LRCLIB synced-lyric result.
+  hasSyncedLyrics: boolean | null;
+  // Admin chose to allow this track to play even without synced lyrics.
+  lyricsOverride: boolean;
 }
 
 export interface LayoutCell {
@@ -79,6 +83,10 @@ function api(secret: string) {
     addTrack: (boardId: string, track: { spotifyUri: string; artist: string; song: string; albumArt: string; durationMs: number }) =>
       req<TrackData>("POST", `/api/boards/${boardId}/tracks`, track),
     deleteTrack: (boardId: string, trackId: string) => req<void>("DELETE", `/api/boards/${boardId}/tracks/${trackId}`),
+    setTrackOverride: (boardId: string, trackId: string, override: boolean) =>
+      req<void>("PATCH", `/api/boards/${boardId}/tracks/${trackId}/override`, { override }),
+    rescanLyrics: (boardId: string) =>
+      req<{ checked: number; withLyrics: number }>("POST", `/api/boards/${boardId}/rescan-lyrics`),
 
     // Layout
     getLayout: (boardId: string) => req<Layout>("GET", `/api/boards/${boardId}/layout`),

@@ -206,6 +206,13 @@ func derefInt64(p *int64) int64 {
 	return *p
 }
 
+func derefBool(p *bool) bool {
+	if p == nil {
+		return false
+	}
+	return *p
+}
+
 // cellCoord is a (row, col) grid key shared by the board loaders.
 type cellCoord struct{ row, col int }
 

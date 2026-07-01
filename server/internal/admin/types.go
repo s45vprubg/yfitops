@@ -13,15 +13,21 @@ type Board struct {
 }
 
 // Track is a board-scoped track in the library.
+//
+// HasSyncedLyrics is a tri-state via pointer: nil = not yet checked, else the
+// LRCLIB probe result. LyricsOverride lets an admin allow a lyric-less track to
+// play anyway (default off — karaoke needs words).
 type Track struct {
-	ID         string `json:"id"`
-	BoardID    string `json:"boardId"`
-	SpotifyURI string `json:"spotifyUri"`
-	Artist     string `json:"artist"`
-	Song       string `json:"song"`
-	AlbumArt   string `json:"albumArt"`
-	DurationMs int64  `json:"durationMs"`
-	CreatedAt  int64  `json:"createdAt"`
+	ID              string `json:"id"`
+	BoardID         string `json:"boardId"`
+	SpotifyURI      string `json:"spotifyUri"`
+	Artist          string `json:"artist"`
+	Song            string `json:"song"`
+	AlbumArt        string `json:"albumArt"`
+	DurationMs      int64  `json:"durationMs"`
+	CreatedAt       int64  `json:"createdAt"`
+	HasSyncedLyrics *bool  `json:"hasSyncedLyrics"`
+	LyricsOverride  bool   `json:"lyricsOverride"`
 }
 
 // LayoutCell represents one cell in the grid with its placed tracks.

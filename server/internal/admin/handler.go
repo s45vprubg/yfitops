@@ -10,6 +10,7 @@ type Handler struct {
 	store   AdminStore
 	spotify SpotifySearcher
 	engine  BoardReloader
+	lyrics  LyricsProber // optional; probes synced-lyric availability on add/import
 	secret  string
 }
 
@@ -23,6 +24,11 @@ func NewHandler(store AdminStore, spotify SpotifySearcher, engine BoardReloader,
 		secret:  secret,
 	}
 }
+
+// SetLyricsProber wires an optional lyric-availability prober used when tracks
+// are added/imported. If nil, tracks are added without a probe (has_synced_lyrics
+// stays NULL and the track is treated as playable until a re-scan).
+func (h *Handler) SetLyricsProber(p LyricsProber) { h.lyrics = p }
 
 // Register mounts all admin API routes onto the given mux. CORS is handled
 // at the top level via a catch-all /api/ prefix handler that intercepts OPTIONS
@@ -45,6 +51,10 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("GET /api/boards/{id}/unplaced", wrap(h.unplacedTracks))
 	mux.Handle("POST /api/boards/{id}/tracks", wrap(h.addTrack))
 	mux.Handle("DELETE /api/boards/{id}/tracks/{trackId}", wrap(h.deleteTrack))
+	// Toggle the play-anyway override for a lyric-less track.
+	mux.Handle("PATCH /api/boards/{id}/tracks/{trackId}/override", wrap(h.setTrackOverride))
+	// Re-probe LRCLIB for every track on a board (lyrics can appear over time).
+	mux.Handle("POST /api/boards/{id}/rescan-lyrics", wrap(h.rescanLyrics))
 
 	// Layout
 	mux.Handle("GET /api/boards/{id}/layout", wrap(h.getLayout))

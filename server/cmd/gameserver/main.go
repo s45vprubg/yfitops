@@ -216,6 +216,7 @@ func main() {
 	if pr, ok := repo.(*store.PostgresRepo); ok {
 		spotifyAdapter := &admin.SpotifyAdapter{Client: audio}
 		adminHandler := admin.NewHandler(pr, spotifyAdapter, eng, cfg.AdminSecret)
+		adminHandler.SetLyricsProber(lyr) // probe synced-lyric availability on add/import
 		adminHandler.Register(mux)
 		log.Printf("admin API: registered on /api/*")
 	} else {

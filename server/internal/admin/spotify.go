@@ -98,6 +98,7 @@ func (h *Handler) importPlaylist(w http.ResponseWriter, r *http.Request) {
 			DurationMs: t.DurationMs,
 			CreatedAt:  time.Now().UnixMilli(),
 		}
+		h.probeLyrics(r.Context(), track)
 		err := h.store.AddTrack(r.Context(), track)
 		if err != nil {
 			skipped++

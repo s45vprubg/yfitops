@@ -17,6 +17,10 @@ type Track struct {
 	AlbumArt   string
 	DurationMs int64
 	Played     bool // exhausted within its cell pool
+	// Playable reports whether this track may be auto-selected: it has synced
+	// lyrics OR an admin override. Lyric-less non-overridden tracks are skipped
+	// by default (karaoke needs words). Computed from the store at load time.
+	Playable bool
 }
 
 // Cell is one coordinate on the Jeopardy grid (§7). It holds a pool of 4-6
@@ -30,20 +34,18 @@ type Cell struct {
 }
 
 // Exhausted reports whether every track in the pool has been played.
+// Exhausted reports whether a cell has no playable, unplayed tracks left. A
+// lyric-less non-overridden track is not playable, so a cell whose only
+// remaining tracks lack lyrics greys out (nothing to auto-select).
 func (c *Cell) Exhausted() bool {
-	for _, t := range c.Tracks {
-		if !t.Played {
-			return false
-		}
-	}
-	return true
+	return c.TracksLeft() == 0
 }
 
-// TracksLeft counts unplayed tracks in the pool.
+// TracksLeft counts unplayed AND playable tracks in the pool.
 func (c *Cell) TracksLeft() int {
 	n := 0
 	for _, t := range c.Tracks {
-		if !t.Played {
+		if !t.Played && t.Playable {
 			n++
 		}
 	}

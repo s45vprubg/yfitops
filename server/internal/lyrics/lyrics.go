@@ -105,6 +105,14 @@ func (c *LRCLIBClient) Fetch(ctx context.Context, artist, title string, duration
 	return ParseLRC(lr.SyncedLyrics), nil
 }
 
+// HasSyncedLyrics reports whether LRCLIB has time-coded lyrics for a track. Used
+// by the admin board builder to grey out karaoke-incompatible tracks. A fetch
+// error is treated as "no lyrics" (best-effort; a re-scan can retry).
+func (c *LRCLIBClient) HasSyncedLyrics(ctx context.Context, artist, song string, durationSec int) bool {
+	lines, err := c.Fetch(ctx, artist, song, durationSec)
+	return err == nil && len(lines) > 0
+}
+
 // tsRe matches a single LRC timestamp tag: [mm:ss.xx] or [mm:ss.xxx], with the
 // fractional part optional ([mm:ss]). Minutes/seconds may be one or more
 // digits to tolerate sloppy producers.

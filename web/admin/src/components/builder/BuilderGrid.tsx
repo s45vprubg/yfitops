@@ -8,9 +8,10 @@ interface Props {
   onRenameCategory: (col: number, name: string) => void;
   onRemoveColumn: (col: number) => void;
   onAddColumn: () => void;
+  onToggleOverride: (trackId: string, override: boolean) => void;
 }
 
-export default function BuilderGrid({ cols, cells, onRenameCategory, onRemoveColumn, onAddColumn }: Props) {
+export default function BuilderGrid({ cols, cells, onRenameCategory, onRemoveColumn, onAddColumn, onToggleOverride }: Props) {
   const getCellTracks = (row: number, col: number): TrackData[] => {
     const cell = cells.find((c) => c.row === row && c.col === col);
     return cell?.tracks ?? [];
@@ -96,7 +97,7 @@ export default function BuilderGrid({ cols, cells, onRenameCategory, onRemoveCol
                       >
                         <div className="flex flex-col gap-1">
                           {cellTracks.map((t, idx) => (
-                            <TrackCard key={t.id} track={t} index={idx} />
+                            <TrackCard key={t.id} track={t} index={idx} onToggleOverride={onToggleOverride} />
                           ))}
                         </div>
                         {provided.placeholder}

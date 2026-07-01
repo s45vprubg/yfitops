@@ -35,7 +35,10 @@ func pickTrack(c *Cell, rng *rand.Rand) *Track {
 	}
 	pool := make([]*Track, 0, len(c.Tracks))
 	for _, t := range c.Tracks {
-		if !t.Played {
+		// Skip played tracks and lyric-less tracks (unless admin-overridden):
+		// karaoke needs words, so a track without synced lyrics is not
+		// auto-selected by default.
+		if !t.Played && t.Playable {
 			pool = append(pool, t)
 		}
 	}

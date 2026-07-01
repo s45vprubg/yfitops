@@ -44,6 +44,7 @@ func (m *mockStore) UnplacedTracks(_ context.Context, _ string) ([]Track, error)
 	return m.tracks, nil
 }
 func (m *mockStore) DeleteTrack(_ context.Context, _ string) error         { return nil }
+func (m *mockStore) SetTrackLyrics(_ context.Context, _ string, _ *bool, _ *bool) error { return nil }
 func (m *mockStore) AddColumn(_ context.Context, _ string, _ int, _ string) error { return nil }
 func (m *mockStore) RemoveColumn(_ context.Context, _ string, _ int) error { return nil }
 func (m *mockStore) RenameCategory(_ context.Context, _ string, _ int, _ string) error { return nil }

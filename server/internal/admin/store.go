@@ -21,6 +21,9 @@ type AdminStore interface {
 	ListTracks(ctx context.Context, boardID string) ([]Track, error)
 	UnplacedTracks(ctx context.Context, boardID string) ([]Track, error)
 	DeleteTrack(ctx context.Context, trackID string) error
+	// SetTrackLyrics updates the lyric-availability probe result and/or the
+	// admin play-override for a track. Nil args leave that column unchanged.
+	SetTrackLyrics(ctx context.Context, trackID string, hasSynced *bool, override *bool) error
 
 	// Layout
 	AddColumn(ctx context.Context, boardID string, col int, category string) error
@@ -60,4 +63,10 @@ type BoardReloader interface {
 	ReloadBoard(b *game.Board)
 	StartGame() error
 	ResetToLobby() error
+}
+
+// LyricsProber checks whether a track has synced lyrics (for the grey-out /
+// karaoke gate). Returns true if LRCLIB has time-coded lyrics for the track.
+type LyricsProber interface {
+	HasSyncedLyrics(ctx context.Context, artist, song string, durationSec int) bool
 }
