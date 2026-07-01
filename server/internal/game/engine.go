@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/rand"
 	"runtime/debug"
+	"sync"
 	"time"
 
 	"github.com/s45vprubg/yfitops/server/internal/anticheat"
@@ -134,10 +135,20 @@ type Engine struct {
 	// revealLocked: the reveal got close enough to complete that buzzing is
 	// closed and points are zeroed for the rest of this round. Reset each track.
 	revealLocked bool
+	// pointFactor scales the awardable points for the current round (1.0 normal,
+	// 0.5 after one field revealed ahead of the other). Reset each track.
+	pointFactor float64
 
 	// connIP maps a live connID -> client IP (host only) for anti-cheat
 	// telemetry (shared-IP detection). Run-goroutine-owned.
 	connIP map[string]string
+
+	// lyricCache memoizes LRCLIB results by artist|song|dur so a track's lyrics
+	// are fetched once (prefetched at startTrack) and served instantly at
+	// karaoke — no loading spinner. A cached entry may be an empty slice
+	// (known to have no synced lyrics). Guarded by lyricMu (touched off-loop).
+	lyricMu    sync.Mutex
+	lyricCache map[string][]protocol.LyricLine
 }
 
 // NewEngine wires the engine to its dependencies (all injected for testing).
@@ -182,8 +193,10 @@ func NewEngine(repo GameRepo, lock BuzzLock, audio AudioDevice, lyrics LyricsPro
 		state:     protocol.StateLobby,
 		reg:       newRegistry(),
 		session:   &Session{ID: cfg.SessionID, SkipThresholdPct: cfg.SkipThresholdPct, State: string(protocol.StateLobby)},
-		revealCfg: revCfg.clamp(),
-		connIP:    map[string]string{},
+		revealCfg:   revCfg.clamp(),
+		connIP:      map[string]string{},
+		pointFactor: 1.0,
+		lyricCache:  map[string][]protocol.LyricLine{},
 	}
 }
 
@@ -657,6 +670,9 @@ func (e *Engine) startTrack(cell *Cell, track *Track) {
 		p.GuessedThisTrack = false
 	}
 
+	// Warm the lyric cache now so karaoke has no load time on the stage.
+	e.prefetchLyrics(track.Artist, track.Song, int(track.DurationMs/1000))
+
 	e.transitionTo(protocol.StateRoundActive)
 
 	// trackStart carries point ceilings + answer LENGTHS for the stage timer.
@@ -815,6 +831,10 @@ func (e *Engine) gradeCorrect(winner *Player, elapsed int64) {
 			baseP = maxP
 		}
 		pts = currentPointsFromPool(maxP, baseP, elapsed)
+	}
+	// Halve if one field revealed ahead of the other this round.
+	if e.pointFactor > 0 && e.pointFactor < 1 {
+		pts = int(float64(pts) * e.pointFactor)
 	}
 	e.award(winner, pts)
 	e.cellPicker = winner.ID
@@ -1001,16 +1021,29 @@ func (e *Engine) fetchAndSendLyrics() {
 	if e.lyrics == nil || e.curTrack == nil {
 		return
 	}
-	// Snapshot on-loop, then fetch off-loop.
 	artist, song := e.curTrack.Artist, e.curTrack.Song
 	durSec := int(e.curTrack.DurationMs / 1000)
 	rk := e.roundKey
+	key := lyricKey(artist, song, durSec)
 
-	// Immediate "loading" signal (stage shows a spinner).
+	// Cache hit (prefetched at startTrack): serve instantly, no spinner.
+	if lines, ok := e.lyricCacheGet(key); ok {
+		if len(lines) == 0 {
+			e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgLyricsStatus, map[string]string{"status": "none"}))
+			return
+		}
+		e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgLyricsStatus, map[string]string{"status": "ready"}))
+		e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgLyrics, protocol.LyricsData{Lines: lines}))
+		return
+	}
+
+	// Miss (prefetch not done yet): show a spinner and fetch off the loop.
 	e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgLyricsStatus, map[string]string{"status": "loading"}))
-
 	go func() {
 		lines, err := e.lyrics.Fetch(context.Background(), artist, song, durSec)
+		if err == nil {
+			e.lyricCachePut(key, lines) // cache even an empty result
+		}
 		e.submit(func() {
 			if e.roundKey != rk {
 				return // round moved on; drop stale lyrics
@@ -1023,6 +1056,43 @@ func (e *Engine) fetchAndSendLyrics() {
 			e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgLyrics, protocol.LyricsData{Lines: lines}))
 		})
 	}()
+}
+
+// prefetchLyrics warms the lyric cache for a track off the Run loop, so by the
+// time the round reaches karaoke the lines are already in hand — no loading
+// spinner on the stage. Safe to call from startTrack; a no-op if already cached.
+func (e *Engine) prefetchLyrics(artist, song string, durSec int) {
+	if e.lyrics == nil {
+		return
+	}
+	key := lyricKey(artist, song, durSec)
+	if _, ok := e.lyricCacheGet(key); ok {
+		return // already cached
+	}
+	go func() {
+		lines, err := e.lyrics.Fetch(context.Background(), artist, song, durSec)
+		if err == nil {
+			e.lyricCachePut(key, lines)
+		}
+	}()
+}
+
+func lyricKey(artist, song string, durSec int) string {
+	return fmt.Sprintf("%s|%s|%d", artist, song, durSec)
+}
+func (e *Engine) lyricCacheGet(key string) ([]protocol.LyricLine, bool) {
+	e.lyricMu.Lock()
+	defer e.lyricMu.Unlock()
+	v, ok := e.lyricCache[key]
+	return v, ok
+}
+func (e *Engine) lyricCachePut(key string, lines []protocol.LyricLine) {
+	e.lyricMu.Lock()
+	defer e.lyricMu.Unlock()
+	if e.lyricCache == nil {
+		e.lyricCache = map[string][]protocol.LyricLine{}
+	}
+	e.lyricCache[key] = lines
 }
 
 func (e *Engine) onVote(connID string, env protocol.ClientEnvelope) {
@@ -1416,6 +1486,7 @@ func (e *Engine) startReveal() {
 	}
 	e.stopRevealTimer()
 	e.revealLocked = false // fresh round: buzzing open, points live
+	e.pointFactor = 1.0    // full points until a field reveals early
 	cfg := e.revealCfg.clamp()
 	// Start in the fixed-width block phase if the block knob is set (hides the
 	// real answer length until it collapses); otherwise show the real-length
@@ -1504,8 +1575,19 @@ func (e *Engine) revealTick(rk string) {
 		e.broadcastMask()
 	}
 
-	// Lockout gate: once few enough letters remain hidden the answer is
-	// effectively shown — close buzzing and zero the points (fire once).
+	// One-field-first gate: if EITHER field crosses its reveal gate while the
+	// OTHER is still hidden, halve the available points once — that field is
+	// essentially given away, so a guess is worth less (fire once).
+	gate := e.rc.cfg.LockoutChars
+	aGated := e.rc.artistRemaining() <= gate
+	sGated := e.rc.songRemaining() <= gate
+	if !e.rc.fieldHalved && (aGated != sGated) {
+		e.rc.fieldHalved = true
+		e.halvePoints()
+	}
+
+	// Lockout gate: once few enough letters remain hidden across BOTH fields the
+	// answer is effectively shown — close buzzing and zero the points (fire once).
 	if !e.rc.lockedOut && e.rc.remainingHidden() <= e.rc.cfg.LockoutChars {
 		e.rc.lockedOut = true
 		e.lockOutReveal()
@@ -1546,6 +1628,28 @@ func (e *Engine) lockOutReveal() {
 			e.bcast.SendTo(cid, e.envelope(protocol.SMsgBuzzResult, protocol.BuzzResultData{Won: false}))
 		}
 	}
+}
+
+// halvePoints scales the round's awardable points by 0.5 (fires once, when one
+// field reveals ahead of the other) and re-broadcasts a halved-pool trackStart
+// so the stage point timer reflects it. Does not touch buzzing — players can
+// still guess, just for half the value.
+func (e *Engine) halvePoints() {
+	if e.revealLocked {
+		return // already zeroed by the full lockout; nothing to halve
+	}
+	e.pointFactor = 0.5
+	artistLen, songLen := 0, 0
+	if e.curTrack != nil {
+		artistLen, songLen = len(e.curTrack.Artist), len(e.curTrack.Song)
+	}
+	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgTrackStart, protocol.TrackStartData{
+		MaxPoints:  MaxPointsForRow(e.curRow) / 2,
+		BasePoints: BaseValue / 2,
+		StartTime:  e.trackStartMs,
+		ArtistLen:  artistLen,
+		SongLen:    songLen,
+	}))
 }
 
 // scheduleAutoKaraoke waits cfg.AutoKaraokeMs after the reveal fully completes,

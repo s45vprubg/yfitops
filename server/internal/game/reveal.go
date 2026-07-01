@@ -172,8 +172,9 @@ type revealClock struct {
 	phase      int  // revealPhase*
 	phase1Done bool // the noise one-shot has fired
 	finalizing bool // a final (KARAOKE/daily-double) full reveal is in flight
-	nextField  int  // 0 = artist's turn, 1 = song's turn (alternation cursor)
-	lockedOut  bool // the lockout gate already fired this round (fire-once)
+	nextField   int  // 0 = artist's turn, 1 = song's turn (alternation cursor)
+	lockedOut   bool // the total-lockout gate already fired this round (fire-once)
+	fieldHalved bool // the "one field revealed first" halve already fired (fire-once)
 
 	cfg revealConfig // snapshot of the knobs for THIS round
 }
@@ -312,6 +313,21 @@ func (rc *revealClock) remainingHidden() int {
 		rem = 0
 	}
 	return rem
+}
+
+// artistRemaining / songRemaining are the still-hidden letter counts per field
+// (drives the "one field revealed first -> halve points" gate).
+func (rc *revealClock) artistRemaining() int {
+	if r := len(rc.artistOrder) - rc.artistRevealed; r > 0 {
+		return r
+	}
+	return 0
+}
+func (rc *revealClock) songRemaining() int {
+	if r := len(rc.songOrder) - rc.songRevealed; r > 0 {
+		return r
+	}
+	return 0
 }
 
 // revealOneLetter advances the reveal by a single letter, honoring the
