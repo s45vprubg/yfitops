@@ -152,7 +152,7 @@ type Engine struct {
 	// karaoke — no loading spinner. A cached entry may be an empty slice
 	// (known to have no synced lyrics). Guarded by lyricMu (touched off-loop).
 	lyricMu    sync.Mutex
-	lyricCache map[string][]protocol.LyricLine
+	lyricCache map[string]*lyricEntry
 }
 
 // NewEngine wires the engine to its dependencies (all injected for testing).
@@ -200,7 +200,7 @@ func NewEngine(repo GameRepo, lock BuzzLock, audio AudioDevice, lyrics LyricsPro
 		revealCfg:   revCfg.clamp(),
 		connIP:      map[string]string{},
 		pointFactor: 1.0,
-		lyricCache:  map[string][]protocol.LyricLine{},
+		lyricCache:  map[string]*lyricEntry{},
 	}
 }
 
@@ -1030,12 +1030,14 @@ func (e *Engine) enterKaraoke() {
 	e.broadcastBoard()
 }
 
-// fetchAndSendLyrics fetches synced lyrics OFF the Run goroutine (the LRCLIB
-// call can take seconds — doing it inline would freeze the whole engine:
-// buzzes, votes, everything). It first tells the stage lyrics are "loading" so
-// it shows a spinner instead of flashing "no lyrics", then broadcasts the lines
-// (or a "none" status) when the fetch returns. The roundKey guard drops a
-// result that arrives after the round already moved on.
+// fetchAndSendLyrics delivers synced lyrics to the stage, sharing the SAME
+// fetch the prefetch (at startTrack) already kicked off — via a singleflight
+// cache entry. If that fetch is already done (the common case, since prefetch
+// ran seconds ago) it serves instantly with no spinner. If it's still in
+// flight, it WAITS on it off the Run goroutine rather than flashing loading +
+// starting a duplicate fetch (the old bug that produced the ~1-in-5 spinner).
+// "loading" is only shown if the shared fetch hasn't finished within a short
+// grace — i.e. essentially only when the reveal is hit almost immediately.
 func (e *Engine) fetchAndSendLyrics() {
 	if e.lyrics == nil || e.curTrack == nil {
 		return
@@ -1043,75 +1045,94 @@ func (e *Engine) fetchAndSendLyrics() {
 	artist, song := e.curTrack.Artist, e.curTrack.Song
 	durSec := int(e.curTrack.DurationMs / 1000)
 	rk := e.roundKey
-	key := lyricKey(artist, song, durSec)
+	ent := e.lyricFetch(artist, song, durSec) // shares/starts the singleflight fetch
 
-	// Cache hit (prefetched at startTrack): serve instantly, no spinner.
-	if lines, ok := e.lyricCacheGet(key); ok {
-		if len(lines) == 0 {
+	send := func() {
+		if e.roundKey != rk {
+			return // round moved on; drop stale lyrics
+		}
+		if ent.err != nil || len(ent.lines) == 0 {
 			e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgLyricsStatus, map[string]string{"status": "none"}))
 			return
 		}
 		e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgLyricsStatus, map[string]string{"status": "ready"}))
-		e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgLyrics, protocol.LyricsData{Lines: lines}))
-		return
+		e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgLyrics, protocol.LyricsData{Lines: ent.lines}))
 	}
 
-	// Miss (prefetch not done yet): show a spinner and fetch off the loop.
-	e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgLyricsStatus, map[string]string{"status": "loading"}))
-	go func() {
-		lines, err := e.lyrics.Fetch(context.Background(), artist, song, durSec)
-		if err == nil {
-			e.lyricCachePut(key, lines) // cache even an empty result
-		}
-		e.submit(func() {
-			if e.roundKey != rk {
-				return // round moved on; drop stale lyrics
+	select {
+	case <-ent.done:
+		// Already fetched (prefetch finished): serve immediately, no spinner.
+		send()
+	default:
+		// Still in flight: wait for the shared fetch, then serve. Only show a
+		// spinner if it doesn't land within a short grace window.
+		go func() {
+			select {
+			case <-ent.done:
+			case <-time.After(400 * time.Millisecond):
+				e.submit(func() {
+					if e.roundKey == rk {
+						e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgLyricsStatus, map[string]string{"status": "loading"}))
+					}
+				})
+				<-ent.done
 			}
-			if err != nil || len(lines) == 0 {
-				e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgLyricsStatus, map[string]string{"status": "none"}))
-				return
-			}
-			e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgLyricsStatus, map[string]string{"status": "ready"}))
-			e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgLyrics, protocol.LyricsData{Lines: lines}))
-		})
-	}()
+			e.submit(send)
+		}()
+	}
 }
 
-// prefetchLyrics warms the lyric cache for a track off the Run loop, so by the
-// time the round reaches karaoke the lines are already in hand — no loading
-// spinner on the stage. Safe to call from startTrack; a no-op if already cached.
+// prefetchLyrics warms the lyric cache for a track off the Run loop (called at
+// startTrack) so karaoke has the lines in hand. It just starts/join the shared
+// fetch; the result is consumed later by fetchAndSendLyrics.
 func (e *Engine) prefetchLyrics(artist, song string, durSec int) {
 	if e.lyrics == nil {
 		return
 	}
+	e.lyricFetch(artist, song, durSec)
+}
+
+// lyricEntry is a singleflight cache slot: one fetch shared by the prefetch and
+// the karaoke send. done is closed when the fetch completes.
+type lyricEntry struct {
+	done  chan struct{}
+	lines []protocol.LyricLine
+	err   error
+}
+
+// lyricFetch returns the cache entry for a track, starting the fetch once if it
+// isn't already in flight/complete. A failed fetch is evicted so a later call
+// retries (a transient LRCLIB error shouldn't poison the track forever).
+func (e *Engine) lyricFetch(artist, song string, durSec int) *lyricEntry {
 	key := lyricKey(artist, song, durSec)
-	if _, ok := e.lyricCacheGet(key); ok {
-		return // already cached
+	e.lyricMu.Lock()
+	if e.lyricCache == nil {
+		e.lyricCache = map[string]*lyricEntry{}
 	}
+	if ent, ok := e.lyricCache[key]; ok {
+		e.lyricMu.Unlock()
+		return ent
+	}
+	ent := &lyricEntry{done: make(chan struct{})}
+	e.lyricCache[key] = ent
+	e.lyricMu.Unlock()
+
 	go func() {
 		lines, err := e.lyrics.Fetch(context.Background(), artist, song, durSec)
-		if err == nil {
-			e.lyricCachePut(key, lines)
+		ent.lines, ent.err = lines, err
+		close(ent.done)
+		if err != nil {
+			// Evict on error so the next reveal/prefetch retries.
+			e.lyricMu.Lock()
+			delete(e.lyricCache, key)
+			e.lyricMu.Unlock()
 		}
 	}()
+	return ent
 }
 
 func lyricKey(artist, song string, durSec int) string {
 	return fmt.Sprintf("%s|%s|%d", artist, song, durSec)
-}
-func (e *Engine) lyricCacheGet(key string) ([]protocol.LyricLine, bool) {
-	e.lyricMu.Lock()
-	defer e.lyricMu.Unlock()
-	v, ok := e.lyricCache[key]
-	return v, ok
-}
-func (e *Engine) lyricCachePut(key string, lines []protocol.LyricLine) {
-	e.lyricMu.Lock()
-	defer e.lyricMu.Unlock()
-	if e.lyricCache == nil {
-		e.lyricCache = map[string][]protocol.LyricLine{}
-	}
-	e.lyricCache[key] = lines
 }
 
 func (e *Engine) onVote(connID string, env protocol.ClientEnvelope) {
