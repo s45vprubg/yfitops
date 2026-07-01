@@ -4,14 +4,20 @@ import type {
   GameState,
   ScoreEntry,
 } from "@shared/protocol";
-import type { AdminActions } from "../useAdmin";
-import { PanelHead } from "./BoardPanel";
+import type { AdminActions, ConnStatus } from "../useAdmin";
+import GameControls from "./GameControls";
 
 interface Props {
   gameState?: GameState;
   adminView?: AdminViewData;
   players: ScoreEntry[];
   actions: AdminActions;
+  // Game-control-bar props (this panel's header IS the control bar now).
+  status: ConnStatus;
+  connected: boolean;
+  nonce: number;
+  adminSecret: string;
+  spotifyConnected: boolean;
 }
 
 type Phase = "waiting" | "round" | "buzzed";
@@ -41,12 +47,25 @@ function isRoundActive(s?: GameState): boolean {
   return !!s && ROUND_STATES.includes(s);
 }
 
-export default function EvaluationPanel({ gameState, adminView, players, actions }: Props) {
+export default function EvaluationPanel({
+  gameState, adminView, players, actions,
+  status, connected, nonce, adminSecret, spotifyConnected,
+}: Props) {
   const phase = derivePhase(gameState, adminView);
 
   return (
     <section className="flex h-full flex-col bg-panel">
-      <PanelHead title="Evaluation" />
+      {/* The panel header IS the game-control bar: state, Start/End/New Game,
+          Play/Pause, and the live status pill. */}
+      <GameControls
+        status={status}
+        connected={connected}
+        nonce={nonce}
+        gameState={gameState}
+        actions={actions}
+        adminSecret={adminSecret}
+        spotifyConnected={spotifyConnected}
+      />
       <div className="flex flex-1 flex-col gap-3 overflow-auto p-4">
         <PhaseBanner phase={phase} />
         <BuzzCard view={adminView} />

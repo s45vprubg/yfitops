@@ -40,7 +40,7 @@ function isPlaying(s?: GameState): boolean {
   return !!s && PLAYING_STATES.includes(s);
 }
 
-export default function TopBar({
+export default function GameControls({
   status,
   connected,
   nonce,
@@ -83,9 +83,9 @@ export default function TopBar({
   const canResume = trackLoaded && manuallyPaused;
 
   return (
-    <header className="relative flex items-center gap-4 border-b border-edge bg-panel2 px-4 py-2.5">
-      <div className="rounded border border-edge bg-panel px-2.5 py-1 font-mono text-xs uppercase tracking-wide text-slate-300">
-        state: <span className="font-semibold text-white">{gameState ?? "—"}</span>
+    <header className="relative flex items-center gap-3 border-b border-edge bg-panel2 px-3 py-2">
+      <div className="rounded border border-edge bg-panel px-2 py-0.5 font-mono text-[11px] uppercase tracking-wide text-slate-300">
+        <span className="font-semibold text-white">{gameState ?? "—"}</span>
       </div>
 
       <div className="flex-1" />

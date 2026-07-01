@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { useAdmin } from "./useAdmin";
 import type { GameState } from "@shared/protocol";
 import Login from "./components/Login";
-import TopBar from "./components/TopBar";
 import BoardPanel from "./components/BoardPanel";
 import EvaluationPanel from "./components/EvaluationPanel";
 import TelemetryPanel from "./components/TelemetryPanel";
@@ -91,16 +90,6 @@ export default function App() {
 
       {page === "control" && (
         <>
-          <TopBar
-            status={state.status}
-            connected={state.connected}
-            nonce={state.nonce}
-            gameState={state.gameState}
-            actions={actions}
-            adminSecret={secret}
-            spotifyConnected={spotifyConnected}
-          />
-
           <main className="grid min-h-0 flex-1 grid-cols-[minmax(260px,1fr)_minmax(420px,1.6fr)_minmax(300px,1fr)]">
             <BoardPanel
               board={state.board}
@@ -114,6 +103,11 @@ export default function App() {
               adminView={state.adminView}
               players={players}
               actions={actions}
+              status={state.status}
+              connected={state.connected}
+              nonce={state.nonce}
+              adminSecret={secret}
+              spotifyConnected={spotifyConnected}
             />
             {/* Right column split: live telemetry on top, ranked scoreboard below. */}
             <div className="grid min-h-0 grid-rows-[1.4fr_1fr]">
@@ -124,9 +118,9 @@ export default function App() {
 
           {/* Spotify disconnected mid-game warning */}
           {!spotifyConnected && !!state.gameState && ACTIVE_GAME_STATES.includes(state.gameState) && (
-            <div className="pointer-events-none fixed inset-x-0 top-24 flex justify-center p-3 z-50">
+            <div className="pointer-events-none fixed inset-x-0 top-14 flex justify-center p-3 z-50">
               <div className="pointer-events-auto rounded border border-amber-600 bg-amber-950/90 px-5 py-2.5 text-sm font-semibold text-amber-200 shadow-xl">
-                Spotify disconnected — audio commands will fail. Reconnect via the button above.
+                Spotify disconnected — audio commands will fail. Reconnect via the Spotify icon, top right.
               </div>
             </div>
           )}
