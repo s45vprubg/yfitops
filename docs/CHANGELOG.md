@@ -2,6 +2,65 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased] — 2026-07-01
+
+### Added
+- **AI board builder (Gemini).** "✨ Build with AI" groups a board's track
+  library into ~6 themed Jeopardy categories and lays out the board. New
+  `server/internal/ai` Gemini client (`gemini-3.1-flash-lite`, JSON response),
+  `admin.Categorizer` + `POST /api/boards/{id}/ai-build`, admin UI button.
+  Optional — 503s without `GEMINI_API_KEY`. (`GEMINI_API_KEY` / `GEMINI_MODEL`
+  in `.env.example`.)
+- **Anti-cheat telemetry.** Capture each connection's client IP at the transport
+  and surface per-player signals to the control room via `smsgCheatReport`
+  (shared-IP, multi-connection flags). Telemetry panel shows IP + flag chips.
+- **Reveal length-gate + char-drop morph.** Hide the real answer length behind a
+  fixed-width block until a knob-set time, then drop characters down to the true
+  length over a morph window and flash a "correct length" color.
+- **Auto-lockout + auto-karaoke.** When few enough letters remain hidden,
+  buzzing closes and points zero; on full reveal the round auto-enters karaoke.
+  Both knob-configurable.
+- **Pre-reveal hints.** Release year is surfaced as a hint (genre wired but
+  unavailable on the Spotify dev tier — see Changed), shown under the points,
+  timed by mixer knobs.
+- **Scoreboard everywhere** (admin split panel, stage corner overlay, mobile
+  idle screen) and **lyric-availability** (grey out lyric-less tracks, per-track
+  play override, background "Check lyrics" rescan; migration 0003).
+- **In-app modals** replacing native browser confirm/prompt (admin).
+- **Settings "Mixer" tab** — a full-page mixing desk consolidating every live
+  knob (skip threshold + all reveal timing).
+
+### Changed
+- **Lyrics prefetched + singleflight-cached** at track start so karaoke shows
+  them instantly (no loading spinner unless reveal is hit almost immediately);
+  smoothed the karaoke scroll (transform-based, stable line boxes, Apple
+  Music-style focal scroll).
+- **Reveal defaults** retuned (block 15s / letters 10s / interval 3s / morph 3s).
+- **Admin control room reorganized:** game controls folded into the Evaluation
+  panel header (top bar dropped), board loader moved into the Board panel, board
+  rendered as a proper compact Jeopardy grid, YFITOPS brand + Spotify status +
+  lock icon in the top nav.
+- **Stage audio** activation reworked into a one-time "Start Stage" gate.
+- **Playlist import** preserves Spotify order and returns fast (lyrics probed in
+  the background); genre fetch removed (Spotify strips artist genres for
+  Development-Mode apps).
+- **Points** halve when one field reveals ahead of the other.
+- Migrations 0003 (track lyrics) and 0004 (year + genre); `make migrate` +
+  `dev-up.sh` apply them.
+
+### Fixed
+- **Server crash** (nil-deref) on Play/Pause with no track loaded; added
+  panic-recovery around the engine command loop so a handler panic can't take
+  down every connection.
+- **New Game → Start Game** failed because reset unloaded the board; reset now
+  keeps it (regression test added).
+- Stage played ~0.5s of the previous song on cell select; telemetry never
+  refreshed; board didn't show a cell exhausted until after a click; the reveal
+  froze the engine during the (now async) lyric fetch; long reveal text
+  overflowed the screen; a single-column board's tiles ballooned.
+- Karaoke winner banner no longer defaults to the scoreboard leader — shows the
+  real winner or "nobody :(".
+
 ## [Unreleased] — 2026-06-29
 
 ### Added — Server-authoritative streaming letter reveal (stage + mobile)
