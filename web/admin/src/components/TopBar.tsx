@@ -4,7 +4,6 @@ import type { AdminActions, ConnStatus } from "../useAdmin";
 import { createAdminApi, type BoardSummary } from "../useAdminApi";
 import StatusPill from "./StatusPill";
 import { useModal } from "./Modal";
-import { HTTP_URL } from "../config";
 
 interface Props {
   status: ConnStatus;
@@ -101,11 +100,6 @@ export default function TopBar({
 
   return (
     <header className="relative flex items-center gap-4 border-b border-edge bg-panel2 px-4 py-2.5">
-      <div className="flex items-baseline gap-2">
-        <span className="text-sm font-bold tracking-[0.25em] text-accent">YFITOPS</span>
-        <span className="text-xs uppercase tracking-wide text-slate-500">control room</span>
-      </div>
-
       <div className="rounded border border-edge bg-panel px-2.5 py-1 font-mono text-xs uppercase tracking-wide text-slate-300">
         state: <span className="font-semibold text-white">{gameState ?? "—"}</span>
       </div>
@@ -125,23 +119,6 @@ export default function TopBar({
       </div>
 
       <div className="flex-1" />
-
-      {/* Spotify status */}
-      {spotifyConnected ? (
-        <span
-          className="rounded border border-green-700 bg-green-950/40 px-3 py-1.5 text-xs font-semibold text-green-300"
-          title="Spotify is authenticated on the backend"
-        >
-          ● Spotify connected
-        </span>
-      ) : (
-        <button
-          onClick={() => window.open(`${HTTP_URL}/auth/spotify`, "_blank", "noopener")}
-          className="rounded border border-edge bg-panel px-3 py-1.5 text-xs font-semibold text-green-300 hover:bg-green-950/40"
-        >
-          Connect Spotify
-        </button>
-      )}
 
       {/* Play/Pause toggle */}
       {canPause ? (

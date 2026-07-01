@@ -34,7 +34,7 @@ export default function BoardPanel({ board, gameState, spotifyConnected, onSelec
 
   return (
     <section className="flex h-full flex-col border-r border-edge bg-panel2">
-      <PanelHead title="Queuing" hint={hint} />
+      <PanelHead title="Board" hint={hint} />
       <div className="flex-1 overflow-auto p-3">
         {!board || !board.cells?.length ? (
           <Empty>No board loaded. Go to Board Builder → "Load into Game".</Empty>

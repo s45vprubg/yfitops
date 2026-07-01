@@ -270,7 +270,9 @@ func (e *Engine) ResetToLobby() error {
 			p.GuessedThisTrack = false
 			p.IdleRounds = 0
 		}
-		// Reset board track played state
+		// Reset board track played state, but KEEP the board loaded so
+		// New Game -> Start Game works with the same board (previously the board
+		// was unloaded here, forcing the admin to re-attach before starting).
 		if e.board != nil {
 			for _, row := range e.board.Cells {
 				for _, cell := range row {
@@ -283,8 +285,6 @@ func (e *Engine) ResetToLobby() error {
 				}
 			}
 		}
-		// Unload the board so admin must explicitly re-attach
-		e.board = nil
 		e.transitionTo(protocol.StateLobby)
 		e.broadcastScoreboard()
 		e.broadcastBoard()

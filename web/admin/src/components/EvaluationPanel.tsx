@@ -46,7 +46,7 @@ export default function EvaluationPanel({ gameState, adminView, players, actions
 
   return (
     <section className="flex h-full flex-col bg-panel">
-      <PanelHead title="Evaluation" hint={phase} />
+      <PanelHead title="Evaluation" />
       <div className="flex flex-1 flex-col gap-3 overflow-auto p-4">
         <PhaseBanner phase={phase} />
         <BuzzCard view={adminView} />

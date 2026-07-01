@@ -315,3 +315,40 @@ func revealedTotal(masks []maskedRevealData) int {
 	last := masks[len(masks)-1]
 	return revealedCount(last.Artist) + revealedCount(last.Song)
 }
+
+// TestResetKeepsBoard is a regression guard: after End Game -> New Game
+// (ResetToLobby), the board must stay loaded so Start Game works with the SAME
+// board without re-attaching (previously reset nil'd e.board, breaking restart).
+func TestResetKeepsBoard(t *testing.T) {
+	h := newRevealHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+
+	// Start a game, then end it to reach GAME_OVER.
+	if err := h.e.StartGame(); err != nil {
+		t.Fatalf("StartGame: %v", err)
+	}
+	h.e.OnMessage("admin", protocol.RoleAdmin, protocol.ClientEnvelope{Type: protocol.CMsgAdminEndGame, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+	if h.state() != protocol.StateGameOver {
+		t.Fatalf("state = %s, want GAME_OVER", h.state())
+	}
+
+	// New Game -> back to LOBBY, board still loaded.
+	if err := h.e.ResetToLobby(); err != nil {
+		t.Fatalf("ResetToLobby: %v", err)
+	}
+	var hasBoard bool
+	h.sync(func() { hasBoard = h.e.board != nil })
+	if !hasBoard {
+		t.Fatal("board was unloaded by reset; Start Game would fail")
+	}
+
+	// Start Game must succeed with the same board (the bug: "no board attached").
+	if err := h.e.StartGame(); err != nil {
+		t.Fatalf("StartGame after reset failed: %v", err)
+	}
+	if h.state() != protocol.StateBoard {
+		t.Fatalf("state = %s, want BOARD after restart", h.state())
+	}
+}
