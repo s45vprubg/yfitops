@@ -76,7 +76,10 @@ export type ServerMsgType =
   // of flashing "no lyrics". Mirrors smsgLyricsStatus in engine reveal.go.
   | "lyricsStatus"
   // gradeResult: notifies mobile of a grade outcome (from ui-edits-3).
-  | "gradeResult";
+  | "gradeResult"
+  // cheatReport: admin-only anti-cheat snapshot (per-player IP + shared-ip /
+  // multi-conn flags). Mirrors smsgCheatReport in engine reveal.go.
+  | "cheatReport";
 
 export interface ClientEnvelope<D = unknown> {
   t: ClientMsgType;

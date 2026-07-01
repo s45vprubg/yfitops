@@ -1,22 +1,30 @@
 import type { TelemetryConn, TelemetryData } from "@shared/protocol";
-import type { AdminActions } from "../useAdmin";
+import type { AdminActions, CheatEntry, CheatReport } from "../useAdmin";
 import { Empty, PanelHead } from "./BoardPanel";
 import { useModal } from "./Modal";
 
 interface Props {
   telemetry?: TelemetryData;
+  cheat?: CheatReport;
   actions: AdminActions;
 }
 
 // Right column (Telemetry): live connection log with per-user RTT, score,
-// active flag, and Kick / Ban quick actions.
-export default function TelemetryPanel({ telemetry, actions }: Props) {
+// active flag, anti-cheat signals (IP + shared-ip/multi-conn flags), and
+// Kick / Ban quick actions.
+export default function TelemetryPanel({ telemetry, cheat, actions }: Props) {
   const conns = telemetry?.connections ?? [];
   const activeCount = conns.filter((c) => c.active).length;
+  const cheatByID = new Map<string, CheatEntry>();
+  for (const e of cheat?.players ?? []) cheatByID.set(e.playerId, e);
+  const flaggedCount = (cheat?.players ?? []).filter((e) => e.flags.length > 0).length;
 
   return (
     <section className="flex h-full flex-col border-l border-edge bg-panel2">
-      <PanelHead title="Telemetry" hint={`${activeCount}/${conns.length} active`} />
+      <PanelHead
+        title="Telemetry"
+        hint={flaggedCount > 0 ? `⚠ ${flaggedCount} flagged · ${activeCount}/${conns.length} active` : `${activeCount}/${conns.length} active`}
+      />
       <div className="flex-1 overflow-auto">
         {conns.length === 0 ? (
           <Empty>No connections</Empty>
@@ -32,7 +40,7 @@ export default function TelemetryPanel({ telemetry, actions }: Props) {
             </thead>
             <tbody>
               {conns.map((c) => (
-                <Row key={c.id} c={c} actions={actions} />
+                <Row key={c.id} c={c} cheat={cheatByID.get(c.id)} actions={actions} />
               ))}
             </tbody>
           </table>
@@ -49,8 +57,9 @@ function rttColor(rtt: number): string {
   return "text-red-400";
 }
 
-function Row({ c, actions }: { c: TelemetryConn; actions: AdminActions }) {
+function Row({ c, cheat, actions }: { c: TelemetryConn; cheat?: CheatEntry; actions: AdminActions }) {
   const { confirm } = useModal();
+  const flags = cheat?.flags ?? [];
   return (
     <tr className="border-b border-edge/50 hover:bg-panel3/40">
       <td className="px-2 py-1.5">
@@ -62,6 +71,20 @@ function Row({ c, actions }: { c: TelemetryConn; actions: AdminActions }) {
           <span className="truncate font-medium text-slate-100" title={c.handle}>
             {c.handle || "—"}
           </span>
+        </div>
+        {/* Anti-cheat line: IP + flag chips. */}
+        <div className="mt-0.5 flex items-center gap-1 pl-3.5">
+          {cheat?.ip && <span className="font-mono text-[9px] text-slate-500">{cheat.ip}</span>}
+          {flags.includes("shared-ip") && (
+            <span className="rounded bg-red-950/60 px-1 text-[9px] font-bold uppercase text-red-300" title="Another player shares this IP">
+              shared IP
+            </span>
+          )}
+          {flags.includes("multi-conn") && (
+            <span className="rounded bg-amber-950/60 px-1 text-[9px] font-bold uppercase text-amber-300" title={`${cheat?.conns} live connections for this player`}>
+              {cheat?.conns}× conn
+            </span>
+          )}
         </div>
       </td>
       <td className={`px-2 py-1.5 text-right font-mono ${rttColor(c.rttMs)}`}>

@@ -42,6 +42,25 @@ const cmsgAdminSetRevealCfg protocol.ClientMsgType = "admin.setRevealCfg"
 // LRCLIB fetch. The actual lines still arrive via the fixed SMsgLyrics frame.
 const smsgLyricsStatus protocol.ServerMsgType = "lyricsStatus"
 
+// CONTRACT-QUESTION: smsgCheatReport surfaces anti-cheat signals (client IP,
+// shared-IP / multi-connection flags) to the admin control room. Admin-only;
+// carries no track metadata. Kept out of the fixed TelemetryConn (protocol.go)
+// which can't be extended.
+const smsgCheatReport protocol.ServerMsgType = "cheatReport"
+
+// cheatEntry is one player's anti-cheat snapshot for the admin panel.
+type cheatEntry struct {
+	PlayerID  string   `json:"playerId"`
+	Handle    string   `json:"handle"`
+	IP        string   `json:"ip"`
+	Conns     int      `json:"conns"`  // live connection count for this player
+	Flags     []string `json:"flags"`  // e.g. "shared-ip", "multi-conn"
+}
+
+type cheatReportData struct {
+	Players []cheatEntry `json:"players"`
+}
+
 // Reveal timing defaults (ms). Mirror the old client-side constants in
 // web/stage/src/anim/decrypt.ts (PHASE1_MS, REVEAL_INTERVAL_MS). Overridable
 // per-deploy via env (see cmd/gameserver) and live via the admin knob.

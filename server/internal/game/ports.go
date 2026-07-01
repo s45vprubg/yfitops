@@ -66,7 +66,9 @@ type LyricsProvider interface {
 // internally via a channel). This is the inbound seam, mirror of Broadcaster.
 type InboundHandler interface {
 	// OnConnect registers a new connection before any Hello is processed.
-	OnConnect(connID string)
+	// remoteIP is the client's network address (host only), used for anti-cheat
+	// telemetry (shared-IP detection). Empty if unavailable.
+	OnConnect(connID, remoteIP string)
 	// OnMessage forwards a decoded client frame. role is the connection's
 	// authenticated role (set during Hello); arrivalUnixMs is the SERVER
 	// arrival clock used for buzz ordering (§4B) — transport stamps it the

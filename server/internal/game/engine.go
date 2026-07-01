@@ -134,6 +134,10 @@ type Engine struct {
 	// revealLocked: the reveal got close enough to complete that buzzing is
 	// closed and points are zeroed for the rest of this round. Reset each track.
 	revealLocked bool
+
+	// connIP maps a live connID -> client IP (host only) for anti-cheat
+	// telemetry (shared-IP detection). Run-goroutine-owned.
+	connIP map[string]string
 }
 
 // NewEngine wires the engine to its dependencies (all injected for testing).
@@ -179,6 +183,7 @@ func NewEngine(repo GameRepo, lock BuzzLock, audio AudioDevice, lyrics LyricsPro
 		reg:       newRegistry(),
 		session:   &Session{ID: cfg.SessionID, SkipThresholdPct: cfg.SkipThresholdPct, State: string(protocol.StateLobby)},
 		revealCfg: revCfg.clamp(),
+		connIP:    map[string]string{},
 	}
 }
 
@@ -384,8 +389,13 @@ func (e *Engine) submitSync(fn func()) {
 // ---------------------------------------------------------------------------
 
 // OnConnect registers a bare connection before Hello (ports.InboundHandler).
-func (e *Engine) OnConnect(connID string) {
-	e.submit(func() { e.reg.addConn(connID) })
+func (e *Engine) OnConnect(connID, remoteIP string) {
+	e.submit(func() {
+		e.reg.addConn(connID)
+		if remoteIP != "" {
+			e.connIP[connID] = remoteIP
+		}
+	})
 }
 
 // OnMessage forwards a decoded client frame. arrivalUnixMs is the SERVER
@@ -397,6 +407,7 @@ func (e *Engine) OnMessage(connID string, role protocol.Role, env protocol.Clien
 // OnDisconnect removes a connection and recalculates the active pool (§3.8).
 func (e *Engine) OnDisconnect(connID string) {
 	e.submit(func() {
+		delete(e.connIP, connID)
 		playerID, fullyGone := e.reg.removeConn(connID)
 		if playerID != "" && fullyGone {
 			// Drop from active vote/rating pools and recompute thresholds (§3.8).
@@ -569,6 +580,7 @@ func (e *Engine) sendFullSync(connID string, role protocol.Role) {
 	if role == protocol.RoleAdmin {
 		e.bcast.SendTo(connID, e.envelope(smsgAdminRevealCfg, e.revealCfgData()))
 		e.bcast.SendTo(connID, e.envelope(protocol.SMsgTelemetry, e.telemetryData()))
+		e.bcast.SendTo(connID, e.envelope(smsgCheatReport, e.cheatReportData()))
 	}
 	// Scoreboard goes to everyone (handles + scores only, §4A-safe) so mobile
 	// players see standings on connect too.
@@ -1694,6 +1706,58 @@ func (e *Engine) telemetryData() protocol.TelemetryData {
 
 func (e *Engine) broadcastTelemetry() {
 	e.bcast.Broadcast(protocol.RoleAdmin, e.envelope(protocol.SMsgTelemetry, e.telemetryData()))
+	e.bcast.Broadcast(protocol.RoleAdmin, e.envelope(smsgCheatReport, e.cheatReportData()))
+}
+
+// playerIP returns the IP of any live connection for a player ("" if none).
+func (e *Engine) playerIP(playerID string) string {
+	for _, cid := range e.reg.connIDs(playerID) {
+		if ip := e.connIP[cid]; ip != "" {
+			return ip
+		}
+	}
+	return ""
+}
+
+// cheatReportData builds the admin anti-cheat snapshot: per mobile player, its
+// IP + live connection count, flagged for shared-IP (another player on the same
+// IP) and multi-conn (more than one live socket — e.g. a second tab peeking at
+// the stage). Cheap heuristics, meant as a "look here" nudge, not proof.
+func (e *Engine) cheatReportData() cheatReportData {
+	// Count how many distinct mobile players share each IP.
+	ipPlayers := map[string]int{}
+	for _, p := range e.reg.players {
+		if !e.reg.isMobile(p.ID) {
+			continue
+		}
+		if ip := e.playerIP(p.ID); ip != "" {
+			ipPlayers[ip]++
+		}
+	}
+
+	out := []cheatEntry{}
+	for _, p := range e.reg.players {
+		if !e.reg.isMobile(p.ID) {
+			continue
+		}
+		ip := e.playerIP(p.ID)
+		conns := len(e.reg.connIDs(p.ID))
+		flags := []string{}
+		if ip != "" && ipPlayers[ip] > 1 {
+			flags = append(flags, "shared-ip")
+		}
+		if conns > 1 {
+			flags = append(flags, "multi-conn")
+		}
+		out = append(out, cheatEntry{
+			PlayerID: p.ID,
+			Handle:   p.Handle,
+			IP:       ip,
+			Conns:    conns,
+			Flags:    flags,
+		})
+	}
+	return cheatReportData{Players: out}
 }
 
 func (e *Engine) persistScores() {

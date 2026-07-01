@@ -145,16 +145,24 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.serveStream(sess, stream)
+	s.serveStream(sess, stream, clientIP(r.RemoteAddr))
+}
+
+// clientIP extracts the host portion of a RemoteAddr ("ip:port" -> "ip").
+func clientIP(remoteAddr string) string {
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		return host
+	}
+	return remoteAddr
 }
 
 // serveStream registers the connection, drives the read loop, and guarantees a
 // single OnDisconnect on exit.
-func (s *Server) serveStream(sess *webtransport.Session, stream io.ReadWriteCloser) {
+func (s *Server) serveStream(sess *webtransport.Session, stream io.ReadWriteCloser, remoteIP string) {
 	connID := fmt.Sprintf("c%d", s.connSeq.Add(1))
 
 	s.hub.add(connID, stream)
-	s.handler.OnConnect(connID)
+	s.handler.OnConnect(connID, remoteIP)
 	defer func() {
 		s.handler.OnDisconnect(connID)
 		s.hub.remove(connID)

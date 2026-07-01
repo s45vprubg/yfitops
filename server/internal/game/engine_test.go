@@ -248,7 +248,7 @@ func (h *harness) join(connID, fp, handle string) string {
 	h.bcast.mu.Lock()
 	h.bcast.connRole[connID] = protocol.RoleMobile
 	h.bcast.mu.Unlock()
-	h.e.OnConnect(connID)
+	h.e.OnConnect(connID, "10.0.0."+connID)
 	hello, _ := json.Marshal(protocol.HelloData{Role: protocol.RoleMobile, Handle: handle, DeviceFP: fp})
 	h.e.OnMessage(connID, protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgHello, Data: hello}, nowMs())
 	var pid string
@@ -260,7 +260,7 @@ func (h *harness) joinAdmin(connID string) {
 	h.bcast.mu.Lock()
 	h.bcast.connRole[connID] = protocol.RoleAdmin
 	h.bcast.mu.Unlock()
-	h.e.OnConnect(connID)
+	h.e.OnConnect(connID, "")
 	hello, _ := json.Marshal(protocol.HelloData{Role: protocol.RoleAdmin})
 	h.e.OnMessage(connID, protocol.RoleAdmin, protocol.ClientEnvelope{Type: protocol.CMsgHello, Data: hello}, nowMs())
 	h.sync(func() {})
@@ -270,7 +270,7 @@ func (h *harness) joinStage(connID string) {
 	h.bcast.mu.Lock()
 	h.bcast.connRole[connID] = protocol.RoleStage
 	h.bcast.mu.Unlock()
-	h.e.OnConnect(connID)
+	h.e.OnConnect(connID, "")
 	hello, _ := json.Marshal(protocol.HelloData{Role: protocol.RoleStage})
 	h.e.OnMessage(connID, protocol.RoleStage, protocol.ClientEnvelope{Type: protocol.CMsgHello, Data: hello}, nowMs())
 	h.sync(func() {})

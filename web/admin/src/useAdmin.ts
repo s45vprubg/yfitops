@@ -23,6 +23,18 @@ import { fetchCertHash, WT_URL } from "./config";
 
 export type ConnStatus = "idle" | "connecting" | "authed" | "error" | "closed";
 
+// Anti-cheat report (CONTRACT-QUESTION smsgCheatReport; not in shared protocol).
+export interface CheatEntry {
+  playerId: string;
+  handle: string;
+  ip: string;
+  conns: number;
+  flags: string[]; // "shared-ip", "multi-conn"
+}
+export interface CheatReport {
+  players: CheatEntry[];
+}
+
 // The admin client holds NO authoritative state (§9). Everything below is a
 // straight render of the most recent server payload. On reconnect the backend
 // re-emits these via FULL_STATE_SYNC and the UI snaps back to the live state.
@@ -39,6 +51,7 @@ export interface AdminState {
   telemetry?: TelemetryData;
   scoreboard?: ScoreboardData;
   revealCfg?: AdminRevealCfgData; // current letter-reveal timing knobs
+  cheat?: CheatReport; // anti-cheat signals (IP, shared-ip / multi-conn flags)
   nonce: number;
 }
 
@@ -114,6 +127,9 @@ export function useAdmin(): [AdminState, AdminActions] {
       });
       client.on("telemetry", (env: ServerEnvelope) => {
         patch({ telemetry: env.d as TelemetryData });
+      });
+      client.on("cheatReport", (env: ServerEnvelope) => {
+        patch({ cheat: env.d as CheatReport });
       });
       client.on("scoreboard", (env: ServerEnvelope) => {
         patch({ scoreboard: env.d as ScoreboardData });
