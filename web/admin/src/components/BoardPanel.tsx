@@ -96,7 +96,7 @@ function BoardGrid({ board, selectable, onSelect }: { board: BoardData; selectab
                   : "empty"
               }
               className={[
-                "relative flex aspect-[4/3] items-center justify-center rounded-sm border transition",
+                "relative flex h-16 items-center justify-center rounded-sm border transition",
                 exhausted
                   ? "border-edge/40 bg-panel/30 text-slate-700"
                   : disabled
