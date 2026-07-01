@@ -31,6 +31,8 @@ function glyphAt(slot: number, tick: number): string {
 
 const LOCKED_CLS = "text-guess";
 const NOISE_CLS = "text-neutral-500";
+const LENGTH_CLS = "text-amber-400"; // "correct length now" flash on block collapse
+const LENGTH_FLASH_MS = 1200;
 
 export function RevealStrip({ mask }: { mask: MaskedRevealData | null }) {
   const artistRef = useRef<HTMLDivElement>(null);
@@ -40,15 +42,19 @@ export function RevealStrip({ mask }: { mask: MaskedRevealData | null }) {
 
   useEffect(() => {
     let raf = 0;
+    let prevPhase = 0;
+    let lengthFlashUntil = 0;
     const renderField = (
       el: HTMLDivElement | null,
       field: string[] | undefined,
       fallbackLen: number,
       seed: number,
       tick: number,
+      lengthFlash: boolean,
     ) => {
       if (!el) return;
       const len = field ? field.length : fallbackLen > 0 ? fallbackLen : NOISE_WIDTH;
+      const hiddenCls = lengthFlash ? LENGTH_CLS : NOISE_CLS;
       if (el.childElementCount !== len) {
         el.textContent = "";
         for (let i = 0; i < len; i++) el.appendChild(document.createElement("span"));
@@ -58,13 +64,13 @@ export function RevealStrip({ mask }: { mask: MaskedRevealData | null }) {
         const cell = field ? field[i] : "";
         if (cell === " ") {
           if (span.textContent !== " ") span.textContent = " ";
-          if (span.className !== NOISE_CLS) span.className = NOISE_CLS;
+          if (span.className !== hiddenCls) span.className = hiddenCls;
         } else if (cell) {
           if (span.textContent !== cell) span.textContent = cell;
           if (span.className !== LOCKED_CLS) span.className = LOCKED_CLS;
         } else {
           span.textContent = glyphAt(seed + i, tick);
-          if (span.className !== NOISE_CLS) span.className = NOISE_CLS;
+          if (span.className !== hiddenCls) span.className = hiddenCls;
         }
       }
     };
@@ -72,8 +78,14 @@ export function RevealStrip({ mask }: { mask: MaskedRevealData | null }) {
     const loop = () => {
       const m = maskRef.current;
       const tick = Math.floor(Date.now() / 200); // ~5fps
-      renderField(artistRef.current, m?.artist, m?.artistLen ?? 0, ARTIST_SEED, tick);
-      renderField(songRef.current, m?.song, m?.songLen ?? 0, SONG_SEED, tick);
+      const phase = m?.phase ?? 0;
+      if (prevPhase === 1 && phase >= 2) {
+        lengthFlashUntil = performance.now() + LENGTH_FLASH_MS;
+      }
+      prevPhase = phase;
+      const lengthFlash = performance.now() < lengthFlashUntil;
+      renderField(artistRef.current, m?.artist, m?.artistLen ?? 0, ARTIST_SEED, tick, lengthFlash);
+      renderField(songRef.current, m?.song, m?.songLen ?? 0, SONG_SEED, tick, lengthFlash);
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);

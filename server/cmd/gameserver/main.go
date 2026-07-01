@@ -99,12 +99,16 @@ func main() {
 	// are read from env here rather than added there). They only seed the
 	// initial values; the control room can tune them live.
 	revAlt, revAltSet := envBool("YFI_REVEAL_ALTERNATE")
+	revEase, revEaseSet := envIntSet("YFI_REVEAL_EASE_MS")
 	eng := game.NewEngine(repo, lock, audio, lyr, hub, gate, game.Config{
 		SessionID:          cfg.SessionID(),
 		AdminSecret:        cfg.AdminSecret,
 		SkipThresholdPct:   cfg.DefaultSkipThresholdPct,
 		RevealIntervalMs:   envInt("YFI_REVEAL_INTERVAL_MS", 0),
 		RevealPhase1Ms:     envInt("YFI_REVEAL_PHASE1_MS", 0),
+		RevealBlockMs:      envInt("YFI_REVEAL_BLOCK_MS", 0),
+		RevealEaseMs:       revEase,
+		RevealEaseSet:      revEaseSet,
 		RevealAlternate:    revAlt,
 		RevealAlternateSet: revAltSet,
 	})
@@ -269,4 +273,18 @@ func envBool(key string) (val bool, set bool) {
 		return false, false
 	}
 	return b, true
+}
+
+// envIntSet reads an int env var, reporting whether it was set — so a knob whose
+// default is non-zero (e.g. ease=600) can be distinguished from an explicit 0.
+func envIntSet(key string) (val int, set bool) {
+	v := os.Getenv(key)
+	if v == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }

@@ -42,6 +42,9 @@ const cmsgAdminSetRevealCfg protocol.ClientMsgType = "admin.setRevealCfg"
 const (
 	defaultRevealIntervalMs = 2000
 	defaultRevealPhase1Ms   = 5000
+	defaultRevealBlockMs    = 0    // 0 = show real length immediately (legacy behavior)
+	defaultRevealEaseMs     = 600  // soft morph when the block collapses to real length
+	revealBlockWidth        = 16   // fixed-width noise block shown during the block phase
 )
 
 // Clamp bounds for the live knob so a fat-fingered slider can't wedge the game.
@@ -50,6 +53,10 @@ const (
 	maxRevealIntervalMs = 10000
 	minRevealPhase1Ms   = 0
 	maxRevealPhase1Ms   = 20000
+	minRevealBlockMs    = 0
+	maxRevealBlockMs    = 20000
+	minRevealEaseMs     = 0
+	maxRevealEaseMs     = 5000
 )
 
 // revealConfig holds the tunable reveal-timing knobs. Stored on the engine and
@@ -57,7 +64,9 @@ const (
 // mid-round change applies to the next round, not the running ticker.
 type revealConfig struct {
 	IntervalMs int  // ms between revealed letters
-	Phase1Ms   int  // noise duration before letters start
+	Phase1Ms   int  // time before letters start streaming
+	BlockMs    int  // hide the real length behind a fixed-width block until this time (0 = off)
+	EaseMs     int  // soft morph duration when the block collapses to the real length
 	Alternate  bool // true: one field per tick (artist,song,artist,...); false: one from each per tick
 }
 
@@ -66,25 +75,37 @@ func defaultRevealConfig() revealConfig {
 	return revealConfig{
 		IntervalMs: defaultRevealIntervalMs,
 		Phase1Ms:   defaultRevealPhase1Ms,
+		BlockMs:    defaultRevealBlockMs,
+		EaseMs:     defaultRevealEaseMs,
 		Alternate:  true,
 	}
 }
 
-// clamp keeps interval/phase-1 within sane bounds.
+// clamp keeps the timing knobs within sane bounds.
 func (c revealConfig) clamp() revealConfig {
-	if c.IntervalMs < minRevealIntervalMs {
-		c.IntervalMs = minRevealIntervalMs
+	clampInt := func(v, lo, hi int) int {
+		if v < lo {
+			return lo
+		}
+		if v > hi {
+			return hi
+		}
+		return v
 	}
-	if c.IntervalMs > maxRevealIntervalMs {
-		c.IntervalMs = maxRevealIntervalMs
-	}
-	if c.Phase1Ms < minRevealPhase1Ms {
-		c.Phase1Ms = minRevealPhase1Ms
-	}
-	if c.Phase1Ms > maxRevealPhase1Ms {
-		c.Phase1Ms = maxRevealPhase1Ms
-	}
+	c.IntervalMs = clampInt(c.IntervalMs, minRevealIntervalMs, maxRevealIntervalMs)
+	c.Phase1Ms = clampInt(c.Phase1Ms, minRevealPhase1Ms, maxRevealPhase1Ms)
+	c.BlockMs = clampInt(c.BlockMs, minRevealBlockMs, maxRevealBlockMs)
+	c.EaseMs = clampInt(c.EaseMs, minRevealEaseMs, maxRevealEaseMs)
 	return c
+}
+
+// letterStartDelay is when letter streaming begins: after the phase-1 delay, but
+// never before the block has collapsed to the real length.
+func (c revealConfig) letterStartMs() int {
+	if c.BlockMs > c.Phase1Ms {
+		return c.BlockMs
+	}
+	return c.Phase1Ms
 }
 
 // Reveal phases, mirroring the stage animation's phase semantics.
@@ -180,12 +201,18 @@ type maskedRevealData struct {
 	Artist    []string `json:"artist"` // per-char mask; "" hidden, " " space, else revealed char
 	Song      []string `json:"song"`
 	Final     bool     `json:"final"`
+	// EaseMs tells the client how long to morph the fixed-width block into the
+	// real-length skeleton when phase transitions Noise->Skeleton (cosmetic; the
+	// block carries no answer info so animating it client-side is §4A-safe).
+	EaseMs int `json:"easeMs,omitempty"`
 }
 
 // adminRevealCfgData echoes the current knob values to the admin UI.
 type adminRevealCfgData struct {
 	IntervalMs int  `json:"intervalMs"`
 	Phase1Ms   int  `json:"phase1Ms"`
+	BlockMs    int  `json:"blockMs"`
+	EaseMs     int  `json:"easeMs"`
 	Alternate  bool `json:"alternate"`
 }
 
@@ -194,13 +221,31 @@ type adminRevealCfgData struct {
 type adminSetRevealCfgData struct {
 	IntervalMs *int  `json:"intervalMs"`
 	Phase1Ms   *int  `json:"phase1Ms"`
+	BlockMs    *int  `json:"blockMs"`
+	EaseMs     *int  `json:"easeMs"`
 	Alternate  *bool `json:"alternate"`
 }
 
-// currentMask builds the frame for the current reveal state.
+// currentMask builds the frame for the current reveal state. During the block
+// phase it emits a FIXED-WIDTH all-hidden mask (revealBlockWidth slots, no real
+// length), so the true answer length stays secret until the block collapses.
 func (rc *revealClock) currentMask() maskedRevealData {
 	phase := rc.phase
 	final := rc.finalizing || phase == revealPhaseDone
+	if phase == revealPhaseNoise {
+		block := make([]string, revealBlockWidth)
+		for i := range block {
+			block[i] = "" // all hidden noise; no spaces, no length hint
+		}
+		return maskedRevealData{
+			Phase:     revealPhaseNoise,
+			ArtistLen: revealBlockWidth,
+			SongLen:   revealBlockWidth,
+			Artist:    block,
+			Song:      append([]string(nil), block...),
+			EaseMs:    rc.cfg.EaseMs,
+		}
+	}
 	return maskedRevealData{
 		Phase:     phase,
 		ArtistLen: len(rc.artist),
@@ -208,6 +253,7 @@ func (rc *revealClock) currentMask() maskedRevealData {
 		Artist:    buildFieldMask(rc.artist, rc.artistOrder, rc.artistRevealed),
 		Song:      buildFieldMask(rc.song, rc.songOrder, rc.songRevealed),
 		Final:     final,
+		EaseMs:    rc.cfg.EaseMs,
 	}
 }
 

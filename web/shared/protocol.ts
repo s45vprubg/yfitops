@@ -107,6 +107,8 @@ export interface AdminSetThreshData { percent: number; }
 export interface AdminSetRevealCfgData {
   intervalMs?: number;
   phase1Ms?: number;
+  blockMs?: number;
+  easeMs?: number;
   alternate?: boolean;
 }
 export interface RateData { stars: number; }
@@ -131,6 +133,10 @@ export interface RevealData { artist: string; song: string; albumArt?: string; }
 // MaskedRevealData — the sanitized server-driven decrypt frame. Each mask array
 // has length = field length; element is the revealed char, " " for a space, or
 // "" for a not-yet-revealed slot (client renders local cosmetic noise there).
+// During phase 1 (Noise) the arrays are a FIXED-WIDTH all-hidden block and the
+// lengths are that block width — the real answer length is withheld until the
+// block collapses to phase 2 (Skeleton). easeMs is how long the client should
+// morph that collapse.
 export interface MaskedRevealData {
   phase: 1 | 2 | 3 | 4;
   artistLen: number;
@@ -138,11 +144,14 @@ export interface MaskedRevealData {
   artist: string[];
   song: string[];
   final?: boolean;
+  easeMs?: number;
 }
 // Current reveal-timing knob values echoed to the control room.
 export interface AdminRevealCfgData {
   intervalMs: number;
   phase1Ms: number;
+  blockMs: number;
+  easeMs: number;
   alternate: boolean;
 }
 export interface LyricLine { timeMs: number; text: string; }

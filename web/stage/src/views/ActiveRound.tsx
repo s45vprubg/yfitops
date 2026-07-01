@@ -37,9 +37,14 @@ const SONG_SEED = 8675309;
 // Fixed noise width shown before the server sends a length skeleton (phase 1).
 const NOISE_WIDTH = 20;
 
-// Tailwind classes for the two letter states.
-const LOCKED_CLS = "text-neon-green neon-text";
-const NOISE_CLS = "text-neon-cyan/90 neon-cyan";
+// Tailwind classes for the letter states.
+const LOCKED_CLS = "text-neon-green neon-text";       // a real letter is revealed
+const NOISE_CLS = "text-neon-cyan/90 neon-cyan";       // cosmetic cycling noise
+const LENGTH_CLS = "text-neon-amber neon-text";        // "correct length now" flash on block collapse
+
+// How long the "length confirmed" amber flash lasts after the block collapses
+// to the real length (phase 1 -> 2).
+const LENGTH_FLASH_MS = 1200;
 
 export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHandle }: Props) {
   const artistRef = useRef<HTMLDivElement>(null);
@@ -53,20 +58,25 @@ export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHa
     let raf = 0;
     let lastPoints = -1;
     let tick = 0;
+    let prevPhase = 0;
+    let lengthFlashUntil = 0; // performance.now() deadline for the amber flash
 
     // Render one field's row of per-character spans into `el`. Revealed slots
-    // use the mask char + locked color; hidden slots cycle noise. Reuses spans
-    // across frames to avoid thrashing the DOM.
+    // use the mask char + locked color; hidden slots cycle noise. When the
+    // real length was just confirmed (block collapse) hidden slots briefly
+    // flash the LENGTH color so the room sees "this is the right length now".
     const renderField = (
       el: HTMLDivElement | null,
       mask: string[] | undefined,
       fallbackLen: number,
       seed: number,
       t: number,
+      lengthFlash: boolean,
     ) => {
       if (!el) return;
       // Determine the slot count: mask length once known, else the noise block.
       const len = mask ? mask.length : fallbackLen > 0 ? fallbackLen : NOISE_WIDTH;
+      const hiddenCls = lengthFlash ? LENGTH_CLS : NOISE_CLS;
 
       // (Re)build the span row if the length changed.
       if (el.childElementCount !== len) {
@@ -81,15 +91,15 @@ export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHa
         const cell = mask ? mask[i] : "";
         if (cell === " ") {
           if (span.textContent !== " ") span.textContent = " ";
-          if (span.className !== NOISE_CLS) span.className = NOISE_CLS;
+          if (span.className !== hiddenCls) span.className = hiddenCls;
         } else if (cell) {
           // Revealed/locked letter.
           if (span.textContent !== cell) span.textContent = cell;
           if (span.className !== LOCKED_CLS) span.className = LOCKED_CLS;
         } else {
-          // Hidden slot -> cosmetic noise.
+          // Hidden slot -> cosmetic noise (or amber during the length flash).
           span.textContent = glyphAt(seed + i, t);
-          if (span.className !== NOISE_CLS) span.className = NOISE_CLS;
+          if (span.className !== hiddenCls) span.className = hiddenCls;
         }
       }
     };
@@ -101,8 +111,17 @@ export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHa
       // ~5fps noise cycling, frozen while the timer is frozen (buzz).
       if (!tm.frozen) tick = Math.floor(now / 200);
 
-      renderField(artistRef.current, mr?.artist, mr?.artistLen ?? ts.artistLen, ARTIST_SEED, tick);
-      renderField(songRef.current, mr?.song, mr?.songLen ?? ts.songLen, SONG_SEED, tick);
+      // Detect the block -> skeleton collapse (phase 1 -> 2): the real length is
+      // now known, so flash the slots to signal "correct length".
+      const phase = mr?.phase ?? 0;
+      if (prevPhase === 1 && phase >= 2) {
+        lengthFlashUntil = performance.now() + LENGTH_FLASH_MS;
+      }
+      prevPhase = phase;
+      const lengthFlash = performance.now() < lengthFlashUntil;
+
+      renderField(artistRef.current, mr?.artist, mr?.artistLen ?? ts.artistLen, ARTIST_SEED, tick, lengthFlash);
+      renderField(songRef.current, mr?.song, mr?.songLen ?? ts.songLen, SONG_SEED, tick, lengthFlash);
 
       // --- point timer (local, deterministic; honors reduced pool post-partial) ---
       if (pointsRef.current && !tm.frozen) {

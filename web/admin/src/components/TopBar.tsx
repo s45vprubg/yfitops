@@ -3,7 +3,7 @@ import type { AdminRevealCfgData, GameState } from "@shared/protocol";
 import type { AdminActions, ConnStatus } from "../useAdmin";
 import { createAdminApi, type BoardSummary } from "../useAdminApi";
 import StatusPill from "./StatusPill";
-import RevealSettingsPanel from "./RevealSettingsPanel";
+import SettingsPanel from "./SettingsPanel";
 import { useModal } from "./Modal";
 import { HTTP_URL } from "../config";
 
@@ -55,10 +55,9 @@ export default function TopBar({
   spotifyConnected,
   revealCfg,
 }: Props) {
-  const [thresh, setThresh] = useState(50);
   const [boards, setBoards] = useState<BoardSummary[]>([]);
   const [loadingBoard, setLoadingBoard] = useState(false);
-  const [revealPanelOpen, setRevealPanelOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const { confirm } = useModal();
   const api = useMemo(() => createAdminApi(adminSecret), [adminSecret]);
 
@@ -91,11 +90,6 @@ export default function TopBar({
       await api.resetGame();
     } catch { /* state broadcast will update UI */ }
   };
-
-  useEffect(() => {
-    const id = setTimeout(() => actions.setThresh(thresh), 120);
-    return () => clearTimeout(id);
-  }, [thresh, actions]);
 
   const [manuallyPaused, setManuallyPaused] = useState(false);
   const prevState = useRef(gameState);
@@ -138,38 +132,23 @@ export default function TopBar({
 
       <div className="flex-1" />
 
-      {/* Skip Voting Threshold slider 50%–100%. Only useful during a game. */}
-      <label className={`flex items-center gap-2 text-xs ${gameActive ? "text-slate-300" : "text-slate-600"}`}>
-        <span className="uppercase tracking-wide">Skip thresh</span>
-        <input
-          type="range"
-          min={0}
-          max={100}
-          value={thresh}
-          disabled={!gameActive}
-          onChange={(e) => setThresh(Number(e.target.value))}
-          className="w-32 accent-accent disabled:opacity-40"
-        />
-        <span className="w-10 font-mono font-semibold text-accent">{thresh}%</span>
-      </label>
-
-      {/* Reveal timing settings (collapsible panel) */}
+      {/* Settings mixer: skip threshold + all reveal-timing knobs. */}
       <button
-        onClick={() => setRevealPanelOpen((o) => !o)}
-        title="Letter-reveal timing"
+        onClick={() => setSettingsOpen((o) => !o)}
+        title="Game settings"
         className={`rounded border px-2.5 py-1.5 text-xs font-semibold ${
-          revealPanelOpen
+          settingsOpen
             ? "border-accent bg-accent/10 text-accent"
             : "border-edge bg-panel text-slate-300 hover:text-white"
         }`}
       >
-        ⚙ Reveal
+        ⚙ Settings
       </button>
-      {revealPanelOpen && (
-        <RevealSettingsPanel
-          cfg={revealCfg}
+      {settingsOpen && (
+        <SettingsPanel
+          revealCfg={revealCfg}
           actions={actions}
-          onClose={() => setRevealPanelOpen(false)}
+          onClose={() => setSettingsOpen(false)}
         />
       )}
 

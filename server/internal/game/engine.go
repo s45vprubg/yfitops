@@ -39,6 +39,9 @@ type Config struct {
 	// to true; use RevealAlternateSet to force it false.
 	RevealIntervalMs   int
 	RevealPhase1Ms     int
+	RevealBlockMs      int
+	RevealEaseMs       int
+	RevealEaseSet      bool
 	RevealAlternate    bool
 	RevealAlternateSet bool
 	// Rand seeds track selection; nil uses a time-seeded source.
@@ -148,6 +151,12 @@ func NewEngine(repo GameRepo, lock BuzzLock, audio AudioDevice, lyrics LyricsPro
 	}
 	if cfg.RevealPhase1Ms > 0 {
 		revCfg.Phase1Ms = cfg.RevealPhase1Ms
+	}
+	if cfg.RevealBlockMs > 0 {
+		revCfg.BlockMs = cfg.RevealBlockMs
+	}
+	if cfg.RevealEaseSet {
+		revCfg.EaseMs = cfg.RevealEaseMs
 	}
 	if cfg.RevealAlternateSet {
 		revCfg.Alternate = cfg.RevealAlternate
@@ -1213,7 +1222,13 @@ func (e *Engine) onAdminSetThresh(connID string, env protocol.ClientEnvelope) {
 // revealCfgData snapshots the current reveal-timing knobs for the admin echo.
 func (e *Engine) revealCfgData() adminRevealCfgData {
 	c := e.revealCfg
-	return adminRevealCfgData{IntervalMs: c.IntervalMs, Phase1Ms: c.Phase1Ms, Alternate: c.Alternate}
+	return adminRevealCfgData{
+		IntervalMs: c.IntervalMs,
+		Phase1Ms:   c.Phase1Ms,
+		BlockMs:    c.BlockMs,
+		EaseMs:     c.EaseMs,
+		Alternate:  c.Alternate,
+	}
 }
 
 // onAdminSetRevealCfg updates the live reveal-timing knobs. The change is stored
@@ -1231,6 +1246,12 @@ func (e *Engine) onAdminSetRevealCfg(connID string, env protocol.ClientEnvelope)
 	}
 	if d.Phase1Ms != nil {
 		cfg.Phase1Ms = *d.Phase1Ms
+	}
+	if d.BlockMs != nil {
+		cfg.BlockMs = *d.BlockMs
+	}
+	if d.EaseMs != nil {
+		cfg.EaseMs = *d.EaseMs
 	}
 	if d.Alternate != nil {
 		cfg.Alternate = *d.Alternate
@@ -1316,6 +1337,13 @@ func (e *Engine) startReveal() {
 	}
 	e.stopRevealTimer()
 	cfg := e.revealCfg.clamp()
+	// Start in the fixed-width block phase if the block knob is set (hides the
+	// real answer length until it collapses); otherwise show the real-length
+	// skeleton immediately (legacy behavior).
+	startPhase := revealPhaseSkeleton
+	if cfg.BlockMs > 0 {
+		startPhase = revealPhaseNoise
+	}
 	e.rc = revealClock{
 		active:      true,
 		roundKey:    e.roundKey,
@@ -1323,17 +1351,33 @@ func (e *Engine) startReveal() {
 		song:        upper(e.curTrack.Song),
 		artistOrder: buildRevealOrder(upper(e.curTrack.Artist), seedFromRoundKey(e.roundKey, 0x9e3779b97f4a7c15)),
 		songOrder:   buildRevealOrder(upper(e.curTrack.Song), seedFromRoundKey(e.roundKey, 0xc2b2ae3d27d4eb4f)),
-		phase:       revealPhaseSkeleton, // length + spaces visible immediately
+		phase:       startPhase,
 		cfg:         cfg,
 	}
-	// Broadcast the initial length-skeleton frame to stage + mobile.
+	// Broadcast the initial frame (block or skeleton) to stage + mobile.
 	e.broadcastMask()
 
-	// Phase-1 one-shot: after the noise delay, flip to streaming and start the
-	// letter ticker. Capture roundKey to neutralize a stale fire.
 	rk := e.roundKey
-	delay := e.rc.phase1Delay()
-	e.revealTimer = time.AfterFunc(delay, func() {
+
+	// Block -> skeleton flip: once the block window elapses, reveal the real
+	// length (client eases the morph over cfg.EaseMs). Only armed when blocking.
+	if cfg.BlockMs > 0 {
+		time.AfterFunc(time.Duration(cfg.BlockMs)*time.Millisecond, func() {
+			e.submit(func() {
+				if e.rc.roundKey != rk || !e.rc.active {
+					return
+				}
+				if e.rc.phase == revealPhaseNoise {
+					e.rc.phase = revealPhaseSkeleton
+					e.broadcastMask()
+				}
+			})
+		})
+	}
+
+	// Letter-stream start: after the phase-1 delay (but never before the block
+	// has collapsed), flip to streaming and start the letter ticker.
+	time.AfterFunc(time.Duration(cfg.letterStartMs())*time.Millisecond, func() {
 		e.submit(func() {
 			if e.rc.roundKey != rk || !e.rc.active {
 				return
