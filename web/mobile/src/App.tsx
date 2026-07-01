@@ -36,6 +36,7 @@ export default function App() {
               lockedBy={view.lockedBy}
               selfLost={view.buzzedAndLost}
               judged={view.judgedThisRound}
+              verdict={view.lastVerdict}
               onBuzz={buzz}
             />
             {revealBand}
@@ -50,6 +51,7 @@ export default function App() {
               lockedBy={view.lockedBy}
               selfLost={view.buzzedAndLost}
               judged={view.judgedThisRound}
+              verdict={view.lastVerdict}
               onBuzz={buzz}
             />
             {revealBand}

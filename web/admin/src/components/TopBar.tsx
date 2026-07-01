@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AdminRevealCfgData, GameState } from "@shared/protocol";
 import type { AdminActions, ConnStatus } from "../useAdmin";
 import { createAdminApi, type BoardSummary } from "../useAdminApi";
@@ -95,8 +95,17 @@ export default function TopBar({
     return () => clearTimeout(id);
   }, [thresh, actions]);
 
+  const [manuallyPaused, setManuallyPaused] = useState(false);
+  const prevState = useRef(gameState);
+  useEffect(() => {
+    if (prevState.current !== gameState) {
+      setManuallyPaused(false);
+      prevState.current = gameState;
+    }
+  }, [gameState]);
+
   const gameActive = isGameActive(gameState);
-  const trackPlaying = isPlaying(gameState);
+  const trackPlaying = isPlaying(gameState) && !manuallyPaused;
   const canPause = trackPlaying && spotifyConnected;
   const canResume = gameActive && !trackPlaying && spotifyConnected;
 
@@ -182,14 +191,14 @@ export default function TopBar({
       {/* Play/Pause toggle */}
       {canPause ? (
         <button
-          onClick={() => actions.playback("pause")}
+          onClick={() => { actions.playback("pause"); setManuallyPaused(true); }}
           className="rounded border border-edge bg-panel px-3 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-950/40"
         >
           Pause
         </button>
       ) : canResume ? (
         <button
-          onClick={() => actions.playback("resume")}
+          onClick={() => { actions.playback("resume"); setManuallyPaused(false); }}
           className="rounded border border-edge bg-panel px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-950/40"
         >
           Play

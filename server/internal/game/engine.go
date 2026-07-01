@@ -58,6 +58,24 @@ type pendingPartial struct {
 	remaining int // snapshot of leftover pool at the moment of the partial
 }
 
+// currentPointsFromPool applies the same linear decay as CurrentPoints but with
+// explicit ceiling/floor instead of row-derived values. Used after a partial
+// shifts the scoring pool. (Cannot live in scoring.go — fixed contract.)
+func currentPointsFromPool(maxP, baseP int, elapsedMs int64) int {
+	t := float64(elapsedMs) / 1000.0
+	bonus := float64(maxP - baseP)
+	switch {
+	case t <= DecayHoldSeconds:
+		return maxP
+	case t >= DecayEndSeconds:
+		return baseP
+	default:
+		span := DecayEndSeconds - DecayHoldSeconds
+		frac := 1.0 - (t-DecayHoldSeconds)/span
+		return int(float64(baseP) + bonus*frac)
+	}
+}
+
 // Engine implements game.InboundHandler and drives the full lifecycle.
 type Engine struct {
 	repo   GameRepo
@@ -161,6 +179,8 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 	}
 	_ = e.repo.CreateSession(ctx, e.session)
+	telemetryTicker := time.NewTicker(60 * time.Second)
+	defer telemetryTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -170,6 +190,8 @@ func (e *Engine) Run(ctx context.Context) error {
 			if c.done != nil {
 				close(c.done)
 			}
+		case <-telemetryTicker.C:
+			e.broadcastTelemetry()
 		}
 	}
 }
@@ -286,6 +308,10 @@ const smsgSpotifyToken protocol.ServerMsgType = "spotifyToken"
 // (artist or song) after a partial grade, so the animation settles that field.
 const smsgPartialReveal protocol.ServerMsgType = "partialReveal"
 
+// CONTRACT-QUESTION: gradeResult tells the buzz winner their verdict after
+// adjudication so the mobile can show an appropriate message.
+const smsgGradeResult protocol.ServerMsgType = "gradeResult"
+
 // PushSpotifyToken sends the access token to all connected Stage clients so
 // they can initialize the Web Playback SDK without being in the OAuth loop.
 func (e *Engine) PushSpotifyToken(token string) {
@@ -353,6 +379,7 @@ func (e *Engine) OnDisconnect(connID string) {
 			if e.state == protocol.StateKaraoke {
 				e.evaluateSkipVotes()
 			}
+			e.broadcastTelemetry()
 		}
 	})
 }
@@ -463,21 +490,31 @@ func (e *Engine) onHello(connID string, env protocol.ClientEnvelope) {
 	e.sendFullSync(connID, h.Role)
 	e.broadcastScoreboard()
 	e.broadcastBoard()
+	if h.Role == protocol.RoleAdmin || h.Role == protocol.RoleMobile {
+		e.broadcastTelemetry()
+	}
 }
 
 func (e *Engine) onHeartbeat(connID string, env protocol.ClientEnvelope) {
-	var hb protocol.HeartbeatData
+	var hb struct {
+		ClientTime int64 `json:"clientTime"`
+		RTTMs      int   `json:"rttMs,omitempty"`
+	}
 	_ = json.Unmarshal(env.Data, &hb)
 	now := nowMs()
-	// Refocus reinstates an idled player into the active pool (§3.8).
 	if p := e.reg.playerForConn(connID); p != nil {
 		p.IdleRounds = 0
 		if e.reg.isMobile(p.ID) {
 			p.Active = true
 		}
+		if hb.RTTMs > 0 {
+			if p.RTTMs == 0 {
+				p.RTTMs = hb.RTTMs
+			} else {
+				p.RTTMs = (p.RTTMs*3 + hb.RTTMs) / 4
+			}
+		}
 	}
-	// clientTime is used ONLY for RTT, never ordering (§4B). We do not trust it
-	// for arrival; transport stamps arrival. Here we just echo a server clock.
 	e.bcast.SendTo(connID, e.envelope(protocol.SMsgHeartbeat, map[string]int64{
 		"serverTime": now,
 	}))
@@ -704,12 +741,15 @@ func (e *Engine) onGrade(connID string, env protocol.ClientEnvelope) {
 func (e *Engine) gradeCorrect(winner *Player, elapsed int64) {
 	pts := CurrentPoints(e.curRow, elapsed)
 	if e.partial.active {
-		// A prior partial already took 50; the remaining-half guesser claims
-		// the leftover pool snapshot decayed to now (§7).
-		pts = e.partial.remaining
-		if pts < 0 {
-			pts = 0
+		// A prior partial shifted the decay pool. Compute the decayed value
+		// using the reduced ceiling/floor and elapsed relative to the partial's
+		// re-anchored trackStartMs.
+		maxP := e.partial.remaining
+		baseP := BaseValue - PartialPoints
+		if baseP > maxP {
+			baseP = maxP
 		}
+		pts = currentPointsFromPool(maxP, baseP, elapsed)
 	}
 	e.award(winner, pts)
 	e.cellPicker = winner.ID
@@ -743,6 +783,9 @@ func (e *Engine) gradePartial(winner *Player, elapsed int64, kind string) {
 	}
 	e.award(winner, awarded)
 	e.partial = pendingPartial{active: true, remaining: remaining}
+	for _, cid := range e.reg.connIDs(winner.ID) {
+		e.bcast.SendTo(cid, e.envelope(smsgGradeResult, map[string]string{"verdict": "partial"}))
+	}
 
 	if secondPartial {
 		// Two partials exhaust guessing; clear admin evaluation and enter karaoke.
@@ -754,13 +797,38 @@ func (e *Engine) gradePartial(winner *Player, elapsed int64, kind string) {
 		return
 	}
 
-	// Force the graded field fully revealed on BOTH surfaces via the mask, and
-	// keep the stage-only cosmetic signal for its existing settle handling.
+	// Resume audio (inline instead of resumeAudio() so we send only one
+	// trackStart with the reduced scoring pool).
+	_ = e.audio.Resume(context.Background())
+	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{
+		Action: "resume", PositionMs: e.pausedAtMs,
+	}))
+
+	// Re-anchor timer with the reduced pool. Start 5001ms in the past so the
+	// hold period is already elapsed and decay begins immediately.
+	partialStartMs := nowMs() - 5001
+	e.trackStartMs = partialStartMs
+	newBase := BaseValue - PartialPoints
+	if newBase > remaining {
+		newBase = remaining
+	}
+	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgTrackStart, protocol.TrackStartData{
+		MaxPoints:  remaining,
+		BasePoints: newBase,
+		StartTime:  partialStartMs,
+		ArtistLen:  len(e.curTrack.Artist),
+		SongLen:    len(e.curTrack.Song),
+	}))
+
+	// Force the graded field fully revealed on BOTH surfaces via the mask
+	// (server-authoritative reveal), and keep the stage-only cosmetic
+	// partialReveal signal. Sent AFTER trackStart so the stage's new-track
+	// logic clears its flags first, then we re-set the revealed field.
 	if kind != "" {
 		e.revealFieldFully(kind)
 		e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgPartialReveal, map[string]string{"field": kind}))
 	}
-	e.resumeAudio()
+
 	e.buzzWinner = ""
 	e.lock.Release(context.Background(), e.roundKey)
 	e.bcast.Broadcast(protocol.RoleAdmin, e.adminViewEnvelope())
@@ -772,6 +840,9 @@ func (e *Engine) gradePartial(winner *Player, elapsed int64, kind string) {
 // audio from where it paused, and re-enables remaining eligible players (§3.6).
 func (e *Engine) gradeIncorrect(winner *Player) {
 	winner.GuessedThisTrack = true // permanent lockout for this track
+	for _, cid := range e.reg.connIDs(winner.ID) {
+		e.bcast.SendTo(cid, e.envelope(smsgGradeResult, map[string]string{"verdict": "incorrect"}))
+	}
 	e.resumeAudio()
 	e.buzzWinner = ""
 	e.lock.Release(context.Background(), e.roundKey)
@@ -811,6 +882,7 @@ func (e *Engine) award(p *Player, pts int) {
 	p.Score += pts
 	_ = e.repo.SaveScore(context.Background(), e.cfg.SessionID, p.ID, p.Handle, p.Score)
 	e.broadcastScoreboard()
+	e.broadcastTelemetry()
 }
 
 // ---------------------------------------------------------------------------
@@ -1061,6 +1133,7 @@ func (e *Engine) onAdminPlayback(connID string, env protocol.ClientEnvelope) {
 	}
 	switch d.Action {
 	case "pause":
+		e.pausedAtMs = nowMs() - e.trackStartMs
 		_ = e.audio.Pause(context.Background())
 		e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{Action: "pause"}))
 	case "resume", "play":
@@ -1408,6 +1481,27 @@ func (e *Engine) broadcastBoard() {
 	env := e.envelope(protocol.SMsgBoard, boardData(e.board))
 	e.bcast.Broadcast(protocol.RoleStage, env)
 	e.bcast.Broadcast(protocol.RoleAdmin, env)
+}
+
+func (e *Engine) telemetryData() protocol.TelemetryData {
+	conns := []protocol.TelemetryConn{}
+	for _, p := range e.reg.players {
+		if !e.reg.isMobile(p.ID) {
+			continue
+		}
+		conns = append(conns, protocol.TelemetryConn{
+			ID:     p.ID,
+			Handle: p.Handle,
+			RTTMs:  p.RTTMs,
+			Score:  p.Score,
+			Active: p.Active && e.reg.online(p.ID),
+		})
+	}
+	return protocol.TelemetryData{Connections: conns}
+}
+
+func (e *Engine) broadcastTelemetry() {
+	e.bcast.Broadcast(protocol.RoleAdmin, e.envelope(protocol.SMsgTelemetry, e.telemetryData()))
 }
 
 func (e *Engine) persistScores() {

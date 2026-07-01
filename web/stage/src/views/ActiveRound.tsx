@@ -13,12 +13,13 @@
 //     color. The noise carries no information about the answer.
 //
 // ONE requestAnimationFrame loop drives the noise cycling + the point timer.
-// The point timer stays local and deterministic (scoring.currentPoints),
-// freezing on buzz to mask latency (§5).
+// The point timer stays local and deterministic (scoring.currentPointsFromPool,
+// which honors the reduced pool after a partial grade), freezing on buzz to
+// mask latency (§5).
 
 import { useEffect, useRef } from "react";
 import type { MaskedRevealData, TrackStartData } from "@shared/protocol";
-import { currentPoints } from "@shared/scoring";
+import { currentPointsFromPool } from "@shared/scoring";
 import { glyphAt } from "../anim/decrypt";
 import type { TimerAnchor } from "../net/useGame";
 
@@ -79,7 +80,7 @@ export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHa
         const span = el.children[i] as HTMLSpanElement;
         const cell = mask ? mask[i] : "";
         if (cell === " ") {
-          if (span.textContent !== " ") span.textContent = " ";
+          if (span.textContent !== " ") span.textContent = " ";
           if (span.className !== NOISE_CLS) span.className = NOISE_CLS;
         } else if (cell) {
           // Revealed/locked letter.
@@ -103,9 +104,9 @@ export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHa
       renderField(artistRef.current, mr?.artist, mr?.artistLen ?? ts.artistLen, ARTIST_SEED, tick);
       renderField(songRef.current, mr?.song, mr?.songLen ?? ts.songLen, SONG_SEED, tick);
 
-      // --- point timer (local, deterministic) ---
+      // --- point timer (local, deterministic; honors reduced pool post-partial) ---
       if (pointsRef.current && !tm.frozen) {
-        const pts = currentPoints(tm.row, Math.max(0, now - ts.startTime));
+        const pts = currentPointsFromPool(tm.maxPoints, tm.basePoints, Math.max(0, now - tm.startTime));
         if (pts !== lastPoints) {
           lastPoints = pts;
           pointsRef.current.textContent = String(pts);
@@ -136,7 +137,7 @@ export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHa
             frozen ? "text-neon-magenta opacity-30 blur-[1px]" : "text-neon-green neon-text animate-pulseGlow",
           ].join(" ")}
         >
-          {currentPoints(timer.row, Math.max(0, Date.now() - trackStart.startTime))}
+          {currentPointsFromPool(timer.maxPoints, timer.basePoints, Math.max(0, Date.now() - timer.startTime))}
         </div>
       </div>
 

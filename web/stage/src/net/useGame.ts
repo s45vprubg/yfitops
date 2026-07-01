@@ -55,6 +55,7 @@ export interface GameView {
   lyrics: LyricsData | null;
   lockoutHandle: string | null;
   timer: TimerAnchor | null;
+  animStartTime: number;
   audioMode: AudioPlayer["mode"];
   spotifyConnectState: ConnectState;
   audioActivated: boolean;
@@ -84,6 +85,7 @@ export function useGame() {
     lyrics: null,
     lockoutHandle: null,
     timer: null,
+    animStartTime: 0,
     audioMode: "demo",
     spotifyConnectState: "idle",
     audioActivated: false,
@@ -152,13 +154,17 @@ export function useGame() {
         const ts = e.d as TrackStartData;
         const row = rowFromMaxPoints(ts.maxPoints);
         setView((v) => {
-          const isNewTrack = !v.trackStart || v.trackStart.startTime !== ts.startTime;
+          // A truly new track changes the answer lengths; a mid-track re-anchor
+          // (e.g. after a partial grade) only shifts the scoring pool/startTime.
+          const isNewTrack = !v.trackStart ||
+            v.trackStart.artistLen !== ts.artistLen ||
+            v.trackStart.songLen !== ts.songLen;
           return {
             ...v,
             trackStart: ts,
             timer: { row, maxPoints: ts.maxPoints, basePoints: ts.basePoints, startTime: ts.startTime, frozen: false },
             lockoutHandle: null,
-            ...(isNewTrack ? { lyrics: null, maskedReveal: null, revealedArtist: false, revealedSong: false } : {}),
+            ...(isNewTrack ? { animStartTime: ts.startTime, lyrics: null, maskedReveal: null, revealedArtist: false, revealedSong: false } : {}),
           };
         });
       });
@@ -182,8 +188,13 @@ export function useGame() {
         const player = audioRef.current;
         if (!player) return;
         if (a.action === "play") void player.play(a.trackURI, a.positionMs);
-        else if (a.action === "pause") void player.pause();
-        else if (a.action === "resume") void player.resume();
+        else if (a.action === "pause") {
+          void player.pause();
+          setView((v) => ({ ...v, timer: v.timer ? { ...v.timer, frozen: true } : v.timer }));
+        } else if (a.action === "resume") {
+          void player.resume();
+          setView((v) => ({ ...v, timer: v.timer ? { ...v.timer, frozen: false } : v.timer }));
+        }
       });
 
       // initSpotify swaps in a Spotify-backed player. The token provider always

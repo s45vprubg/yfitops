@@ -70,7 +70,9 @@ export type ServerMsgType =
   | "maskedReveal"
   // adminRevealCfg: echoes current reveal-timing knob values to the control
   // room so its sliders reflect server truth. Mirrors smsgAdminRevealCfg.
-  | "adminRevealCfg";
+  | "adminRevealCfg"
+  // gradeResult: notifies mobile of a grade outcome (from ui-edits-3).
+  | "gradeResult";
 
 export interface ClientEnvelope<D = unknown> {
   t: ClientMsgType;
