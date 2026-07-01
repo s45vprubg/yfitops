@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/s45vprubg/yfitops/server/internal/config"
 	"github.com/s45vprubg/yfitops/server/internal/protocol"
@@ -44,7 +45,9 @@ type LRCLIBClient struct {
 func New(cfg *config.Config) *LRCLIBClient {
 	return &LRCLIBClient{
 		baseURL: strings.TrimRight(cfg.LRCLIBBaseURL, "/"),
-		http:    http.DefaultClient,
+		// A bounded timeout so a slow/hung LRCLIB call can't stall a karaoke
+		// lyric fetch or wedge a bulk lyrics rescan worker indefinitely.
+		http: &http.Client{Timeout: 8 * time.Second},
 	}
 }
 

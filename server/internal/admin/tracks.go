@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"regexp"
+	"sync"
 	"time"
 )
 
@@ -132,11 +133,40 @@ func (h *Handler) rescanLyrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Probe LRCLIB with bounded concurrency — a serial scan of a large board
+	// (100+ tracks) blocks the request for a minute-plus. Cap parallelism so we
+	// don't hammer LRCLIB.
+	const workers = 8
+	type result struct {
+		id  string
+		has bool
+	}
+	jobs := make(chan *Track)
+	results := make(chan result)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for t := range jobs {
+				has := h.lyrics.HasSyncedLyrics(r.Context(), t.Artist, t.Song, int(t.DurationMs/1000))
+				results <- result{id: t.ID, has: has}
+			}
+		}()
+	}
+	go func() {
+		for i := range tracks {
+			jobs <- &tracks[i]
+		}
+		close(jobs)
+	}()
+	go func() { wg.Wait(); close(results) }()
+
 	checked, withLyrics := 0, 0
-	for i := range tracks {
-		t := &tracks[i]
-		has := h.lyrics.HasSyncedLyrics(r.Context(), t.Artist, t.Song, int(t.DurationMs/1000))
-		if err := h.store.SetTrackLyrics(r.Context(), t.ID, &has, nil); err != nil {
+	for res := range results {
+		has := res.has
+		if err := h.store.SetTrackLyrics(r.Context(), res.id, &has, nil); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
