@@ -79,9 +79,11 @@ func main() {
 	if tokenPath == "" {
 		tokenPath = filepath.Join(filepath.Dir(cfg.CertFile), "spotify_refresh_token")
 	}
+	spotifyRestored := false
 	if data, err := os.ReadFile(tokenPath); err == nil {
 		if rt := strings.TrimSpace(string(data)); rt != "" {
 			audio.RestoreRefreshToken(rt)
+			spotifyRestored = true
 			log.Printf("spotify: restored refresh token from %s", tokenPath)
 		}
 	}
@@ -109,6 +111,12 @@ func main() {
 	if needSampleBoard {
 		eng.SetBoard(store.SampleBoard())
 		log.Printf("engine: sample board injected (5×5, demo tracks)")
+	}
+	// If we restored a persisted Spotify refresh token, mark Spotify authed so a
+	// connecting stage is told to initialize the Web Playback SDK (registers the
+	// playback device). Without this a restored-token boot yields NO_ACTIVE_DEVICE.
+	if spotifyRestored {
+		eng.MarkSpotifyAuthed()
 	}
 	eng.SetRoleSetter(hub) // promote roles on validated Hello (§4A)
 	go func() {

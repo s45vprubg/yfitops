@@ -295,6 +295,15 @@ func (e *Engine) PushSpotifyToken(token string) {
 	})
 }
 
+// MarkSpotifyAuthed flags Spotify as already authenticated WITHOUT broadcasting
+// (no stage may be connected yet). Used at boot when a persisted refresh token
+// is restored: without this, sendFullSync would never tell a connecting stage
+// to initialize the Web Playback SDK, so no playback device registers and the
+// server hits NO_ACTIVE_DEVICE. Safe from any goroutine.
+func (e *Engine) MarkSpotifyAuthed() {
+	e.submit(func() { e.spotifyAuthed = true })
+}
+
 // submit enqueues fn for the Run loop. It does not wait.
 func (e *Engine) submit(fn func()) {
 	select {
