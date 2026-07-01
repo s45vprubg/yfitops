@@ -56,11 +56,6 @@ export default function Login({ status, error, onSubmit }: Props) {
             {error}
           </div>
         )}
-
-        <p className="mt-6 text-[11px] leading-relaxed text-slate-500">
-          The secret must match the backend's <code>ADMIN_SECRET</code>. The
-          client holds no game state — all authority lives in the server.
-        </p>
       </form>
     </div>
   );

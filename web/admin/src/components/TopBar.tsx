@@ -94,9 +94,13 @@ export default function TopBar({
   }, [gameState]);
 
   const gameActive = isGameActive(gameState);
-  const trackPlaying = isPlaying(gameState) && !manuallyPaused;
-  const canPause = trackPlaying && spotifyConnected;
-  const canResume = gameActive && !trackPlaying && spotifyConnected;
+  // A track only exists in the PLAYING_STATES (a round/karaoke is live). Between
+  // rounds (BOARD/TRANSITION) there is nothing to play or pause, so BOTH
+  // controls are disabled — previously Play looked enabled but the server
+  // (correctly) no-oped it because there was no track loaded.
+  const trackLoaded = isPlaying(gameState) && spotifyConnected;
+  const canPause = trackLoaded && !manuallyPaused;
+  const canResume = trackLoaded && manuallyPaused;
 
   return (
     <header className="relative flex items-center gap-4 border-b border-edge bg-panel2 px-4 py-2.5">

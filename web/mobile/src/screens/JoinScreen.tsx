@@ -59,11 +59,6 @@ export function JoinScreen({ conn, error, onJoin }: Props) {
           <p className="text-center text-sm text-danger">{error}</p>
         )}
       </form>
-
-      <p className="max-w-xs text-center text-xs leading-relaxed text-neutral-600">
-        Your handle and a device ID are stored locally so you can resume your
-        score if you drop out.
-      </p>
     </div>
   );
 }
