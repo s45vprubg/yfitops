@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { AdminRevealCfgData, GameState } from "@shared/protocol";
+import type { GameState } from "@shared/protocol";
 import type { AdminActions, ConnStatus } from "../useAdmin";
 import { createAdminApi, type BoardSummary } from "../useAdminApi";
 import StatusPill from "./StatusPill";
-import SettingsPanel from "./SettingsPanel";
 import { useModal } from "./Modal";
 import { HTTP_URL } from "../config";
 
@@ -13,10 +12,8 @@ interface Props {
   nonce: number;
   gameState?: GameState;
   actions: AdminActions;
-  onLogout: () => void;
   adminSecret: string;
   spotifyConnected: boolean;
-  revealCfg?: AdminRevealCfgData;
 }
 
 const ACTIVE_GAME_STATES: GameState[] = [
@@ -50,14 +47,11 @@ export default function TopBar({
   nonce,
   gameState,
   actions,
-  onLogout,
   adminSecret,
   spotifyConnected,
-  revealCfg,
 }: Props) {
   const [boards, setBoards] = useState<BoardSummary[]>([]);
   const [loadingBoard, setLoadingBoard] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const { confirm } = useModal();
   const api = useMemo(() => createAdminApi(adminSecret), [adminSecret]);
 
@@ -131,26 +125,6 @@ export default function TopBar({
       </div>
 
       <div className="flex-1" />
-
-      {/* Settings mixer: skip threshold + all reveal-timing knobs. */}
-      <button
-        onClick={() => setSettingsOpen((o) => !o)}
-        title="Game settings"
-        className={`rounded border px-2.5 py-1.5 text-xs font-semibold ${
-          settingsOpen
-            ? "border-accent bg-accent/10 text-accent"
-            : "border-edge bg-panel text-slate-300 hover:text-white"
-        }`}
-      >
-        ⚙ Settings
-      </button>
-      {settingsOpen && (
-        <SettingsPanel
-          revealCfg={revealCfg}
-          actions={actions}
-          onClose={() => setSettingsOpen(false)}
-        />
-      )}
 
       {/* Spotify status */}
       {spotifyConnected ? (
@@ -231,13 +205,6 @@ export default function TopBar({
       ) : null}
 
       <StatusPill status={status} connected={connected} nonce={nonce} />
-
-      <button
-        onClick={onLogout}
-        className="rounded border border-edge bg-panel px-3 py-1.5 text-xs text-slate-400 hover:text-white"
-      >
-        Lock
-      </button>
     </header>
   );
 }

@@ -16,13 +16,25 @@ const SCORE_OVERLAY_STATES = ["BOARD", "TRANSITION", "ROUND_ACTIVE", "LOCKED_OUT
 export default function App() {
   const { view, audio, activateAudio } = useGame();
 
-  const needsActivation = view.spotifyConnectState === "ready" && !view.audioActivated;
+  // Show the one-time "Start Stage" gesture whenever Spotify is the audio source
+  // and the browser autoplay lock hasn't been cleared yet. It appears from the
+  // moment Spotify begins initializing (as a "preparing…" screen) so it's an
+  // expected setup step, not a surprise mid-game popup. Browsers require a real
+  // user gesture before a tab may emit audio — this click is that gesture.
+  const usingSpotify = view.audioMode === "spotify";
+  const needsActivation = usingSpotify && !view.audioActivated;
 
   return (
     <div className="crt-overlay relative h-full w-full overflow-hidden">
       <ConnDot connected={view.connected} />
 
-      {needsActivation && <AudioActivationOverlay onActivate={activateAudio} />}
+      {needsActivation && (
+        <AudioActivationOverlay
+          ready={view.spotifyConnectState === "ready"}
+          error={view.spotifyConnectState === "error"}
+          onActivate={activateAudio}
+        />
+      )}
 
       {renderView()}
 
@@ -95,16 +107,55 @@ function ConnDot({ connected }: { connected: boolean }) {
   );
 }
 
-function AudioActivationOverlay({ onActivate }: { onActivate: () => void }) {
+// AudioActivationOverlay is the stage's one-time "Start Stage" gate. It is shown
+// from the moment Spotify begins initializing so the operator expects it:
+//   - preparing  → SDK still connecting; button disabled
+//   - ready      → click to satisfy the browser autoplay gesture + start audio
+//   - error      → SDK failed (bad token / not Premium); offer a retry click
+// After a successful click the browser unlocks audio for the session and this
+// never reappears.
+function AudioActivationOverlay({
+  ready,
+  error,
+  onActivate,
+}: {
+  ready: boolean;
+  error: boolean;
+  onActivate: () => void;
+}) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm">
       <button
-        onClick={onActivate}
-        className="rounded-xl border-2 border-neon-green bg-panel px-12 py-8 text-center shadow-[0_0_30px_rgba(53,255,148,0.3)] transition hover:shadow-[0_0_60px_rgba(53,255,148,0.6)]"
+        onClick={ready || error ? onActivate : undefined}
+        disabled={!ready && !error}
+        className={[
+          "rounded-xl border-2 bg-panel px-16 py-10 text-center transition",
+          ready || error
+            ? "cursor-pointer border-neon-green shadow-[0_0_30px_rgba(53,255,148,0.3)] hover:shadow-[0_0_60px_rgba(53,255,148,0.6)]"
+            : "cursor-default border-neon-cyan/40 opacity-80",
+        ].join(" ")}
       >
-        <div className="mb-3 text-5xl">🔊</div>
-        <div className="text-2xl font-bold tracking-wide text-neon-green">Enable Audio</div>
-        <div className="mt-2 text-sm text-slate-400">Click to unlock Spotify playback</div>
+        <div className="mb-4 text-6xl">{error ? "⚠️" : "🎵"}</div>
+        {!ready && !error && (
+          <>
+            <div className="text-3xl font-bold tracking-wide text-neon-cyan">Preparing stage…</div>
+            <div className="mt-2 text-sm text-slate-400">Connecting to Spotify</div>
+          </>
+        )}
+        {ready && (
+          <>
+            <div className="text-3xl font-bold tracking-wide text-neon-green neon-text">Start Stage</div>
+            <div className="mt-2 text-sm text-slate-400">Click once to enable audio and begin</div>
+          </>
+        )}
+        {error && (
+          <>
+            <div className="text-3xl font-bold tracking-wide text-neon-magenta">Audio unavailable</div>
+            <div className="mt-2 max-w-md text-sm text-slate-400">
+              Spotify didn't connect. Check the account is Premium and reconnected in the control room, then click to retry.
+            </div>
+          </>
+        )}
       </button>
     </div>
   );

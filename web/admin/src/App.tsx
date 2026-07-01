@@ -8,6 +8,7 @@ import EvaluationPanel from "./components/EvaluationPanel";
 import TelemetryPanel from "./components/TelemetryPanel";
 import ScorePanel from "./components/ScorePanel";
 import BoardBuilderPage from "./components/BoardBuilderPage";
+import SettingsPage from "./components/SettingsPage";
 import { HTTP_URL } from "./config";
 
 const ACTIVE_GAME_STATES: GameState[] = [
@@ -15,7 +16,7 @@ const ACTIVE_GAME_STATES: GameState[] = [
   "KARAOKE", "DAILY_DOUBLE", "TRANSITION",
 ];
 
-type Page = "control" | "builder";
+type Page = "control" | "builder" | "settings";
 
 export default function App() {
   const [state, actions] = useAdmin();
@@ -54,27 +55,35 @@ export default function App() {
 
   return (
     <div className="flex h-full w-full flex-col bg-[#05070a] text-slate-200">
-      {/* Navigation tabs */}
+      {/* Navigation tabs + lock (far right) */}
       <nav className="flex items-center gap-1 border-b border-edge bg-panel px-4 py-1">
+        {([
+          ["control", "Control Room"],
+          ["builder", "Board Builder"],
+          ["settings", "Settings"],
+        ] as [Page, string][]).map(([id, label]) => (
+          <button
+            key={id}
+            onClick={() => setPage(id)}
+            className={`rounded px-3 py-1 text-xs font-semibold ${
+              page === id ? "bg-accent/20 text-accent" : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+        <div className="flex-1" />
         <button
-          onClick={() => setPage("control")}
-          className={`rounded px-3 py-1 text-xs font-semibold ${
-            page === "control"
-              ? "bg-accent/20 text-accent"
-              : "text-slate-400 hover:text-slate-200"
-          }`}
+          onClick={actions.logout}
+          title="Lock control room"
+          aria-label="Lock control room"
+          className="rounded p-1.5 text-slate-400 hover:bg-panel3 hover:text-white"
         >
-          Control Room
-        </button>
-        <button
-          onClick={() => setPage("builder")}
-          className={`rounded px-3 py-1 text-xs font-semibold ${
-            page === "builder"
-              ? "bg-accent/20 text-accent"
-              : "text-slate-400 hover:text-slate-200"
-          }`}
-        >
-          Board Builder
+          {/* padlock icon */}
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+          </svg>
         </button>
       </nav>
 
@@ -86,10 +95,8 @@ export default function App() {
             nonce={state.nonce}
             gameState={state.gameState}
             actions={actions}
-            onLogout={actions.logout}
             adminSecret={secret}
             spotifyConnected={spotifyConnected}
-            revealCfg={state.revealCfg}
           />
 
           <main className="grid min-h-0 flex-1 grid-cols-[minmax(260px,1fr)_minmax(420px,1.6fr)_minmax(300px,1fr)]">
@@ -150,6 +157,12 @@ export default function App() {
       {page === "builder" && (
         <div className="min-h-0 flex-1">
           <BoardBuilderPage secret={secret} />
+        </div>
+      )}
+
+      {page === "settings" && (
+        <div className="min-h-0 flex-1">
+          <SettingsPage revealCfg={state.revealCfg} actions={actions} />
         </div>
       )}
     </div>

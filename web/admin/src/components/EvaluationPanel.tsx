@@ -171,7 +171,7 @@ function Overrides({ actions, players, roundActive }: { actions: AdminActions; p
   const [delta, setDelta] = useState(0);
 
   return (
-    <div className="mt-auto rounded-lg border border-edge bg-panel2 p-3">
+    <div className="rounded-lg border border-edge bg-panel2 p-3">
       <div className="mb-2 text-[10px] uppercase tracking-wide text-slate-500">Manual Overrides</div>
 
       <div className="mb-3 grid grid-cols-2 gap-2">

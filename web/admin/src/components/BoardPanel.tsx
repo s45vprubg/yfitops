@@ -94,24 +94,22 @@ function BoardGrid({ board, selectable, onSelect }: { board: BoardData; selectab
                   : "empty"
               }
               className={[
-                "flex aspect-[5/4] flex-col items-center justify-center rounded border text-center transition",
+                "flex h-9 items-center justify-center gap-1 rounded border text-center transition",
                 disabled
                   ? "cursor-not-allowed border-edge/50 bg-panel/40 text-slate-700"
                   : "border-edge bg-panel text-accent hover:border-accent hover:bg-accent/10 active:scale-[0.97]",
               ].join(" ")}
             >
-              <span className="text-base font-bold leading-none">
+              <span className="text-xs font-bold leading-none">
                 {cell ? cell.points : "—"}
               </span>
               {cell && !exhausted && (
-                <span className="mt-0.5 text-base font-semibold text-slate-400">
+                <span className="text-[10px] font-medium text-slate-500">
                   ×{cell.tracksLeft}
                 </span>
               )}
               {exhausted && cell && (
-                <span className="mt-0.5 text-[9px] uppercase text-slate-600">
-                  done
-                </span>
+                <span className="text-[8px] uppercase text-slate-600">done</span>
               )}
             </button>
           );
