@@ -3,7 +3,6 @@ import { GameClient } from "@shared/client";
 import type {
   GameState,
   HelloData,
-  HeartbeatData,
   RateData,
   ServerEnvelope,
   StateData,
@@ -35,6 +34,8 @@ export interface GameView {
   wonBuzzThisRound: boolean;
   // This player was judged incorrect/partial and is locked out for the rest of the round.
   judgedThisRound: boolean;
+  // The verdict received after adjudication ("partial" or "incorrect").
+  lastVerdict: "partial" | "incorrect" | null;
   // Vote progress during KARAOKE.
   vote: VoteStateData | null;
   // Most recent server error message (e.g. bad nonce, kicked).
@@ -52,6 +53,7 @@ const INITIAL: GameView = {
   buzzedAndLost: false,
   wonBuzzThisRound: false,
   judgedThisRound: false,
+  lastVerdict: null,
   vote: null,
   error: null,
   rttMs: null,
@@ -63,17 +65,21 @@ export function useGame() {
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Maps the clientTime we stamped to compute RTT when the echo returns.
   const pendingPing = useRef<number | null>(null);
+  // True between sending a buzz and receiving the buzzResult response.
+  const awaitingBuzzResult = useRef(false);
 
   const patch = useCallback((p: Partial<GameView>) => {
     setView((v) => ({ ...v, ...p }));
   }, []);
+
+  const lastRtt = useRef<number>(0);
 
   const sendHeartbeat = useCallback(() => {
     const c = clientRef.current;
     if (!c) return;
     const clientTime = Date.now();
     pendingPing.current = clientTime;
-    void c.send<HeartbeatData>({ t: "heartbeat", d: { clientTime } });
+    void c.send({ t: "heartbeat", d: { clientTime, rttMs: lastRtt.current } });
   }, []);
 
   const wireHandlers = useCallback(
@@ -94,12 +100,18 @@ export function useGame() {
               next.judgedThisRound = true;
               next.buzzedAndLost = true;
               next.wonBuzzThisRound = false;
-            } else if (v.state !== "ADJUDICATE") {
+            } else if (v.state === "ADJUDICATE") {
+              // Someone else was judged — re-enable our buzzer.
+              next.buzzedAndLost = false;
+              next.lockedBy = null;
+              next.wonBuzzThisRound = false;
+            } else {
               // Fresh round (from BOARD/TRANSITION) — reset everything.
               next.buzzedAndLost = false;
               next.judgedThisRound = false;
               next.wonBuzzThisRound = false;
               next.lockedBy = null;
+              next.lastVerdict = null;
             }
           }
           if (d.state === "BOARD" || d.state === "LOBBY" || d.state === "TRANSITION") {
@@ -107,6 +119,7 @@ export function useGame() {
             next.judgedThisRound = false;
             next.wonBuzzThisRound = false;
             next.lockedBy = null;
+            next.lastVerdict = null;
           }
           if (d.state !== "LOCKED_OUT") {
             next.lockedBy = d.state === "ROUND_ACTIVE" ? (next.lockedBy ?? null) : v.lockedBy;
@@ -123,8 +136,19 @@ export function useGame() {
 
       c.on("buzzResult", (env: ServerEnvelope) => {
         const d = env.d as BuzzResultData | undefined;
-        if (d && !d.won) patch({ buzzedAndLost: true });
-        if (d && d.won) patch({ wonBuzzThisRound: true });
+        if (!d) return;
+        if (d.won) {
+          awaitingBuzzResult.current = false;
+          patch({ wonBuzzThisRound: true });
+        } else if (awaitingBuzzResult.current) {
+          awaitingBuzzResult.current = false;
+          patch({ buzzedAndLost: true });
+        }
+      });
+
+      c.on("gradeResult", (env: ServerEnvelope) => {
+        const d = env.d as { verdict: string } | undefined;
+        if (d) patch({ lastVerdict: d.verdict as "partial" | "incorrect" });
       });
 
       c.on("voteState", (env: ServerEnvelope) => {
@@ -134,7 +158,9 @@ export function useGame() {
 
       c.on("heartbeat", () => {
         if (pendingPing.current != null) {
-          patch({ rttMs: Date.now() - pendingPing.current });
+          const rtt = Date.now() - pendingPing.current;
+          lastRtt.current = rtt;
+          patch({ rttMs: rtt });
           pendingPing.current = null;
         }
       });
@@ -188,8 +214,7 @@ export function useGame() {
   const buzz = useCallback(() => {
     const c = clientRef.current;
     if (!c) return;
-    // Optimistically gray the button; the server's buzzResult confirms.
-    // GameClient auto-stamps the latest nonce (§4D / §4B ordering is server-side).
+    awaitingBuzzResult.current = true;
     void c.send({ t: "buzz" });
   }, []);
 

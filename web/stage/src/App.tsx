@@ -45,6 +45,7 @@ export default function App() {
             <ActiveRound
               trackStart={view.trackStart}
               timer={view.timer}
+              animStartTime={view.animStartTime}
               reveal={view.reveal}
               revealedArtist={view.revealedArtist}
               revealedSong={view.revealedSong}

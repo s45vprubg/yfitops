@@ -5,10 +5,11 @@ interface Props {
   lockedBy: string | null;
   selfLost: boolean;
   judged: boolean;
+  verdict: "partial" | "incorrect" | null;
   onBuzz: () => void;
 }
 
-export function BuzzScreen({ locked, lockedBy, judged, onBuzz }: Props) {
+export function BuzzScreen({ locked, lockedBy, judged, verdict, onBuzz }: Props) {
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
       e.preventDefault();
@@ -22,7 +23,15 @@ export function BuzzScreen({ locked, lockedBy, judged, onBuzz }: Props) {
     let overlay: string;
     let icon: string;
     let themeClass: string;
-    if (judged) {
+    if (judged && verdict === "partial") {
+      overlay = "Nice work! Sit tight while others go for the rest.";
+      icon = "🎉";
+      themeClass = "text-emerald-400/80";
+    } else if (judged && verdict === "incorrect") {
+      overlay = "Not quite — you're locked out for this round. Hang tight for the next one!";
+      icon = "❌";
+      themeClass = "text-amber-400/80";
+    } else if (judged) {
       overlay = "Good job — sit tight for the next one";
       icon = "⏳";
       themeClass = "text-amber-400/80";

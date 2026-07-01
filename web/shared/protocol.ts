@@ -55,7 +55,9 @@ export type ServerMsgType =
   | "audio"
   | "telemetry"
   | "adminView"
-  | "spotifyToken";
+  | "spotifyToken"
+  | "partialReveal"
+  | "gradeResult";
 
 export interface ClientEnvelope<D = unknown> {
   t: ClientMsgType;

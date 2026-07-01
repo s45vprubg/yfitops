@@ -33,3 +33,15 @@ export function currentPoints(row: number, elapsedMs: number): number {
   const frac = 1.0 - (t - DECAY_HOLD_SECONDS) / span;
   return Math.floor(BASE_VALUE + bonus * frac);
 }
+
+// currentPointsFromPool — same linear decay but uses explicit ceiling/floor
+// instead of computing from row. Used after a partial grade shifts the pool.
+export function currentPointsFromPool(max: number, base: number, elapsedMs: number): number {
+  const t = elapsedMs / 1000.0;
+  const bonus = max - base;
+  if (t <= DECAY_HOLD_SECONDS) return max;
+  if (t >= DECAY_END_SECONDS) return base;
+  const span = DECAY_END_SECONDS - DECAY_HOLD_SECONDS;
+  const frac = 1.0 - (t - DECAY_HOLD_SECONDS) / span;
+  return Math.floor(base + bonus * frac);
+}

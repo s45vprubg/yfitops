@@ -16,13 +16,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { RevealData, TrackStartData } from "@shared/protocol";
-import { currentPoints } from "@shared/scoring";
+import { currentPointsFromPool } from "@shared/scoring";
 import { computeFrame } from "../anim/decrypt";
 import type { TimerAnchor } from "../net/useGame";
 
 interface Props {
   trackStart: TrackStartData;
   timer: TimerAnchor;
+  animStartTime: number;
   reveal: RevealData | null;
   revealedArtist: boolean;
   revealedSong: boolean;
@@ -33,14 +34,14 @@ interface Props {
 const ARTIST_SEED = 1337;
 const SONG_SEED = 8675309;
 
-export default function ActiveRound({ trackStart, timer, reveal, revealedArtist, revealedSong, lockoutHandle }: Props) {
+export default function ActiveRound({ trackStart, timer, animStartTime, reveal, revealedArtist, revealedSong, lockoutHandle }: Props) {
   const artistRef = useRef<HTMLDivElement>(null);
   const songRef = useRef<HTMLDivElement>(null);
   const pointsRef = useRef<HTMLDivElement>(null);
   const [phaseGlow, setPhaseGlow] = useState(false);
 
-  const stateRef = useRef({ trackStart, timer, reveal, revealedArtist, revealedSong, lockoutHandle });
-  stateRef.current = { trackStart, timer, reveal, revealedArtist, revealedSong, lockoutHandle };
+  const stateRef = useRef({ trackStart, timer, animStartTime, reveal, revealedArtist, revealedSong, lockoutHandle });
+  stateRef.current = { trackStart, timer, animStartTime, reveal, revealedArtist, revealedSong, lockoutHandle };
 
   useEffect(() => {
     let raf = 0;
@@ -49,18 +50,19 @@ export default function ActiveRound({ trackStart, timer, reveal, revealedArtist,
     let frozenElapsed = -1;
 
     const tick = () => {
-      const { trackStart: ts, timer: tm, reveal: rv, revealedArtist: ra, revealedSong: rs } = stateRef.current;
+      const { trackStart: ts, timer: tm, animStartTime: ast, reveal: rv, revealedArtist: ra, revealedSong: rs } = stateRef.current;
       const now = Date.now();
-      const elapsed = Math.max(0, now - ts.startTime);
+      const animRaw = Math.max(0, now - ast);
+      const scoreElapsed = Math.max(0, now - tm.startTime);
 
       // Freeze the animation clock when the timer is frozen (buzz in progress).
       let animElapsed: number;
       if (tm.frozen) {
-        if (frozenElapsed < 0) frozenElapsed = elapsed;
+        if (frozenElapsed < 0) frozenElapsed = animRaw;
         animElapsed = frozenElapsed;
       } else {
         frozenElapsed = -1;
-        animElapsed = elapsed;
+        animElapsed = animRaw;
       }
 
       // --- decryption text ---
@@ -93,7 +95,7 @@ export default function ActiveRound({ trackStart, timer, reveal, revealedArtist,
         if (tm.frozen) {
           // Freeze: stop updating the displayed number. Visual handled by class.
         } else {
-          const pts = currentPoints(tm.row, elapsed);
+          const pts = currentPointsFromPool(tm.maxPoints, tm.basePoints, scoreElapsed);
           if (pts !== lastPoints) {
             lastPoints = pts;
             pointsRef.current.textContent = String(pts);
@@ -123,7 +125,7 @@ export default function ActiveRound({ trackStart, timer, reveal, revealedArtist,
             frozen ? "text-neon-magenta opacity-30 blur-[1px]" : "text-neon-green neon-text animate-pulseGlow",
           ].join(" ")}
         >
-          {currentPoints(timer.row, Math.max(0, Date.now() - trackStart.startTime))}
+          {currentPointsFromPool(timer.maxPoints, timer.basePoints, Math.max(0, Date.now() - timer.startTime))}
         </div>
       </div>
 
