@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] — 2026-06-29
 
+### Fixed — Playlist import 403 (Feb-2026 Spotify Web API migration)
+- Root cause: the `GET /playlists/{id}/tracks` endpoint was deprecated in
+  Spotify's February 2026 Web API migration and now returns 403 for
+  Development-Mode custom OAuth clients (search and catalog reads still work,
+  which is what made it look like a scope/quota problem). The fix is the
+  replacement endpoint, not a permissions change.
+- `server/internal/spotify/search.go`: Switched `GetPlaylistTracks` to
+  `GET /playlists/{id}/items`, which requires a `market` (now `from_token`) and
+  nests the track under `items[].item` instead of `items[].track`. Also calls
+  `ValidToken` up front so a cold-started server mints an access token from a
+  restored refresh token before fetching (the old 401-retry path never fired
+  with an empty token).
+- `server/internal/spotify/spotify.go`: Added `playlist-read-private` /
+  `playlist-read-collaborative` scopes (the new endpoint still needs them),
+  plus `RefreshToken()`/`RestoreRefreshToken()` accessors and logging of the
+  scopes Spotify actually grants at OAuth (ground-truth debugging).
+- `server/cmd/gameserver/main.go`: Persist the Spotify refresh token to
+  `certs/spotify_refresh_token` (gitignored) on OAuth callback and restore it
+  on boot, so a dev-server restart no longer forces a re-auth. Overridable via
+  `YFI_SPOTIFY_TOKEN_FILE`.
+- `server/internal/spotify/integration_test.go`: New `spotify_integration`
+  build-tagged live harness (token refresh / search / playlist import) that
+  pinpoints which capability breaks when Spotify changes something again. Never
+  runs in the default suite or preflight.
+
+### Changed — dev-up.sh runs on real Postgres/Redis
+- `scripts/dev-up.sh` + `deploy/docker-compose.dev.yml`: The dev launcher now
+  starts Postgres/Redis (ports published to loopback), applies migrations, and
+  wires the host-side gameserver to them — matching the deployed server. It
+  fails loudly if the backend falls back to in-memory (which silently drops the
+  board-management API and 404s board creation).
+
 ### Added — New Game reset
 - `server/internal/game/engine.go`: `ResetToLobby()` clears round state, resets
   all scores to 0, resets track Played flags, unloads board, transitions to LOBBY.

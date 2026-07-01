@@ -10,8 +10,9 @@
 // critical pause-on-buzz does NOT go through here — the engine messages the
 // stage directly over WebTransport (§9).
 //
-// OAuth: AuthURL builds the authorize URL with the same three scopes the
-// legacy core requested (server.js:1207). Exchange swaps the authorization
+// OAuth: AuthURL builds the authorize URL with the playback scopes the legacy
+// core requested (server.js:1207) plus playlist-read scopes for the Board
+// Builder's playlist import. Exchange swaps the authorization
 // code for access+refresh tokens. The client stores both and, mirroring the
 // legacy refreshSpotifyToken/retry logic (server.js:1300-1311, 2283-2300),
 // transparently refreshes the access token on a 401 and retries the call once.
@@ -32,6 +33,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -61,6 +63,12 @@ var scopes = []string{
 	"user-read-playback-state",
 	"user-modify-playback-state",
 	"user-read-currently-playing",
+	// Playlist read: required by the Board Builder's "import playlist" flow
+	// (GET /playlists/{id}/tracks). Without these, Spotify 403s every playlist
+	// read — even public ones and the user's own — since playlist reads are
+	// scope-gated, not auth-gated.
+	"playlist-read-private",
+	"playlist-read-collaborative",
 }
 
 // HTTPClient is the minimal slice of *http.Client the client needs, kept as an
@@ -113,6 +121,28 @@ func New(cfg *config.Config) *Client {
 	}
 }
 
+// RefreshToken returns the stored refresh token (empty if unauthenticated).
+// Used by the entrypoint to persist it across restarts so a dev server reboot
+// doesn't force a fresh OAuth dance. The refresh token is the durable
+// credential; access tokens are derived from it on demand.
+func (c *Client) RefreshToken() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.refreshToken
+}
+
+// RestoreRefreshToken seeds a refresh token loaded from persistence at boot.
+// ValidToken will then mint a fresh access token from it on first use — no
+// re-authentication needed. No-op if rt is empty.
+func (c *Client) RestoreRefreshToken(rt string) {
+	if rt == "" {
+		return
+	}
+	c.mu.Lock()
+	c.refreshToken = rt
+	c.mu.Unlock()
+}
+
 // SetDevice binds the stage's Spotify device ID after OAuth (game.AudioDevice).
 // All subsequent Play/Pause/Resume calls route to this device via the
 // device_id query param.
@@ -143,6 +173,7 @@ type tokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 	ExpiresIn    int    `json:"expires_in"` // seconds until the access token dies (~3600)
+	Scope        string `json:"scope"`       // space-separated scopes Spotify actually granted
 }
 
 // Exchange swaps an authorization code for access+refresh tokens
@@ -170,6 +201,9 @@ func (c *Client) ExchangeToken(ctx context.Context, code string) (string, error)
 	c.refreshToken = tok.RefreshToken
 	c.expiresAt = c.expiryFrom(tok.ExpiresIn)
 	c.mu.Unlock()
+	// Log the scopes Spotify actually granted — ground truth for debugging
+	// playlist-import 403s (a missing playlist-read scope shows up here).
+	log.Printf("spotify: OAuth granted scopes: %q", tok.Scope)
 	return tok.AccessToken, nil
 }
 

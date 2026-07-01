@@ -19,6 +19,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/s45vprubg/yfitops/server/internal/admin"
@@ -65,6 +67,23 @@ func main() {
 	// ---- External services ----
 	audio := spotify.New(cfg)
 	lyr := lyrics.New(cfg)
+
+	// Spotify refresh-token persistence (dev convenience): reload a previously
+	// saved refresh token so a server restart does NOT force a fresh OAuth
+	// dance. The refresh token is the durable credential — ValidToken mints a
+	// live access token from it on demand. Path is overridable; defaults next
+	// to the cert dir. Best-effort: a missing/unreadable file is fine (just
+	// means "re-auth needed").
+	tokenPath := os.Getenv("YFI_SPOTIFY_TOKEN_FILE")
+	if tokenPath == "" {
+		tokenPath = filepath.Join(filepath.Dir(cfg.CertFile), "spotify_refresh_token")
+	}
+	if data, err := os.ReadFile(tokenPath); err == nil {
+		if rt := strings.TrimSpace(string(data)); rt != "" {
+			audio.RestoreRefreshToken(rt)
+			log.Printf("spotify: restored refresh token from %s", tokenPath)
+		}
+	}
 
 	// ---- Anti-cheat nonce gate (§4D) ----
 	gate := anticheat.NewNonceGate([]byte(cfg.NonceSecret))
@@ -145,6 +164,15 @@ func main() {
 			return
 		}
 		eng.PushSpotifyToken(token)
+		// Persist the refresh token so a server restart skips re-auth (dev
+		// convenience). Best-effort — log on failure but don't fail the flow.
+		if rt := audio.RefreshToken(); rt != "" {
+			if werr := os.WriteFile(tokenPath, []byte(rt), 0o600); werr != nil {
+				log.Printf("spotify: could not persist refresh token to %s: %v", tokenPath, werr)
+			} else {
+				log.Printf("spotify: persisted refresh token to %s", tokenPath)
+			}
+		}
 		_, _ = w.Write([]byte("Spotify authenticated. Token pushed to Stage. You may close this tab."))
 	})
 	// Dev clients need the self-signed cert's SHA-256 for serverCertificateHashes.

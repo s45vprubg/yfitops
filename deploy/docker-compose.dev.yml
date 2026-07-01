@@ -1,0 +1,24 @@
+# yfitops V2 — dev override for scripts/dev-up.sh.
+#
+# dev-up.sh runs the Go gameserver BARE on the host (go run), not in a
+# container, so it can pick up local code changes without a rebuild. But it
+# still needs the real data layer (Postgres + Redis) so board management
+# matches production — otherwise the server silently falls back to in-memory
+# and POST /api/boards 404s.
+#
+# This override publishes the Postgres/Redis ports to 127.0.0.1 so the
+# host-side Go process can reach them at the config defaults
+# (localhost:5432 / localhost:6379). It is loopback-only on purpose — these
+# are dev creds, don't expose them on the LAN.
+#
+# Used as:  docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis
+# (the launcher does this for you).
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379"

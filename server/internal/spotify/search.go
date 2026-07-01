@@ -84,10 +84,21 @@ func (c *Client) Search(ctx context.Context, query string, limit int) ([]SearchR
 	return results, nil
 }
 
-// GetPlaylistTracks fetches all tracks from a Spotify playlist. The playlistID
-// can be extracted from URIs like "spotify:playlist:XXX" or URLs like
-// "open.spotify.com/playlist/XXX".
+// GetPlaylistTracks fetches all tracks from a Spotify playlist via the
+// /playlists/{id}/items endpoint (the /tracks endpoint was deprecated in the
+// Feb-2026 Web API migration and 403s for Development-Mode custom OAuth
+// clients). The playlistID can be extracted from URIs like
+// "spotify:playlist:XXX" or URLs like "open.spotify.com/playlist/XXX".
 func (c *Client) GetPlaylistTracks(ctx context.Context, playlistID string) ([]SearchResult, error) {
+	// Ensure a live access token before the first request. On a cold start we
+	// may hold only a restored refresh token (accessToken empty); ValidToken
+	// mints one from it. Without this the first doPlaylistFetch bails with "not
+	// authenticated" instead of refreshing (the retry path only fires on a 401
+	// response, which we never reach with an empty token).
+	if _, err := c.ValidToken(ctx); err != nil {
+		return nil, fmt.Errorf("spotify: playlist: %w", err)
+	}
+
 	var all []SearchResult
 	offset := 0
 	limit := 100
@@ -190,8 +201,16 @@ func (c *Client) doPlaylistFetch(ctx context.Context, playlistID string, offset,
 	q := url.Values{}
 	q.Set("offset", strconv.Itoa(offset))
 	q.Set("limit", strconv.Itoa(limit))
-	q.Set("fields", "items(track(uri,name,duration_ms,artists(name),album(images(url)))),next")
-	endpoint := c.apiBase + "/playlists/" + playlistID + "/tracks?" + q.Encode()
+	// Feb-2026 Web API migration: the old /playlists/{id}/tracks endpoint is
+	// deprecated and 403s for custom OAuth clients in Development Mode. The
+	// replacement is /playlists/{id}/items, which nests the track one level
+	// deeper (items[].item instead of items[].track). It also REQUIRES a market
+	// (or user country) — without one Spotify treats the content as
+	// unavailable — so we pass market=from_token to use the authed user's
+	// country.
+	q.Set("fields", "items(item(uri,name,duration_ms,artists(name),album(images(url)))),next")
+	q.Set("market", "from_token")
+	endpoint := c.apiBase + "/playlists/" + playlistID + "/items?" + q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -235,6 +254,8 @@ type playlistResponse struct {
 	Next  string         `json:"next"`
 }
 
+// playlistItem matches the /playlists/{id}/items response (Feb-2026 migration):
+// each entry nests the track under "item" rather than the old "track" key.
 type playlistItem struct {
-	Track searchTrackItem `json:"track"`
+	Track searchTrackItem `json:"item"`
 }
