@@ -29,6 +29,8 @@ func (a *SpotifyAdapter) Search(ctx context.Context, query string, limit int) ([
 			Song:       r.Song,
 			AlbumArt:   r.AlbumArt,
 			DurationMs: r.DurationMs,
+			Year:       r.Year,
+			Genre:      r.Genre,
 		}
 	}
 	return out, nil
@@ -47,6 +49,8 @@ func (a *SpotifyAdapter) GetPlaylistTracks(ctx context.Context, playlistID strin
 			Song:       r.Song,
 			AlbumArt:   r.AlbumArt,
 			DurationMs: r.DurationMs,
+			Year:       r.Year,
+			Genre:      r.Genre,
 		}
 	}
 	return out, nil

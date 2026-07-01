@@ -20,6 +20,7 @@ const B = {
   ease: [0, 10000, 100] as const,
   lockout: [0, 20, 1] as const,
   autoKaraoke: [0, 15000, 500] as const,
+  hintDelay: [0, 20000, 500] as const,
 };
 
 export default function SettingsPage({ revealCfg, actions }: Props) {
@@ -39,6 +40,8 @@ export default function SettingsPage({ revealCfg, actions }: Props) {
   const [easeMs, setEaseMs] = useState(revealCfg?.easeMs ?? 3000);
   const [lockoutChars, setLockoutChars] = useState(revealCfg?.lockoutChars ?? 2);
   const [autoKaraokeMs, setAutoKaraokeMs] = useState(revealCfg?.autoKaraokeMs ?? 3000);
+  const [genreDelayMs, setGenreDelayMs] = useState(revealCfg?.genreDelayMs ?? 3000);
+  const [yearDelayMs, setYearDelayMs] = useState(revealCfg?.yearDelayMs ?? 5000);
   const [alternate, setAlternate] = useState(revealCfg?.alternate ?? true);
   const revealTouched = useRef(false);
 
@@ -50,17 +53,19 @@ export default function SettingsPage({ revealCfg, actions }: Props) {
     setEaseMs(revealCfg.easeMs);
     setLockoutChars(revealCfg.lockoutChars);
     setAutoKaraokeMs(revealCfg.autoKaraokeMs);
+    setGenreDelayMs(revealCfg.genreDelayMs);
+    setYearDelayMs(revealCfg.yearDelayMs);
     setAlternate(revealCfg.alternate);
   }, [revealCfg]);
 
   useEffect(() => {
     if (!revealTouched.current) return;
     const id = setTimeout(
-      () => actions.setRevealCfg({ intervalMs, phase1Ms, blockMs, easeMs, lockoutChars, autoKaraokeMs }),
+      () => actions.setRevealCfg({ intervalMs, phase1Ms, blockMs, easeMs, lockoutChars, autoKaraokeMs, genreDelayMs, yearDelayMs }),
       150,
     );
     return () => clearTimeout(id);
-  }, [intervalMs, phase1Ms, blockMs, easeMs, lockoutChars, autoKaraokeMs, actions]);
+  }, [intervalMs, phase1Ms, blockMs, easeMs, lockoutChars, autoKaraokeMs, genreDelayMs, yearDelayMs, actions]);
 
   const edit = <T,>(setter: (v: T) => void) => (v: T) => { revealTouched.current = true; setter(v); };
 
@@ -77,6 +82,13 @@ export default function SettingsPage({ revealCfg, actions }: Props) {
           <div className="flex flex-wrap items-end gap-3">
             <Fader label="Skip" sub="threshold" value={thresh} min={0} max={100} step={5}
               fmt={(v) => `${v}%`} onChange={(v) => { threshTouched.current = true; setThresh(v); }} />
+
+            <Divider label="Hints — next round" />
+
+            <Fader label="Genre" sub="show after" value={genreDelayMs} min={B.hintDelay[0]} max={B.hintDelay[1]} step={B.hintDelay[2]}
+              fmt={(v) => `${(v / 1000).toFixed(1)}s`} onChange={edit(setGenreDelayMs)} />
+            <Fader label="Year" sub="after genre" value={yearDelayMs} min={B.hintDelay[0]} max={B.hintDelay[1]} step={B.hintDelay[2]}
+              fmt={(v) => `${(v / 1000).toFixed(1)}s`} onChange={edit(setYearDelayMs)} />
 
             <Divider label="Reveal — next round" />
 

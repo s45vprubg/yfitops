@@ -71,6 +71,8 @@ const (
 	defaultRevealEaseMs       = 3000  // char-drop morph from block width to real length
 	defaultRevealLockoutChars = 2     // lock buzzing + zero points when this many hidden letters remain
 	defaultAutoKaraokeMs      = 3000  // after full reveal, wait this long then auto-enter karaoke
+	defaultGenreDelayMs       = 3000  // show the genre hint this long after the round starts
+	defaultYearDelayMs        = 5000  // show the year hint this long after the genre hint
 	revealBlockWidth          = 16    // fixed-width noise block shown during the block phase
 )
 
@@ -88,6 +90,8 @@ const (
 	maxRevealLockoutChars = 20
 	minAutoKaraokeMs      = 0
 	maxAutoKaraokeMs      = 15000
+	minHintDelayMs        = 0
+	maxHintDelayMs        = 20000
 )
 
 // revealConfig holds the tunable reveal-timing knobs. Stored on the engine and
@@ -100,6 +104,8 @@ type revealConfig struct {
 	EaseMs       int  // char-drop morph duration when the block collapses to the real length
 	LockoutChars int  // lock buzzing + zero points when <= this many hidden letters remain (total across artist+song)
 	AutoKaraokeMs int // after the reveal fully completes, delay this long then auto-enter karaoke (0 = off)
+	GenreDelayMs int  // show the genre hint this long after the round starts
+	YearDelayMs  int  // show the year hint this long after the genre hint
 	Alternate    bool // true: one field per tick (artist,song,artist,...); false: one from each per tick
 }
 
@@ -112,6 +118,8 @@ func defaultRevealConfig() revealConfig {
 		EaseMs:        defaultRevealEaseMs,
 		LockoutChars:  defaultRevealLockoutChars,
 		AutoKaraokeMs: defaultAutoKaraokeMs,
+		GenreDelayMs:  defaultGenreDelayMs,
+		YearDelayMs:   defaultYearDelayMs,
 		Alternate:     true,
 	}
 }
@@ -133,6 +141,8 @@ func (c revealConfig) clamp() revealConfig {
 	c.EaseMs = clampInt(c.EaseMs, minRevealEaseMs, maxRevealEaseMs)
 	c.LockoutChars = clampInt(c.LockoutChars, minRevealLockoutChars, maxRevealLockoutChars)
 	c.AutoKaraokeMs = clampInt(c.AutoKaraokeMs, minAutoKaraokeMs, maxAutoKaraokeMs)
+	c.GenreDelayMs = clampInt(c.GenreDelayMs, minHintDelayMs, maxHintDelayMs)
+	c.YearDelayMs = clampInt(c.YearDelayMs, minHintDelayMs, maxHintDelayMs)
 	return c
 }
 
@@ -175,6 +185,13 @@ type revealClock struct {
 	nextField   int  // 0 = artist's turn, 1 = song's turn (alternation cursor)
 	lockedOut   bool // the total-lockout gate already fired this round (fire-once)
 	fieldHalved bool // the "one field revealed first" halve already fired (fire-once)
+
+	// Pre-reveal hints (not worth points). Values are server-side; the flags
+	// gate when each becomes visible in the mask (genre first, then year).
+	genre     string
+	year      int
+	showGenre bool
+	showYear  bool
 
 	cfg revealConfig // snapshot of the knobs for THIS round
 }
@@ -244,6 +261,10 @@ type maskedRevealData struct {
 	// real-length skeleton when phase transitions Noise->Skeleton (cosmetic; the
 	// block carries no answer info so animating it client-side is §4A-safe).
 	EaseMs int `json:"easeMs,omitempty"`
+	// Pre-reveal hints, populated only once the server has decided to show them
+	// (genre first, then year). Empty/0 = not yet shown.
+	Genre string `json:"genre,omitempty"`
+	Year  int    `json:"year,omitempty"`
 }
 
 // adminRevealCfgData echoes the current knob values to the admin UI.
@@ -254,6 +275,8 @@ type adminRevealCfgData struct {
 	EaseMs        int  `json:"easeMs"`
 	LockoutChars  int  `json:"lockoutChars"`
 	AutoKaraokeMs int  `json:"autoKaraokeMs"`
+	GenreDelayMs  int  `json:"genreDelayMs"`
+	YearDelayMs   int  `json:"yearDelayMs"`
 	Alternate     bool `json:"alternate"`
 }
 
@@ -266,6 +289,8 @@ type adminSetRevealCfgData struct {
 	EaseMs        *int  `json:"easeMs"`
 	LockoutChars  *int  `json:"lockoutChars"`
 	AutoKaraokeMs *int  `json:"autoKaraokeMs"`
+	GenreDelayMs  *int  `json:"genreDelayMs"`
+	YearDelayMs   *int  `json:"yearDelayMs"`
 	Alternate     *bool `json:"alternate"`
 }
 
@@ -275,6 +300,15 @@ type adminSetRevealCfgData struct {
 func (rc *revealClock) currentMask() maskedRevealData {
 	phase := rc.phase
 	final := rc.finalizing || phase == revealPhaseDone
+	// Hints appear once their gate has fired (genre first, then year).
+	genre := ""
+	if rc.showGenre {
+		genre = rc.genre
+	}
+	year := 0
+	if rc.showYear {
+		year = rc.year
+	}
 	if phase == revealPhaseNoise {
 		block := make([]string, revealBlockWidth)
 		for i := range block {
@@ -287,6 +321,8 @@ func (rc *revealClock) currentMask() maskedRevealData {
 			Artist:    block,
 			Song:      append([]string(nil), block...),
 			EaseMs:    rc.cfg.EaseMs,
+			Genre:     genre,
+			Year:      year,
 		}
 	}
 	return maskedRevealData{
@@ -297,6 +333,8 @@ func (rc *revealClock) currentMask() maskedRevealData {
 		Song:      buildFieldMask(rc.song, rc.songOrder, rc.songRevealed),
 		Final:     final,
 		EaseMs:    rc.cfg.EaseMs,
+		Genre:     genre,
+		Year:      year,
 	}
 }
 

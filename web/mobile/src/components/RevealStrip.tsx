@@ -92,8 +92,17 @@ export function RevealStrip({ mask }: { mask: MaskedRevealData | null }) {
     return () => cancelAnimationFrame(raf);
   }, []);
 
+  const genre = mask?.genre;
+  const year = mask?.year;
+
   return (
     <div className="flex w-full max-w-sm flex-col items-center gap-4">
+      {(genre || year) && (
+        <div className="flex items-center gap-2 text-amber-400">
+          {genre && <span className="rounded-full border border-amber-500/40 px-2 py-0.5 text-[0.7rem] font-semibold uppercase tracking-widest">{genre}</span>}
+          {year ? <span className="rounded-full border border-amber-500/40 px-2 py-0.5 text-[0.7rem] font-semibold tracking-widest">{year}</span> : null}
+        </div>
+      )}
       <Field label="artist" textRef={artistRef} />
       <Field label="song" textRef={songRef} />
     </div>

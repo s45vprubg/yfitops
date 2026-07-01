@@ -191,8 +191,27 @@ export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHa
   // Glow the lines once the reveal is streaming (phase >= 3).
   const glow = (maskedReveal?.phase ?? 0) >= 3;
 
+  const hintGenre = maskedReveal?.genre;
+  const hintYear = maskedReveal?.year;
+
   return (
     <div className="flex h-full w-full flex-col items-center justify-center px-12">
+      {/* Pre-reveal hint band: genre, then year (not worth points). */}
+      {(hintGenre || hintYear) && (
+        <div className="mb-6 flex items-center gap-4 text-neon-amber/90">
+          {hintGenre && (
+            <span className="rounded-full border border-neon-amber/40 px-4 py-1 text-2xl font-semibold uppercase tracking-widest">
+              {hintGenre}
+            </span>
+          )}
+          {hintYear ? (
+            <span className="rounded-full border border-neon-amber/40 px-4 py-1 text-2xl font-semibold tracking-widest">
+              {hintYear}
+            </span>
+          ) : null}
+        </div>
+      )}
+
       {/* Point timer */}
       <div className="mb-12 flex flex-col items-center">
         <div className="mb-1 text-sm uppercase tracking-[0.5em] text-neon-cyan/60">

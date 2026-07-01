@@ -107,6 +107,8 @@ func (h *Handler) importPlaylist(w http.ResponseWriter, r *http.Request) {
 			AlbumArt:   t.AlbumArt,
 			DurationMs: t.DurationMs,
 			CreatedAt:  base + int64(i),
+			Year:       t.Year,
+			Genre:      t.Genre,
 		}
 		if err := h.store.AddTrack(r.Context(), track); err != nil {
 			skipped++

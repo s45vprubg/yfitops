@@ -56,6 +56,8 @@ type SpotifyResult struct {
 	Song       string `json:"song"`
 	AlbumArt   string `json:"albumArt"`
 	DurationMs int64  `json:"durationMs"`
+	Year       int    `json:"year"`
+	Genre      string `json:"genre"`
 }
 
 // BoardReloader allows the admin handler to push a new board to the live engine.

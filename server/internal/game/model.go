@@ -21,6 +21,10 @@ type Track struct {
 	// lyrics OR an admin override. Lyric-less non-overridden tracks are skipped
 	// by default (karaoke needs words). Computed from the store at load time.
 	Playable bool
+	// Year / Genre are pre-reveal hints (not worth points): revealed before the
+	// artist/song letters. 0 / "" = unknown (hint hidden).
+	Year  int
+	Genre string
 }
 
 // Cell is one coordinate on the Jeopardy grid (§7). It holds a pool of 4-6

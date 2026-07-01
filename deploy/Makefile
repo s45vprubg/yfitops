@@ -37,6 +37,8 @@ migrate:
 		psql -v ON_ERROR_STOP=1 -U yfitops -d yfitops < migrations/0002_boards.sql
 	$(COMPOSE) -f $(COMPOSE_FILE) exec -T postgres \
 		psql -v ON_ERROR_STOP=1 -U yfitops -d yfitops < migrations/0003_track_lyrics.sql
+	$(COMPOSE) -f $(COMPOSE_FILE) exec -T postgres \
+		psql -v ON_ERROR_STOP=1 -U yfitops -d yfitops < migrations/0004_track_hints.sql
 
 test:
 	cd $(SERVER_DIR) && go test ./...

@@ -87,10 +87,10 @@ func (r *PostgresRepo) UpdateBoardCols(ctx context.Context, id string, cols int)
 
 func (r *PostgresRepo) AddTrack(ctx context.Context, t *admin.Track) error {
 	_, err := r.pool.Exec(ctx,
-		`INSERT INTO board_tracks (id, board_id, spotify_uri, artist, song, album_art, duration_ms, created_at, has_synced_lyrics, lyrics_override)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		`INSERT INTO board_tracks (id, board_id, spotify_uri, artist, song, album_art, duration_ms, created_at, has_synced_lyrics, lyrics_override, year, genre)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		 ON CONFLICT (board_id, spotify_uri) DO NOTHING`,
-		t.ID, t.BoardID, t.SpotifyURI, t.Artist, t.Song, t.AlbumArt, t.DurationMs, t.CreatedAt, t.HasSyncedLyrics, t.LyricsOverride)
+		t.ID, t.BoardID, t.SpotifyURI, t.Artist, t.Song, t.AlbumArt, t.DurationMs, t.CreatedAt, t.HasSyncedLyrics, t.LyricsOverride, t.Year, t.Genre)
 	if err != nil {
 		return fmt.Errorf("store: add track: %w", err)
 	}
@@ -114,7 +114,7 @@ func (r *PostgresRepo) SetTrackLyrics(ctx context.Context, trackID string, hasSy
 
 func (r *PostgresRepo) ListTracks(ctx context.Context, boardID string) ([]admin.Track, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, board_id, spotify_uri, artist, song, album_art, duration_ms, created_at, has_synced_lyrics, lyrics_override
+		`SELECT id, board_id, spotify_uri, artist, song, album_art, duration_ms, created_at, has_synced_lyrics, lyrics_override, year, genre
 		   FROM board_tracks WHERE board_id = $1 ORDER BY created_at ASC`, boardID)
 	if err != nil {
 		return nil, fmt.Errorf("store: list tracks: %w", err)
@@ -124,7 +124,7 @@ func (r *PostgresRepo) ListTracks(ctx context.Context, boardID string) ([]admin.
 	var tracks []admin.Track
 	for rows.Next() {
 		var t admin.Track
-		if err := rows.Scan(&t.ID, &t.BoardID, &t.SpotifyURI, &t.Artist, &t.Song, &t.AlbumArt, &t.DurationMs, &t.CreatedAt, &t.HasSyncedLyrics, &t.LyricsOverride); err != nil {
+		if err := rows.Scan(&t.ID, &t.BoardID, &t.SpotifyURI, &t.Artist, &t.Song, &t.AlbumArt, &t.DurationMs, &t.CreatedAt, &t.HasSyncedLyrics, &t.LyricsOverride, &t.Year, &t.Genre); err != nil {
 			return nil, fmt.Errorf("store: scan track: %w", err)
 		}
 		tracks = append(tracks, t)
@@ -134,7 +134,7 @@ func (r *PostgresRepo) ListTracks(ctx context.Context, boardID string) ([]admin.
 
 func (r *PostgresRepo) UnplacedTracks(ctx context.Context, boardID string) ([]admin.Track, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT bt.id, bt.board_id, bt.spotify_uri, bt.artist, bt.song, bt.album_art, bt.duration_ms, bt.created_at, bt.has_synced_lyrics, bt.lyrics_override
+		`SELECT bt.id, bt.board_id, bt.spotify_uri, bt.artist, bt.song, bt.album_art, bt.duration_ms, bt.created_at, bt.has_synced_lyrics, bt.lyrics_override, bt.year, bt.genre
 		   FROM board_tracks bt
 		  WHERE bt.board_id = $1
 		    AND bt.id NOT IN (
@@ -149,7 +149,7 @@ func (r *PostgresRepo) UnplacedTracks(ctx context.Context, boardID string) ([]ad
 	var tracks []admin.Track
 	for rows.Next() {
 		var t admin.Track
-		if err := rows.Scan(&t.ID, &t.BoardID, &t.SpotifyURI, &t.Artist, &t.Song, &t.AlbumArt, &t.DurationMs, &t.CreatedAt, &t.HasSyncedLyrics, &t.LyricsOverride); err != nil {
+		if err := rows.Scan(&t.ID, &t.BoardID, &t.SpotifyURI, &t.Artist, &t.Song, &t.AlbumArt, &t.DurationMs, &t.CreatedAt, &t.HasSyncedLyrics, &t.LyricsOverride, &t.Year, &t.Genre); err != nil {
 			return nil, fmt.Errorf("store: scan unplaced track: %w", err)
 		}
 		tracks = append(tracks, t)
@@ -231,7 +231,7 @@ func (r *PostgresRepo) GetLayout(ctx context.Context, boardID string) (*admin.La
 	rows, err := r.pool.Query(ctx,
 		`SELECT blc.row, blc.col, blc.category,
 		        bt.id, bt.board_id, bt.spotify_uri, bt.artist, bt.song, bt.album_art, bt.duration_ms, bt.created_at,
-		        bt.has_synced_lyrics, bt.lyrics_override,
+		        bt.has_synced_lyrics, bt.lyrics_override, bt.year, bt.genre,
 		        blct.pos
 		   FROM board_layout_cells blc
 		   LEFT JOIN board_layout_cell_tracks blct
@@ -252,11 +252,13 @@ func (r *PostgresRepo) GetLayout(ctx context.Context, boardID string) (*admin.La
 			tID, tBoardID, tURI, tArtist, tSong, tArt *string
 			tDuration, tCreated                        *int64
 			tHasLyrics, tOverride                      *bool
+			tYear                                      *int
+			tGenre                                     *string
 			pos                                        *int
 		)
 		if err := rows.Scan(&row, &col, &category,
 			&tID, &tBoardID, &tURI, &tArtist, &tSong, &tArt, &tDuration, &tCreated,
-			&tHasLyrics, &tOverride,
+			&tHasLyrics, &tOverride, &tYear, &tGenre,
 			&pos); err != nil {
 			return nil, fmt.Errorf("store: scan layout row: %w", err)
 		}
@@ -279,6 +281,8 @@ func (r *PostgresRepo) GetLayout(ctx context.Context, boardID string) (*admin.La
 				CreatedAt:       derefInt64(tCreated),
 				HasSyncedLyrics: tHasLyrics,
 				LyricsOverride:  derefBool(tOverride),
+				Year:            derefIntPtr(tYear),
+				Genre:           deref(tGenre),
 			})
 		}
 	}
@@ -298,7 +302,7 @@ func (r *PostgresRepo) LoadBoardByID(ctx context.Context, boardID string) (*game
 	rows, err := r.pool.Query(ctx,
 		`SELECT blc.row, blc.col, blc.category, blc.daily_double,
 		        bt.id, bt.spotify_uri, bt.artist, bt.song, bt.album_art, bt.duration_ms,
-		        bt.has_synced_lyrics, bt.lyrics_override,
+		        bt.has_synced_lyrics, bt.lyrics_override, bt.year, bt.genre,
 		        blct.pos
 		   FROM board_layout_cells blc
 		   LEFT JOIN board_layout_cell_tracks blct
@@ -322,10 +326,12 @@ func (r *PostgresRepo) LoadBoardByID(ctx context.Context, boardID string) (*game
 			tID, tURI, tArtist, tSong, tArt *string
 			tDuration                       *int64
 			tHasLyrics, tOverride           *bool
+			tYear                           *int
+			tGenre                          *string
 			pos                             *int
 		)
 		if err := rows.Scan(&row, &col, &category, &dailyDouble,
-			&tID, &tURI, &tArtist, &tSong, &tArt, &tDuration, &tHasLyrics, &tOverride, &pos); err != nil {
+			&tID, &tURI, &tArtist, &tSong, &tArt, &tDuration, &tHasLyrics, &tOverride, &tYear, &tGenre, &pos); err != nil {
 			return nil, fmt.Errorf("store: scan board-by-id row: %w", err)
 		}
 		if row > maxRow {
@@ -347,6 +353,10 @@ func (r *PostgresRepo) LoadBoardByID(ctx context.Context, boardID string) (*game
 			// unchecked board still works — the builder nags to run a check.
 			hasLyrics := tHasLyrics == nil || *tHasLyrics
 			playable := hasLyrics || derefBool(tOverride)
+			year := 0
+			if tYear != nil {
+				year = *tYear
+			}
 			cell.Tracks = append(cell.Tracks, &game.Track{
 				ID:         deref(tID),
 				SpotifyURI: deref(tURI),
@@ -355,6 +365,8 @@ func (r *PostgresRepo) LoadBoardByID(ctx context.Context, boardID string) (*game
 				AlbumArt:   deref(tArt),
 				DurationMs: derefInt64(tDuration),
 				Playable:   playable,
+				Year:       year,
+				Genre:      deref(tGenre),
 			})
 		}
 	}

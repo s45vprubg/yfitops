@@ -28,6 +28,8 @@ type Track struct {
 	CreatedAt       int64  `json:"createdAt"`
 	HasSyncedLyrics *bool  `json:"hasSyncedLyrics"`
 	LyricsOverride  bool   `json:"lyricsOverride"`
+	Year            int    `json:"year"`  // release year (0 = unknown)
+	Genre           string `json:"genre"` // primary artist genre ("" = unknown)
 }
 
 // LayoutCell represents one cell in the grid with its placed tracks.

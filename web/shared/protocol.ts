@@ -118,6 +118,8 @@ export interface AdminSetRevealCfgData {
   easeMs?: number;
   lockoutChars?: number;
   autoKaraokeMs?: number;
+  genreDelayMs?: number;
+  yearDelayMs?: number;
   alternate?: boolean;
 }
 export interface RateData { stars: number; }
@@ -154,6 +156,10 @@ export interface MaskedRevealData {
   song: string[];
   final?: boolean;
   easeMs?: number;
+  // Pre-reveal hints (not worth points), shown before the letters: genre first,
+  // then year. Empty/0 until the server gates them in.
+  genre?: string;
+  year?: number;
 }
 // Current reveal-timing knob values echoed to the control room.
 export interface AdminRevealCfgData {
@@ -163,6 +169,8 @@ export interface AdminRevealCfgData {
   easeMs: number;
   lockoutChars: number;
   autoKaraokeMs: number;
+  genreDelayMs: number;
+  yearDelayMs: number;
   alternate: boolean;
 }
 export interface LyricLine { timeMs: number; text: string; }

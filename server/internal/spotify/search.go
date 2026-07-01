@@ -18,6 +18,9 @@ type SearchResult struct {
 	Song       string `json:"song"`
 	AlbumArt   string `json:"albumArt"`
 	DurationMs int64  `json:"durationMs"`
+	Year       int    `json:"year"`     // parsed from album release_date (0 = unknown)
+	Genre      string `json:"genre"`    // primary artist genre (filled by GetPlaylistTracks)
+	artistID   string // primary artist ID, used to batch-fetch genres (unexported)
 }
 
 // Search queries the Spotify Search API for tracks matching query.
@@ -140,9 +143,10 @@ func (c *Client) GetPlaylistTracks(ctx context.Context, playlistID string) ([]Se
 			if item.Track.URI == "" {
 				continue
 			}
-			artist := ""
+			artist, artistID := "", ""
 			if len(item.Track.Artists) > 0 {
 				artist = item.Track.Artists[0].Name
+				artistID = item.Track.Artists[0].ID
 			}
 			albumArt := ""
 			if len(item.Track.Album.Images) > 0 {
@@ -154,6 +158,8 @@ func (c *Client) GetPlaylistTracks(ctx context.Context, playlistID string) ([]Se
 				Song:       item.Track.Name,
 				AlbumArt:   albumArt,
 				DurationMs: item.Track.DurationMs,
+				Year:       yearFromReleaseDate(item.Track.Album.ReleaseDate),
+				artistID:   artistID,
 			})
 		}
 
@@ -162,7 +168,105 @@ func (c *Client) GetPlaylistTracks(ctx context.Context, playlistID string) ([]Se
 		}
 		offset += limit
 	}
+
+	// Genre isn't on the track — it lives on the artist. Batch-fetch the primary
+	// artists' genres and fill each result (best-effort; failures leave genre "").
+	c.fillGenres(ctx, all)
 	return all, nil
+}
+
+// yearFromReleaseDate parses the leading 4-digit year from a Spotify
+// release_date ("YYYY", "YYYY-MM", "YYYY-MM-DD"). Returns 0 if unparseable.
+func yearFromReleaseDate(rd string) int {
+	if len(rd) < 4 {
+		return 0
+	}
+	y, err := strconv.Atoi(rd[:4])
+	if err != nil {
+		return 0
+	}
+	return y
+}
+
+// fillGenres batch-fetches artist genres (Spotify allows up to 50 IDs per
+// /artists call) and assigns each track its primary artist's first genre.
+func (c *Client) fillGenres(ctx context.Context, tracks []SearchResult) {
+	// Collect unique artist IDs.
+	ids := make([]string, 0, len(tracks))
+	seen := map[string]bool{}
+	for i := range tracks {
+		id := tracks[i].artistID
+		if id != "" && !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+
+	genreByArtist := map[string]string{}
+	for start := 0; start < len(ids); start += 50 {
+		end := start + 50
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+		g, err := c.artistGenres(ctx, batch)
+		if err != nil {
+			continue // best-effort; leave these genres blank
+		}
+		for id, genre := range g {
+			genreByArtist[id] = genre
+		}
+	}
+
+	for i := range tracks {
+		if genre, ok := genreByArtist[tracks[i].artistID]; ok {
+			tracks[i].Genre = genre
+		}
+	}
+}
+
+// artistGenres returns artistID -> first genre for a batch of up to 50 IDs.
+func (c *Client) artistGenres(ctx context.Context, ids []string) (map[string]string, error) {
+	c.mu.Lock()
+	token := c.accessToken
+	c.mu.Unlock()
+	if token == "" {
+		return nil, fmt.Errorf("not authenticated with Spotify")
+	}
+
+	endpoint := c.apiBase + "/artists?ids=" + url.QueryEscape(strings.Join(ids, ","))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("spotify: artists: status %d", resp.StatusCode)
+	}
+	var ar struct {
+		Artists []struct {
+			ID     string   `json:"id"`
+			Genres []string `json:"genres"`
+		} `json:"artists"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&ar); err != nil {
+		return nil, err
+	}
+	out := map[string]string{}
+	for _, a := range ar.Artists {
+		if len(a.Genres) > 0 {
+			out[a.ID] = a.Genres[0]
+		}
+	}
+	return out, nil
 }
 
 func (c *Client) doSearch(ctx context.Context, query string, limit int) (*http.Response, error) {
@@ -208,7 +312,7 @@ func (c *Client) doPlaylistFetch(ctx context.Context, playlistID string, offset,
 	// (or user country) — without one Spotify treats the content as
 	// unavailable — so we pass market=from_token to use the authed user's
 	// country.
-	q.Set("fields", "items(item(uri,name,duration_ms,artists(name),album(images(url)))),next")
+	q.Set("fields", "items(item(uri,name,duration_ms,artists(id,name),album(images(url),release_date))),next")
 	q.Set("market", "from_token")
 	endpoint := c.apiBase + "/playlists/" + playlistID + "/items?" + q.Encode()
 
@@ -238,11 +342,13 @@ type searchTrackItem struct {
 }
 
 type searchArtist struct {
+	ID   string `json:"id"`
 	Name string `json:"name"`
 }
 
 type searchAlbum struct {
-	Images []searchImage `json:"images"`
+	Images      []searchImage `json:"images"`
+	ReleaseDate string        `json:"release_date"` // "YYYY", "YYYY-MM", or "YYYY-MM-DD"
 }
 
 type searchImage struct {

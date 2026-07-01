@@ -213,6 +213,13 @@ func derefBool(p *bool) bool {
 	return *p
 }
 
+func derefIntPtr(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
 // cellCoord is a (row, col) grid key shared by the board loaders.
 type cellCoord struct{ row, col int }
 
