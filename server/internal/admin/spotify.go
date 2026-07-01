@@ -90,7 +90,13 @@ func (h *Handler) importPlaylist(w http.ResponseWriter, r *http.Request) {
 	// Stamp created_at as base+index so the library preserves the Spotify
 	// playlist order (a tight loop would otherwise collide on the same
 	// millisecond and lose ordering). Track lists sort by created_at ASC.
+	//
+	// NOTE: do NOT probe lyrics inline here — LRCLIB responds in ~seconds per
+	// track, which would make a large import hang for minutes. Import fast, then
+	// probe lyrics in the background (the client also has a "Check lyrics"
+	// button). has_synced_lyrics stays NULL (= playable) until the probe lands.
 	base := time.Now().UnixMilli()
+	added := make([]*Track, 0, len(tracks))
 	for i, t := range tracks {
 		track := &Track{
 			ID:         generateID("trk"),
@@ -102,13 +108,18 @@ func (h *Handler) importPlaylist(w http.ResponseWriter, r *http.Request) {
 			DurationMs: t.DurationMs,
 			CreatedAt:  base + int64(i),
 		}
-		h.probeLyrics(r.Context(), track)
-		err := h.store.AddTrack(r.Context(), track)
-		if err != nil {
+		if err := h.store.AddTrack(r.Context(), track); err != nil {
 			skipped++
 		} else {
 			imported++
+			added = append(added, track)
 		}
+	}
+
+	// Probe lyrics for the freshly-added tracks in the background so the import
+	// response returns immediately.
+	if h.lyrics != nil && len(added) > 0 {
+		go h.probeLyricsBatch(added)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]int{

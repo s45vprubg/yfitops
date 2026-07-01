@@ -93,6 +93,34 @@ func (h *Handler) probeLyrics(ctx context.Context, t *Track) {
 	t.HasSyncedLyrics = &has
 }
 
+// probeLyricsBatch probes LRCLIB for many tracks with bounded concurrency and
+// persists each result, off the request path (used after a playlist import so
+// the import itself returns fast). Uses a fresh background context — the HTTP
+// request is already done by the time this runs.
+func (h *Handler) probeLyricsBatch(tracks []*Track) {
+	if h.lyrics == nil {
+		return
+	}
+	const workers = 8
+	jobs := make(chan *Track)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for t := range jobs {
+				has := h.lyrics.HasSyncedLyrics(context.Background(), t.Artist, t.Song, int(t.DurationMs/1000))
+				_ = h.store.SetTrackLyrics(context.Background(), t.ID, &has, nil)
+			}
+		}()
+	}
+	for _, t := range tracks {
+		jobs <- t
+	}
+	close(jobs)
+	wg.Wait()
+}
+
 func (h *Handler) deleteTrack(w http.ResponseWriter, r *http.Request) {
 	trackID := r.PathValue("trackId")
 	if err := h.store.DeleteTrack(r.Context(), trackID); err != nil {

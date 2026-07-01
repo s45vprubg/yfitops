@@ -1009,6 +1009,11 @@ func (e *Engine) enterKaraoke() {
 		}
 	}
 	e.broadcastVoteState()
+	// The current track was just consumed (Played=true); re-broadcast the board
+	// so the admin's grid shows the updated tracks-left / exhausted state
+	// immediately, rather than only after returning to BOARD — otherwise they
+	// can click a now-empty cell and hit "cell pool exhausted".
+	e.broadcastBoard()
 }
 
 // fetchAndSendLyrics fetches synced lyrics OFF the Run goroutine (the LRCLIB

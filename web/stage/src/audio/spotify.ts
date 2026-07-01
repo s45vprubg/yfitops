@@ -134,10 +134,13 @@ export class SpotifyAudioPlayer implements AudioPlayer {
     try {
       await this.player.activateElement();
       this.activated = true;
+      // If a play arrived while locked, the server already targeted this device
+      // with that track (blocked/paused by autoplay). Now that we're unlocked,
+      // resume it directly — here a resume is correct (it's the current track,
+      // not a stale one).
       if (this.pendingPlay) {
-        const { trackURI, positionMs } = this.pendingPlay;
         this.pendingPlay = null;
-        await this.play(trackURI, positionMs);
+        await this.player.resume().catch(() => {});
       }
       return true;
     } catch (e) {
@@ -151,12 +154,19 @@ export class SpotifyAudioPlayer implements AudioPlayer {
   }
 
   async play(trackURI?: string, positionMs?: number): Promise<void> {
-    // Actual track routing happens server-side via the Spotify Web API targeting
-    // this device_id. Locally we just ensure playback is resumed.
-    // If the element isn't unlocked yet, remember this request: Spotify will
-    // fire autoplay_failed, we re-prompt, and activate() replays it.
-    if (!this.activated) this.pendingPlay = { trackURI, positionMs };
-    await this.player?.resume().catch(() => {});
+    // Actual track routing happens server-side via the Spotify Web API, which
+    // targets this device_id and starts the NEW track. We must NOT locally
+    // resume() here: the SDK still holds the previous (paused) track, so a
+    // local resume plays ~0.5s of the OLD song before the Web API swaps in the
+    // new URI. Pause locally instead so nothing stale leaks out; the Web API
+    // play command begins the new track on its own.
+    if (!this.activated) {
+      // Element not yet unlocked: remember so activate() can replay, and (once
+      // unlocked) autoplay_failed re-prompts.
+      this.pendingPlay = { trackURI, positionMs };
+      return;
+    }
+    await this.player?.pause().catch(() => {});
   }
 
   async pause(): Promise<void> {

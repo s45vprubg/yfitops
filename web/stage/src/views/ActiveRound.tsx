@@ -117,6 +117,21 @@ export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHa
       return Math.max(toLen, Math.round(fromLen - (fromLen - toLen) * p));
     };
 
+    // fitToWidth horizontally scales a line down so it never overflows its
+    // container (long titles). Uses the unscaled scrollWidth vs the parent's
+    // width; scaleX only downward. Cheap enough to run each frame.
+    const fitToWidth = (el: HTMLDivElement | null) => {
+      if (!el || !el.parentElement) return;
+      const avail = el.parentElement.clientWidth;
+      if (avail <= 0) return;
+      // Measure natural width by temporarily clearing the transform.
+      el.style.transform = "";
+      const natural = el.scrollWidth;
+      const scale = natural > avail ? avail / natural : 1;
+      el.style.transform = scale < 1 ? `scaleX(${scale})` : "";
+      el.style.transformOrigin = "center";
+    };
+
     const loop = () => {
       const { trackStart: ts, timer: tm, maskedReveal: mr } = stateRef.current;
       const now = Date.now();
@@ -151,6 +166,11 @@ export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHa
 
       renderField(artistRef.current, mr?.artist, mr?.artistLen ?? ts.artistLen, ARTIST_SEED, tick, lengthFlash, aLen);
       renderField(songRef.current, mr?.song, mr?.songLen ?? ts.songLen, SONG_SEED, tick, lengthFlash, sLen);
+
+      // Shrink a line that's wider than its container so long artist/song text
+      // always fits on screen (scaleX down; never scale up past 1).
+      fitToWidth(artistRef.current);
+      fitToWidth(songRef.current);
 
       // --- point timer (local, deterministic; honors reduced pool post-partial) ---
       if (pointsRef.current && !tm.frozen) {
