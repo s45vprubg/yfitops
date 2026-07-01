@@ -4,6 +4,7 @@ import type { AdminApi, TrackData } from "../../useAdminApi";
 import TrackCard from "./TrackCard";
 import SpotifySearch from "./SpotifySearch";
 import ImportPlaylist from "./ImportPlaylist";
+import { useModal } from "../Modal";
 
 type SortKey = "none" | "title" | "artist";
 
@@ -19,6 +20,9 @@ interface Props {
 export default function HoldingArea({ api, boardId, tracks, onRefresh, onDeleteTrack, onToggleOverride }: Props) {
   const [sortBy, setSortBy] = useState<SortKey>("none");
   const [rescanning, setRescanning] = useState(false);
+  const [building, setBuilding] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const { confirm } = useModal();
 
   const noLyrics = tracks.filter((t) => t.hasSyncedLyrics === false && !t.lyricsOverride).length;
 
@@ -29,6 +33,24 @@ export default function HoldingArea({ api, boardId, tracks, onRefresh, onDeleteT
       onRefresh();
     } catch { /* surfaced via list refresh */ }
     setRescanning(false);
+  };
+
+  const handleAiBuild = async () => {
+    const ok = await confirm({
+      title: "Build board with AI?",
+      body: "The AI will group your tracks into ~6 themed categories and lay out the board. This REPLACES the current layout (tracks return to the library first).",
+      confirmLabel: "Build",
+    });
+    if (!ok) return;
+    setBuilding(true);
+    setAiError(null);
+    try {
+      await api.aiBuild(boardId);
+      onRefresh();
+    } catch (e) {
+      setAiError(e instanceof Error ? e.message : "AI build failed");
+    }
+    setBuilding(false);
   };
 
   const sorted = useMemo(() => {
@@ -43,6 +65,17 @@ export default function HoldingArea({ api, boardId, tracks, onRefresh, onDeleteT
 
       <SpotifySearch api={api} boardId={boardId} onTrackAdded={onRefresh} />
       <ImportPlaylist api={api} boardId={boardId} onImported={onRefresh} />
+
+      {/* AI board builder: auto-categorize + lay out the whole board. */}
+      <button
+        onClick={handleAiBuild}
+        disabled={building || tracks.length === 0}
+        className="rounded border border-accent/60 bg-accent/10 px-2 py-1.5 text-xs font-bold uppercase tracking-wide text-accent hover:bg-accent/20 disabled:opacity-40"
+        title="Group tracks into themed categories and lay out the board with AI"
+      >
+        {building ? "Building…" : "✨ Build with AI"}
+      </button>
+      {aiError && <div className="text-[11px] text-red-400">{aiError}</div>}
 
       <div className="flex items-center justify-between rounded border border-edge bg-panel2 px-2 py-1 text-[11px]">
         <span className={noLyrics > 0 ? "text-amber-400" : "text-slate-500"}>

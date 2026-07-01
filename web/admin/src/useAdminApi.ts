@@ -87,6 +87,8 @@ function api(secret: string) {
       req<void>("PATCH", `/api/boards/${boardId}/tracks/${trackId}/override`, { override }),
     rescanLyrics: (boardId: string) =>
       req<{ checked: number; withLyrics: number }>("POST", `/api/boards/${boardId}/rescan-lyrics`),
+    aiBuild: (boardId: string) =>
+      req<{ categories: number; placed: number; total: number }>("POST", `/api/boards/${boardId}/ai-build`),
 
     // Layout
     getLayout: (boardId: string) => req<Layout>("GET", `/api/boards/${boardId}/layout`),

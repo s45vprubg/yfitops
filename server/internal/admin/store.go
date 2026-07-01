@@ -70,3 +70,26 @@ type BoardReloader interface {
 type LyricsProber interface {
 	HasSyncedLyrics(ctx context.Context, artist, song string, durationSec int) bool
 }
+
+// AICategory / AIProposal mirror ai.Category / ai.Proposal without importing the
+// ai package into admin (keeps the handler's deps light + testable).
+type AICategory struct {
+	Name     string   `json:"name"`
+	TrackIDs []string `json:"trackIds"`
+}
+type AIProposal struct {
+	Categories []AICategory `json:"categories"`
+}
+
+// AITrack is the minimal track info handed to the categorizer.
+type AITrack struct {
+	ID     string
+	Artist string
+	Song   string
+}
+
+// Categorizer proposes Jeopardy category buckets for a set of tracks (AI board
+// builder). Optional — nil means the feature is disabled (endpoint 503s).
+type Categorizer interface {
+	BuildCategories(ctx context.Context, tracks []AITrack, rows, cols int) (*AIProposal, error)
+}

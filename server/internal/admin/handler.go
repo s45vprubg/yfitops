@@ -11,6 +11,7 @@ type Handler struct {
 	spotify SpotifySearcher
 	engine  BoardReloader
 	lyrics  LyricsProber // optional; probes synced-lyric availability on add/import
+	ai      Categorizer  // optional; AI board builder (nil => 503)
 	secret  string
 }
 
@@ -29,6 +30,10 @@ func NewHandler(store AdminStore, spotify SpotifySearcher, engine BoardReloader,
 // are added/imported. If nil, tracks are added without a probe (has_synced_lyrics
 // stays NULL and the track is treated as playable until a re-scan).
 func (h *Handler) SetLyricsProber(p LyricsProber) { h.lyrics = p }
+
+// SetCategorizer wires the optional AI board builder. If nil, the build-with-AI
+// endpoint returns 503.
+func (h *Handler) SetCategorizer(c Categorizer) { h.ai = c }
 
 // Register mounts all admin API routes onto the given mux. CORS is handled
 // at the top level via a catch-all /api/ prefix handler that intercepts OPTIONS
@@ -55,6 +60,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("PATCH /api/boards/{id}/tracks/{trackId}/override", wrap(h.setTrackOverride))
 	// Re-probe LRCLIB for every track on a board (lyrics can appear over time).
 	mux.Handle("POST /api/boards/{id}/rescan-lyrics", wrap(h.rescanLyrics))
+	// AI board builder: propose category buckets + placements from the library.
+	mux.Handle("POST /api/boards/{id}/ai-build", wrap(h.aiBuild))
 
 	// Layout
 	mux.Handle("GET /api/boards/{id}/layout", wrap(h.getLayout))

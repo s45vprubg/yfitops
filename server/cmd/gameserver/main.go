@@ -25,6 +25,7 @@ import (
 	"syscall"
 
 	"github.com/s45vprubg/yfitops/server/internal/admin"
+	"github.com/s45vprubg/yfitops/server/internal/ai"
 	"github.com/s45vprubg/yfitops/server/internal/anticheat"
 	"github.com/s45vprubg/yfitops/server/internal/config"
 	"github.com/s45vprubg/yfitops/server/internal/game"
@@ -217,6 +218,11 @@ func main() {
 		spotifyAdapter := &admin.SpotifyAdapter{Client: audio}
 		adminHandler := admin.NewHandler(pr, spotifyAdapter, eng, cfg.AdminSecret)
 		adminHandler.SetLyricsProber(lyr) // probe synced-lyric availability on add/import
+		// Optional AI board builder (Gemini). Disabled if GEMINI_API_KEY absent.
+		if gc := ai.New(os.Getenv("GEMINI_API_KEY"), os.Getenv("GEMINI_MODEL")); gc != nil {
+			adminHandler.SetCategorizer(&geminiAdapter{c: gc})
+			log.Printf("AI board builder: enabled (Gemini)")
+		}
 		adminHandler.Register(mux)
 		log.Printf("admin API: registered on /api/*")
 	} else {
@@ -274,6 +280,27 @@ func envBool(key string) (val bool, set bool) {
 		return false, false
 	}
 	return b, true
+}
+
+// geminiAdapter adapts *ai.Client to admin.Categorizer, converting between the
+// two packages' track/proposal types (keeps the admin package free of an ai
+// dependency).
+type geminiAdapter struct{ c *ai.Client }
+
+func (g *geminiAdapter) BuildCategories(ctx context.Context, tracks []admin.AITrack, rows, cols int) (*admin.AIProposal, error) {
+	in := make([]ai.TrackInput, len(tracks))
+	for i, t := range tracks {
+		in[i] = ai.TrackInput{ID: t.ID, Artist: t.Artist, Song: t.Song}
+	}
+	p, err := g.c.BuildCategories(ctx, in, rows, cols)
+	if err != nil {
+		return nil, err
+	}
+	out := &admin.AIProposal{Categories: make([]admin.AICategory, len(p.Categories))}
+	for i, c := range p.Categories {
+		out.Categories[i] = admin.AICategory{Name: c.Name, TrackIDs: c.TrackIDs}
+	}
+	return out, nil
 }
 
 // envIntSet reads an int env var, reporting whether it was set — so a knob whose
