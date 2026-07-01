@@ -352,3 +352,22 @@ func TestResetKeepsBoard(t *testing.T) {
 		t.Fatalf("state = %s, want BOARD after restart", h.state())
 	}
 }
+
+// TestPlaybackNoTrackDoesNotCrash guards the nil-deref that took down the whole
+// server: an admin Play/Pause between rounds (no e.curTrack) must be a safe
+// no-op, not a panic.
+func TestPlaybackNoTrackDoesNotCrash(t *testing.T) {
+	h := newRevealHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+
+	for _, action := range []string{"play", "resume", "pause"} {
+		d, _ := json.Marshal(protocol.AdminPlaybackData{Action: action})
+		h.e.OnMessage("admin", protocol.RoleAdmin, protocol.ClientEnvelope{Type: protocol.CMsgAdminPlayback, Data: d, Nonce: h.gate.Current()}, nowMs())
+	}
+	// If the loop survived, this sync round-trips; a crash would hang/fail.
+	h.sync(func() {})
+	if h.state() == "" {
+		t.Fatal("engine loop died")
+	}
+}

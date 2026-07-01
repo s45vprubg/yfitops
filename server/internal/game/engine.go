@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"runtime/debug"
 	"time"
 
 	"github.com/s45vprubg/yfitops/server/internal/anticheat"
@@ -195,14 +196,30 @@ func (e *Engine) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case c := <-e.cmds:
-			c.fn()
-			if c.done != nil {
-				close(c.done)
-			}
+			// A panic in one handler must NOT take down the single Run goroutine
+			// (which would kill every connection and the whole game). Recover,
+			// log, and drop that command; the loop keeps serving.
+			e.runCommand(c)
 		case <-telemetryTicker.C:
 			e.broadcastTelemetry()
 		}
 	}
+}
+
+// runCommand executes one queued command with panic recovery so a bug in a
+// single handler degrades to a logged, dropped command instead of crashing the
+// engine goroutine (and with it every connection). done is still closed so any
+// synchronous caller (submitSync) is never left blocked.
+func (e *Engine) runCommand(c command) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[engine] PANIC in command handler (recovered): %v\n%s", r, debug.Stack())
+		}
+		if c.done != nil {
+			close(c.done)
+		}
+	}()
+	c.fn()
 }
 
 // SetBoard injects a board directly (test/admin bootstrap). Safe before Run.
@@ -652,12 +669,18 @@ func (e *Engine) startTrack(cell *Cell, track *Track) {
 }
 
 func (e *Engine) trackStartEnvelope() protocol.ServerEnvelope {
+	// Defensive: never deref a nil track (callers should guard, but a crash
+	// here takes down the whole server and every connection with it).
+	artistLen, songLen := 0, 0
+	if e.curTrack != nil {
+		artistLen, songLen = len(e.curTrack.Artist), len(e.curTrack.Song)
+	}
 	return e.envelope(protocol.SMsgTrackStart, protocol.TrackStartData{
 		MaxPoints:  MaxPointsForRow(e.curRow),
 		BasePoints: BaseValue,
 		StartTime:  e.trackStartMs,
-		ArtistLen:  len(e.curTrack.Artist),
-		SongLen:    len(e.curTrack.Song),
+		ArtistLen:  artistLen,
+		SongLen:    songLen,
 	})
 }
 
@@ -1174,6 +1197,11 @@ func (e *Engine) onAdminPlayback(connID string, env protocol.ClientEnvelope) {
 	var d protocol.AdminPlaybackData
 	if err := json.Unmarshal(env.Data, &d); err != nil {
 		e.sendError(connID, "badPlayback", err.Error())
+		return
+	}
+	// No track loaded (between rounds) => nothing to pause/resume. Guard here so
+	// a stray Play/Pause click can't nil-deref e.curTrack in resumeAudio.
+	if e.curTrack == nil {
 		return
 	}
 	switch d.Action {
