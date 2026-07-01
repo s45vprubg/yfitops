@@ -196,24 +196,17 @@ export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHa
 
   return (
     <div className="flex h-full w-full flex-col items-center justify-center px-12">
-      {/* Pre-reveal hint band: genre, then year (not worth points). */}
-      {(hintGenre || hintYear) && (
+      {/* Genre hint sits above the points. */}
+      {hintGenre && (
         <div className="mb-6 flex items-center gap-4 text-neon-amber/90">
-          {hintGenre && (
-            <span className="rounded-full border border-neon-amber/40 px-4 py-1 text-2xl font-semibold uppercase tracking-widest">
-              {hintGenre}
-            </span>
-          )}
-          {hintYear ? (
-            <span className="rounded-full border border-neon-amber/40 px-4 py-1 text-2xl font-semibold tracking-widest">
-              {hintYear}
-            </span>
-          ) : null}
+          <span className="rounded-full border border-neon-amber/40 px-4 py-1 text-2xl font-semibold uppercase tracking-widest">
+            {hintGenre}
+          </span>
         </div>
       )}
 
       {/* Point timer */}
-      <div className="mb-12 flex flex-col items-center">
+      <div className="mb-6 flex flex-col items-center">
         <div className="mb-1 text-sm uppercase tracking-[0.5em] text-neon-cyan/60">
           {frozen ? "locked" : "points available"}
         </div>
@@ -227,6 +220,13 @@ export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHa
           {currentPointsFromPool(timer.maxPoints, timer.basePoints, Math.max(0, Date.now() - timer.startTime))}
         </div>
       </div>
+
+      {/* Year hint sits under the points, above the artist. */}
+      {hintYear ? (
+        <div className="mb-6 rounded-full border border-neon-amber/40 px-4 py-1 text-2xl font-semibold tracking-widest text-neon-amber/90">
+          {hintYear}
+        </div>
+      ) : null}
 
       {/* Decryption lines */}
       <div className="flex w-full max-w-[90vw] flex-col items-center gap-8">

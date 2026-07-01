@@ -58,6 +58,9 @@ export interface GameView {
   // arrived, "none" when the track has no synced lyrics.
   lyricsStatus: "idle" | "loading" | "ready" | "none";
   lockoutHandle: string | null;
+  // The actual winner of the current round for the karaoke banner. undefined
+  // until the server says (at karaoke); "" means nobody won.
+  roundWinner: string | null;
   timer: TimerAnchor | null;
   animStartTime: number;
   audioMode: AudioPlayer["mode"];
@@ -89,6 +92,7 @@ export function useGame() {
     lyrics: null,
     lyricsStatus: "idle",
     lockoutHandle: null,
+    roundWinner: null,
     timer: null,
     animStartTime: 0,
     audioMode: "demo",
@@ -146,6 +150,7 @@ export function useGame() {
             out.lyrics = null;
             out.lyricsStatus = "idle";
             out.lockoutHandle = null;
+            out.roundWinner = null;
             out.trackStart = null;
             out.timer = null;
           }
@@ -170,7 +175,7 @@ export function useGame() {
             trackStart: ts,
             timer: { row, maxPoints: ts.maxPoints, basePoints: ts.basePoints, startTime: ts.startTime, frozen: false },
             lockoutHandle: null,
-            ...(isNewTrack ? { animStartTime: ts.startTime, lyrics: null, lyricsStatus: "idle" as const, maskedReveal: null, revealedArtist: false, revealedSong: false } : {}),
+            ...(isNewTrack ? { animStartTime: ts.startTime, lyrics: null, lyricsStatus: "idle" as const, maskedReveal: null, revealedArtist: false, revealedSong: false, roundWinner: null } : {}),
           };
         });
       });
@@ -186,6 +191,10 @@ export function useGame() {
       client.on("lyricsStatus", (e: ServerEnvelope) => {
         const s = (e.d as { status?: string })?.status;
         if (s === "loading" || s === "ready" || s === "none") patch({ lyricsStatus: s });
+      });
+      client.on("roundWinner", (e: ServerEnvelope) => {
+        const handle = (e.d as { handle?: string })?.handle ?? "";
+        patch({ roundWinner: handle });
       });
       client.on("lockout", (e: ServerEnvelope) => {
         const handle = (e.d as { byHandle: string }).byHandle;

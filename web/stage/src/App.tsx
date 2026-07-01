@@ -78,8 +78,8 @@ export default function App() {
             reveal={view.reveal}
             lyrics={view.lyrics}
             lyricsStatus={view.lyricsStatus}
-            scoreboard={view.scoreboard}
             lockoutHandle={view.lockoutHandle}
+            roundWinner={view.roundWinner}
             gameState={view.state}
             audio={audio}
           />

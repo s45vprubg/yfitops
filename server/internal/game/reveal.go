@@ -42,6 +42,12 @@ const cmsgAdminSetRevealCfg protocol.ClientMsgType = "admin.setRevealCfg"
 // LRCLIB fetch. The actual lines still arrive via the fixed SMsgLyrics frame.
 const smsgLyricsStatus protocol.ServerMsgType = "lyricsStatus"
 
+// CONTRACT-QUESTION: smsgRoundWinner tells the stage who won the current round
+// (correct guess) so the karaoke banner shows the real winner — or "nobody" when
+// the round ended with no correct guess (e.g. auto-lockout to 0 points). Stage-
+// facing; carries only a handle.
+const smsgRoundWinner protocol.ServerMsgType = "roundWinner"
+
 // CONTRACT-QUESTION: smsgCheatReport surfaces anti-cheat signals (client IP,
 // shared-IP / multi-connection flags) to the admin control room. Admin-only;
 // carries no track metadata. Kept out of the fixed TelemetryConn (protocol.go)

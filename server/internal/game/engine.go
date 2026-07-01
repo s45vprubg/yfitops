@@ -138,6 +138,10 @@ type Engine struct {
 	// pointFactor scales the awardable points for the current round (1.0 normal,
 	// 0.5 after one field revealed ahead of the other). Reset each track.
 	pointFactor float64
+	// roundWinner is the handle of whoever guessed correctly this round ("" =
+	// nobody won). Set in gradeCorrect, cleared at startTrack; drives the
+	// karaoke winner banner (so it never defaults to the scoreboard leader).
+	roundWinner string
 
 	// connIP maps a live connID -> client IP (host only) for anti-cheat
 	// telemetry (shared-IP detection). Run-goroutine-owned.
@@ -603,6 +607,11 @@ func (e *Engine) sendFullSync(connID string, role protocol.Role) {
 		if e.curTrack != nil {
 			e.bcast.SendTo(connID, e.trackStartEnvelope())
 		}
+		// A stage/admin (re)connecting during karaoke needs the round winner so
+		// its banner is correct rather than defaulting to the scoreboard leader.
+		if e.state == protocol.StateKaraoke {
+			e.bcast.SendTo(connID, e.envelope(smsgRoundWinner, map[string]string{"handle": e.roundWinner}))
+		}
 	}
 	// If Spotify OAuth already happened, tell a freshly-connected stage to
 	// initialize the Web Playback SDK. We send an empty-token signal: the stage
@@ -662,6 +671,7 @@ func (e *Engine) startTrack(cell *Cell, track *Track) {
 	e.trackStartMs = nowMs()
 	e.pausedAtMs = 0
 	e.buzzWinner = ""
+	e.roundWinner = "" // no winner yet this round
 	e.partial = pendingPartial{}
 	e.roundKey = fmt.Sprintf("%s:r%dc%d:%s:%d", e.cfg.SessionID, cell.Row, cell.Col, track.ID, e.trackStartMs)
 
@@ -838,6 +848,7 @@ func (e *Engine) gradeCorrect(winner *Player, elapsed int64) {
 	}
 	e.award(winner, pts)
 	e.cellPicker = winner.ID
+	e.roundWinner = winner.Handle // the real winner for the karaoke banner
 	e.buzzWinner = ""
 	e.lock.Release(context.Background(), e.roundKey)
 	e.bcast.Broadcast(protocol.RoleAdmin, e.adminViewEnvelope())
@@ -998,6 +1009,9 @@ func (e *Engine) enterKaraoke() {
 	e.finalizeReveal()
 	e.revealTo(protocol.RoleStage)
 	e.revealTo(protocol.RoleAdmin)
+	// Tell the stage who actually won this round (or nobody) so its banner is
+	// correct — never falling back to the scoreboard leader.
+	e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgRoundWinner, map[string]string{"handle": e.roundWinner}))
 	e.fetchAndSendLyrics()
 
 	// §3.8 active pool: players who joined before voting started and are online.

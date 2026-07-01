@@ -79,7 +79,10 @@ export type ServerMsgType =
   | "gradeResult"
   // cheatReport: admin-only anti-cheat snapshot (per-player IP + shared-ip /
   // multi-conn flags). Mirrors smsgCheatReport in engine reveal.go.
-  | "cheatReport";
+  | "cheatReport"
+  // roundWinner: stage-only — who won the current round ({handle}; empty =
+  // nobody). Mirrors smsgRoundWinner in engine reveal.go.
+  | "roundWinner";
 
 export interface ClientEnvelope<D = unknown> {
   t: ClientMsgType;

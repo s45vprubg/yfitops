@@ -9,20 +9,20 @@
 // between sparse SDK events or dropped frames (§6).
 
 import { useEffect, useRef, useState } from "react";
-import type { GameState, LyricsData, RevealData, ScoreboardData } from "@shared/protocol";
+import type { GameState, LyricsData, RevealData } from "@shared/protocol";
 import type { AudioPlayer } from "../audio";
 
 interface Props {
   reveal: RevealData | null;
   lyrics: LyricsData | null;
   lyricsStatus: "idle" | "loading" | "ready" | "none";
-  scoreboard: ScoreboardData | null;
   lockoutHandle: string | null;
+  roundWinner: string | null;
   gameState: GameState;
   audio: React.RefObject<AudioPlayer | null>;
 }
 
-export default function Karaoke({ reveal, lyrics, lyricsStatus, scoreboard, lockoutHandle, gameState, audio }: Props) {
+export default function Karaoke({ reveal, lyrics, lyricsStatus, lockoutHandle, roundWinner, gameState, audio }: Props) {
   const [activeIdx, setActiveIdx] = useState(-1);
   const containerRef = useRef<HTMLDivElement>(null);
   const lineRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -62,17 +62,24 @@ export default function Karaoke({ reveal, lyrics, lyricsStatus, scoreboard, lock
   }, [activeIdx]);
 
   const isAdjudicating = gameState === "ADJUDICATE";
-  const topGuesser = lockoutHandle ?? scoreboard?.players?.[0]?.handle ?? null;
+  // Banner: while adjudicating show who's guessing; at karaoke show the ACTUAL
+  // round winner (never the scoreboard leader). Empty winner => nobody got it.
+  const nobodyWon = !isAdjudicating && !roundWinner;
+  const bannerName = isAdjudicating ? lockoutHandle : roundWinner;
 
   return (
     <div className="flex h-full w-full flex-col">
       {/* Guesser/Winner banner */}
-      {topGuesser && (
+      {(bannerName || nobodyWon) && (
         <div className="flex flex-col items-center pt-8">
           <div className="text-sm uppercase tracking-[0.5em] text-neon-amber/70">
             {isAdjudicating ? "now guessing" : "winner"}
           </div>
-          <div className="text-5xl font-extrabold text-neon-amber neon-text animate-winnerPop">{topGuesser}</div>
+          {nobodyWon ? (
+            <div className="text-5xl font-extrabold text-neon-magenta/80">nobody :(</div>
+          ) : (
+            <div className="text-5xl font-extrabold text-neon-amber neon-text animate-winnerPop">{bannerName}</div>
+          )}
         </div>
       )}
 
