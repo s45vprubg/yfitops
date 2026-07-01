@@ -34,6 +34,9 @@ export type ClientMsgType =
   | "admin.endRound"
   | "admin.setThresh"
   | "admin.endGame"
+  // admin.setRevealCfg: tune the letter-reveal timing knobs live (applies next
+  // round). Mirrors cmsgAdminSetRevealCfg in server reveal.go (CONTRACT-QUESTION).
+  | "admin.setRevealCfg"
   | "stage.playerState"
   | "stage.deviceReady";
 
@@ -55,7 +58,19 @@ export type ServerMsgType =
   | "audio"
   | "telemetry"
   | "adminView"
-  | "spotifyToken";
+  | "spotifyToken"
+  // partialReveal: stage-only signal to fully reveal one field (artist|song)
+  // after a partial guess. Mirrors smsgPartialReveal in server engine.go
+  // (a CONTRACT-QUESTION type kept out of the fixed protocol.go).
+  | "partialReveal"
+  // maskedReveal: server-authoritative letter-by-letter decrypt frame, streamed
+  // to BOTH stage and mobile in the same broadcast. Carries only already-
+  // revealed letters, so a phone can never learn a letter before the projector
+  // shows it (§4A extension). Mirrors smsgMaskedReveal in server reveal.go.
+  | "maskedReveal"
+  // adminRevealCfg: echoes current reveal-timing knob values to the control
+  // room so its sliders reflect server truth. Mirrors smsgAdminRevealCfg.
+  | "adminRevealCfg";
 
 export interface ClientEnvelope<D = unknown> {
   t: ClientMsgType;
@@ -86,6 +101,12 @@ export interface AdminPlaybackData { action: "play" | "pause" | "resume"; }
 export interface AdminAwardData { playerID: string; delta: number; }
 export interface AdminKickData { playerID: string; ban: boolean; }
 export interface AdminSetThreshData { percent: number; }
+// Partial update of the reveal-timing knobs (only touched sliders sent).
+export interface AdminSetRevealCfgData {
+  intervalMs?: number;
+  phase1Ms?: number;
+  alternate?: boolean;
+}
 export interface RateData { stars: number; }
 export interface StagePlayerStateData { positionMs: number; paused: boolean; trackEnded: boolean; }
 export interface StageDeviceReadyData { spotifyDeviceID: string; }
@@ -105,6 +126,23 @@ export interface TrackStartData {
   songLen: number;
 }
 export interface RevealData { artist: string; song: string; albumArt?: string; }
+// MaskedRevealData — the sanitized server-driven decrypt frame. Each mask array
+// has length = field length; element is the revealed char, " " for a space, or
+// "" for a not-yet-revealed slot (client renders local cosmetic noise there).
+export interface MaskedRevealData {
+  phase: 1 | 2 | 3 | 4;
+  artistLen: number;
+  songLen: number;
+  artist: string[];
+  song: string[];
+  final?: boolean;
+}
+// Current reveal-timing knob values echoed to the control room.
+export interface AdminRevealCfgData {
+  intervalMs: number;
+  phase1Ms: number;
+  alternate: boolean;
+}
 export interface LyricLine { timeMs: number; text: string; }
 export interface LyricsData { lines: LyricLine[]; }
 export interface ScoreEntry { id: string; handle: string; score: number; }

@@ -1,113 +1,126 @@
 // ActiveRound — the showpiece. Two massive centered lines (Artist + Song)
-// running the staggered cryptographic decryption animation (§5), plus the
-// prominent real-time point timer.
+// running the server-authoritative decrypt reveal (§4A/§5), plus the prominent
+// real-time point timer.
 //
-// ONE requestAnimationFrame loop drives BOTH the decryption text and the timer
-// (NOT setInterval — §5 demands rAF for stutter-free rendering). Each frame:
-//   1. elapsed = serverNow() - trackStart.startTime
-//   2. decryption: computeFrame() for the artist + song lines from lengths
-//      (phases 1-2) and the revealed strings (phase 3, once reveal arrives)
-//   3. timer: scoring.currentPoints(row, elapsed) — floored, identical to backend
+// The reveal is NO LONGER computed locally. The server owns the reveal clock
+// and streams a MASKED frame (maskedReveal) to both the stage and the phones in
+// the same broadcast, so the projector and every phone show the identical
+// letters at the identical moment and a phone can never read ahead. This
+// component just renders the current mask:
+//   - a revealed ("locked") letter -> shown in the LOCKED color
+//   - a space -> shown as a space
+//   - a not-yet-revealed slot -> cosmetic local noise (glyphAt) in the CYCLING
+//     color. The noise carries no information about the answer.
 //
-// On a buzz the timer FREEZES instantly (timer.frozen, set when state ->
-// LOCKED_OUT in useGame) to mask any latency discrepancy with the server's
-// authoritative score (§5). A new trackStart (post-partial recalibration)
-// re-anchors elapsed and un-freezes.
+// ONE requestAnimationFrame loop drives the noise cycling + the point timer.
+// The point timer stays local and deterministic (scoring.currentPoints),
+// freezing on buzz to mask latency (§5).
 
-import { useEffect, useRef, useState } from "react";
-import type { RevealData, TrackStartData } from "@shared/protocol";
+import { useEffect, useRef } from "react";
+import type { MaskedRevealData, TrackStartData } from "@shared/protocol";
 import { currentPoints } from "@shared/scoring";
-import { computeFrame } from "../anim/decrypt";
+import { glyphAt } from "../anim/decrypt";
 import type { TimerAnchor } from "../net/useGame";
 
 interface Props {
   trackStart: TrackStartData;
   timer: TimerAnchor;
-  reveal: RevealData | null;
-  revealedArtist: boolean;
-  revealedSong: boolean;
+  maskedReveal: MaskedRevealData | null;
   lockoutHandle: string | null;
 }
 
-// Seeds keep the two lines cycling independently.
+// Seeds keep the two lines' noise cycling independently.
 const ARTIST_SEED = 1337;
 const SONG_SEED = 8675309;
 
-export default function ActiveRound({ trackStart, timer, reveal, revealedArtist, revealedSong, lockoutHandle }: Props) {
+// Fixed noise width shown before the server sends a length skeleton (phase 1).
+const NOISE_WIDTH = 20;
+
+// Tailwind classes for the two letter states.
+const LOCKED_CLS = "text-neon-green neon-text";
+const NOISE_CLS = "text-neon-cyan/90 neon-cyan";
+
+export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHandle }: Props) {
   const artistRef = useRef<HTMLDivElement>(null);
   const songRef = useRef<HTMLDivElement>(null);
   const pointsRef = useRef<HTMLDivElement>(null);
-  const [phaseGlow, setPhaseGlow] = useState(false);
 
-  const stateRef = useRef({ trackStart, timer, reveal, revealedArtist, revealedSong, lockoutHandle });
-  stateRef.current = { trackStart, timer, reveal, revealedArtist, revealedSong, lockoutHandle };
+  const stateRef = useRef({ trackStart, timer, maskedReveal });
+  stateRef.current = { trackStart, timer, maskedReveal };
 
   useEffect(() => {
     let raf = 0;
     let lastPoints = -1;
-    let lastGlow = false;
-    let frozenElapsed = -1;
+    let tick = 0;
 
-    const tick = () => {
-      const { trackStart: ts, timer: tm, reveal: rv, revealedArtist: ra, revealedSong: rs } = stateRef.current;
-      const now = Date.now();
-      const elapsed = Math.max(0, now - ts.startTime);
+    // Render one field's row of per-character spans into `el`. Revealed slots
+    // use the mask char + locked color; hidden slots cycle noise. Reuses spans
+    // across frames to avoid thrashing the DOM.
+    const renderField = (
+      el: HTMLDivElement | null,
+      mask: string[] | undefined,
+      fallbackLen: number,
+      seed: number,
+      t: number,
+    ) => {
+      if (!el) return;
+      // Determine the slot count: mask length once known, else the noise block.
+      const len = mask ? mask.length : fallbackLen > 0 ? fallbackLen : NOISE_WIDTH;
 
-      // Freeze the animation clock when the timer is frozen (buzz in progress).
-      let animElapsed: number;
-      if (tm.frozen) {
-        if (frozenElapsed < 0) frozenElapsed = elapsed;
-        animElapsed = frozenElapsed;
-      } else {
-        frozenElapsed = -1;
-        animElapsed = elapsed;
-      }
-
-      // --- decryption text ---
-      // If a field was force-revealed (partial grade), show it directly.
-      let artistPhase = 4;
-      let songPhase = 4;
-      if (ra && rv?.artist) {
-        if (artistRef.current) artistRef.current.textContent = rv.artist;
-      } else {
-        const af = computeFrame({ elapsedMs: animElapsed, targetLen: ts.artistLen, target: rv?.artist, seed: ARTIST_SEED });
-        if (artistRef.current) artistRef.current.textContent = af.text;
-        artistPhase = af.phase;
-      }
-      if (rs && rv?.song) {
-        if (songRef.current) songRef.current.textContent = rv.song;
-      } else {
-        const sf = computeFrame({ elapsedMs: animElapsed, targetLen: ts.songLen, target: rv?.song, seed: SONG_SEED });
-        if (songRef.current) songRef.current.textContent = sf.text;
-        songPhase = sf.phase;
-      }
-
-      const inReveal = artistPhase >= 3 || songPhase >= 3;
-      if (inReveal !== lastGlow) {
-        lastGlow = inReveal;
-        setPhaseGlow(inReveal);
-      }
-
-      // --- point timer ---
-      if (pointsRef.current) {
-        if (tm.frozen) {
-          // Freeze: stop updating the displayed number. Visual handled by class.
-        } else {
-          const pts = currentPoints(tm.row, elapsed);
-          if (pts !== lastPoints) {
-            lastPoints = pts;
-            pointsRef.current.textContent = String(pts);
-          }
+      // (Re)build the span row if the length changed.
+      if (el.childElementCount !== len) {
+        el.textContent = "";
+        for (let i = 0; i < len; i++) {
+          el.appendChild(document.createElement("span"));
         }
       }
 
-      raf = requestAnimationFrame(tick);
+      for (let i = 0; i < len; i++) {
+        const span = el.children[i] as HTMLSpanElement;
+        const cell = mask ? mask[i] : "";
+        if (cell === " ") {
+          if (span.textContent !== " ") span.textContent = " ";
+          if (span.className !== NOISE_CLS) span.className = NOISE_CLS;
+        } else if (cell) {
+          // Revealed/locked letter.
+          if (span.textContent !== cell) span.textContent = cell;
+          if (span.className !== LOCKED_CLS) span.className = LOCKED_CLS;
+        } else {
+          // Hidden slot -> cosmetic noise.
+          span.textContent = glyphAt(seed + i, t);
+          if (span.className !== NOISE_CLS) span.className = NOISE_CLS;
+        }
+      }
     };
-    raf = requestAnimationFrame(tick);
+
+    const loop = () => {
+      const { trackStart: ts, timer: tm, maskedReveal: mr } = stateRef.current;
+      const now = Date.now();
+
+      // ~5fps noise cycling, frozen while the timer is frozen (buzz).
+      if (!tm.frozen) tick = Math.floor(now / 200);
+
+      renderField(artistRef.current, mr?.artist, mr?.artistLen ?? ts.artistLen, ARTIST_SEED, tick);
+      renderField(songRef.current, mr?.song, mr?.songLen ?? ts.songLen, SONG_SEED, tick);
+
+      // --- point timer (local, deterministic) ---
+      if (pointsRef.current && !tm.frozen) {
+        const pts = currentPoints(tm.row, Math.max(0, now - ts.startTime));
+        if (pts !== lastPoints) {
+          lastPoints = pts;
+          pointsRef.current.textContent = String(pts);
+        }
+      }
+
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
   }, []);
 
   const frozen = timer.frozen;
+  // Glow the lines once the reveal is streaming (phase >= 3).
+  const glow = (maskedReveal?.phase ?? 0) >= 3;
 
   return (
     <div className="flex h-full w-full flex-col items-center justify-center px-12">
@@ -129,8 +142,8 @@ export default function ActiveRound({ trackStart, timer, reveal, revealedArtist,
 
       {/* Decryption lines */}
       <div className="flex w-full max-w-[90vw] flex-col items-center gap-8">
-        <Line label="artist" textRef={artistRef} glow={phaseGlow} />
-        <Line label="song" textRef={songRef} glow={phaseGlow} />
+        <Line label="artist" textRef={artistRef} glow={glow} />
+        <Line label="song" textRef={songRef} glow={glow} />
       </div>
 
       {lockoutHandle && (
@@ -159,7 +172,7 @@ function Line({
         className={[
           "tnum whitespace-pre text-center font-mono font-bold tracking-[0.15em]",
           "text-[clamp(2rem,6vw,5.5rem)] leading-tight",
-          glow ? "text-neon-green neon-text" : "text-neon-cyan/90 neon-cyan",
+          glow ? "opacity-100" : "opacity-95",
         ].join(" ")}
       />
     </div>

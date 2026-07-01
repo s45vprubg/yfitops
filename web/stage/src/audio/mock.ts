@@ -22,8 +22,9 @@ export class MockAudioPlayer implements AudioPlayer {
     // No Spotify in demo mode.
   }
 
-  async activate(): Promise<void> {
-    // No-op in demo mode.
+  async activate(): Promise<boolean> {
+    // No-op in demo mode — nothing to unlock, always "succeeds".
+    return true;
   }
 
   getDeviceId(): string | null {

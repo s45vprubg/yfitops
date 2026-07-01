@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { GameState } from "@shared/protocol";
+import type { AdminRevealCfgData, GameState } from "@shared/protocol";
 import type { AdminActions, ConnStatus } from "../useAdmin";
 import { createAdminApi, type BoardSummary } from "../useAdminApi";
 import StatusPill from "./StatusPill";
+import RevealSettingsPanel from "./RevealSettingsPanel";
 import { HTTP_URL } from "../config";
 
 interface Props {
@@ -14,6 +15,7 @@ interface Props {
   onLogout: () => void;
   adminSecret: string;
   spotifyConnected: boolean;
+  revealCfg?: AdminRevealCfgData;
 }
 
 const ACTIVE_GAME_STATES: GameState[] = [
@@ -50,10 +52,12 @@ export default function TopBar({
   onLogout,
   adminSecret,
   spotifyConnected,
+  revealCfg,
 }: Props) {
   const [thresh, setThresh] = useState(50);
   const [boards, setBoards] = useState<BoardSummary[]>([]);
   const [loadingBoard, setLoadingBoard] = useState(false);
+  const [revealPanelOpen, setRevealPanelOpen] = useState(false);
   const api = useMemo(() => createAdminApi(adminSecret), [adminSecret]);
 
   const refreshBoards = useCallback(async () => {
@@ -97,7 +101,7 @@ export default function TopBar({
   const canResume = gameActive && !trackPlaying && spotifyConnected;
 
   return (
-    <header className="flex items-center gap-4 border-b border-edge bg-panel2 px-4 py-2.5">
+    <header className="relative flex items-center gap-4 border-b border-edge bg-panel2 px-4 py-2.5">
       <div className="flex items-baseline gap-2">
         <span className="text-sm font-bold tracking-[0.25em] text-accent">YFITOPS</span>
         <span className="text-xs uppercase tracking-wide text-slate-500">control room</span>
@@ -137,6 +141,26 @@ export default function TopBar({
         />
         <span className="w-10 font-mono font-semibold text-accent">{thresh}%</span>
       </label>
+
+      {/* Reveal timing settings (collapsible panel) */}
+      <button
+        onClick={() => setRevealPanelOpen((o) => !o)}
+        title="Letter-reveal timing"
+        className={`rounded border px-2.5 py-1.5 text-xs font-semibold ${
+          revealPanelOpen
+            ? "border-accent bg-accent/10 text-accent"
+            : "border-edge bg-panel text-slate-300 hover:text-white"
+        }`}
+      >
+        ⚙ Reveal
+      </button>
+      {revealPanelOpen && (
+        <RevealSettingsPanel
+          cfg={revealCfg}
+          actions={actions}
+          onClose={() => setRevealPanelOpen(false)}
+        />
+      )}
 
       {/* Spotify status */}
       {spotifyConnected ? (

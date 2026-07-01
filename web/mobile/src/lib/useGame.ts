@@ -4,6 +4,7 @@ import type {
   GameState,
   HelloData,
   HeartbeatData,
+  MaskedRevealData,
   RateData,
   ServerEnvelope,
   StateData,
@@ -22,7 +23,10 @@ import { getDeviceFP, saveHandle } from "./fingerprint";
 export type ConnStatus = "idle" | "connecting" | "connected" | "disconnected";
 
 // All state below is derived PURELY from server flags + sanitized payloads.
-// There is deliberately NO track title / artist / lyrics anywhere (§4A).
+// The ONE answer-derived exception is `maskedReveal` (§4A extension): the
+// server-driven letter reveal, which carries only letters ALREADY shown on the
+// projector in the same broadcast — a phone can never learn a letter early. It
+// never carries the full title/artist/uri/lyrics; hidden slots are blank.
 export interface GameView {
   conn: ConnStatus;
   joined: boolean;
@@ -37,6 +41,8 @@ export interface GameView {
   judgedThisRound: boolean;
   // Vote progress during KARAOKE.
   vote: VoteStateData | null;
+  // Server-authoritative letter reveal (only stage-visible letters; see above).
+  maskedReveal: MaskedRevealData | null;
   // Most recent server error message (e.g. bad nonce, kicked).
   error: string | null;
   rttMs: number | null;
@@ -53,6 +59,7 @@ const INITIAL: GameView = {
   wonBuzzThisRound: false,
   judgedThisRound: false,
   vote: null,
+  maskedReveal: null,
   error: null,
   rttMs: null,
 };
@@ -107,6 +114,7 @@ export function useGame() {
             next.judgedThisRound = false;
             next.wonBuzzThisRound = false;
             next.lockedBy = null;
+            next.maskedReveal = null;
           }
           if (d.state !== "LOCKED_OUT") {
             next.lockedBy = d.state === "ROUND_ACTIVE" ? (next.lockedBy ?? null) : v.lockedBy;
@@ -130,6 +138,13 @@ export function useGame() {
       c.on("voteState", (env: ServerEnvelope) => {
         const d = env.d as VoteStateData | undefined;
         if (d) patch({ vote: d });
+      });
+
+      // Server-authoritative letter reveal (§4A extension). Only letters already
+      // shown on the projector in the same broadcast ever arrive here.
+      c.on("maskedReveal", (env: ServerEnvelope) => {
+        const d = env.d as MaskedRevealData | undefined;
+        if (d) patch({ maskedReveal: d });
       });
 
       c.on("heartbeat", () => {

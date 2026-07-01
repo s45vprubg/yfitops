@@ -30,7 +30,10 @@ function hash(n: number): number {
   return (x >>> 0) / 0xffffffff;
 }
 
-function glyphAt(slot: number, tick: number): string {
+// glyphAt returns a deterministic pseudo-random glyph for a (slot, tick) pair.
+// Exported so the stage can render cosmetic noise for not-yet-revealed slots in
+// the server-driven decrypt (see ActiveRound.tsx). Carries no answer info.
+export function glyphAt(slot: number, tick: number): string {
   const r = hash(slot * 92821 + tick * 2654435761);
   return GLYPHS[Math.floor(r * GLYPHS.length)];
 }

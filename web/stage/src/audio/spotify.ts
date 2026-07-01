@@ -45,8 +45,14 @@ export class SpotifyAudioPlayer implements AudioPlayer {
 
   private last: PlayerState = { positionMs: 0, paused: true, trackEnded: false, sampledAt: performance.now() };
 
+  private activated = false;
+  // Remembers the most recent play() request so we can retry it once the
+  // element is unlocked (autoplay_failed fires when a play arrives pre-gesture).
+  private pendingPlay: { trackURI?: string; positionMs?: number } | null = null;
+
   private stateSubs = new Set<(s: PlayerState) => void>();
   private readySubs = new Set<(deviceId: string) => void>();
+  private autoplayBlockedSubs = new Set<() => void>();
 
   // getToken returns a CURRENT access token, possibly async (it may hit the
   // backend token endpoint, which refreshes server-side). A plain string return
@@ -100,7 +106,13 @@ export class SpotifyAudioPlayer implements AudioPlayer {
       player.addListener("account_error", fail);
       player.addListener("playback_error", fail);
       player.addListener("autoplay_failed", () => {
-        console.warn("[spotify] autoplay blocked by browser — activateElement() needed");
+        // The browser refused to start playback without a user gesture. The
+        // symptom is silent: no sound AND no tab media indicator, because
+        // Spotify transferred playback to this device but the hidden <audio>
+        // element is still locked. Re-surface the activation overlay so an
+        // operator can unlock it (and we retry the pending play afterward).
+        console.warn("[spotify] autoplay blocked by browser — re-prompting for activation");
+        this.autoplayBlockedSubs.forEach((cb) => cb());
       });
 
       const ok = await player.connect();
@@ -112,13 +124,38 @@ export class SpotifyAudioPlayer implements AudioPlayer {
     }
   }
 
-  async activate(): Promise<void> {
-    await this.player?.activateElement().catch(() => {});
+  // activate unlocks the browser autoplay policy for this tab's hidden <audio>
+  // element. MUST be called from a real user gesture (a click handler), or the
+  // browser rejects it. Returns true if the element is now unlocked. On success
+  // we replay any play() that arrived while we were still locked, so audio
+  // starts immediately instead of waiting for the next track.
+  async activate(): Promise<boolean> {
+    if (!this.player) return false;
+    try {
+      await this.player.activateElement();
+      this.activated = true;
+      if (this.pendingPlay) {
+        const { trackURI, positionMs } = this.pendingPlay;
+        this.pendingPlay = null;
+        await this.play(trackURI, positionMs);
+      }
+      return true;
+    } catch (e) {
+      console.warn("[spotify] activateElement failed:", e);
+      return false;
+    }
   }
 
-  async play(_trackURI?: string, _positionMs?: number): Promise<void> {
+  isActivated(): boolean {
+    return this.activated;
+  }
+
+  async play(trackURI?: string, positionMs?: number): Promise<void> {
     // Actual track routing happens server-side via the Spotify Web API targeting
     // this device_id. Locally we just ensure playback is resumed.
+    // If the element isn't unlocked yet, remember this request: Spotify will
+    // fire autoplay_failed, we re-prompt, and activate() replays it.
+    if (!this.activated) this.pendingPlay = { trackURI, positionMs };
     await this.player?.resume().catch(() => {});
   }
 
@@ -149,11 +186,19 @@ export class SpotifyAudioPlayer implements AudioPlayer {
     return () => this.readySubs.delete(cb);
   }
 
+  // onAutoplayBlocked fires when the browser refuses playback for lack of a
+  // user gesture. The UI uses this to re-show the "Enable Audio" overlay.
+  onAutoplayBlocked(cb: () => void): () => void {
+    this.autoplayBlockedSubs.add(cb);
+    return () => this.autoplayBlockedSubs.delete(cb);
+  }
+
   destroy(): void {
     this.player?.disconnect();
     this.player = null;
     this.stateSubs.clear();
     this.readySubs.clear();
+    this.autoplayBlockedSubs.clear();
   }
 
   private ingest(s: SpotifyPlaybackState | null) {

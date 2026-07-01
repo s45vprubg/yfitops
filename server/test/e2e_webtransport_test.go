@@ -294,21 +294,55 @@ func TestE2E_RolePromotionAndSanitization(t *testing.T) {
 		t.Error("stage reveal carried no track metadata")
 	}
 
-	// Give any errant frame time to arrive, then assert the mobile client NEVER
-	// saw a reveal, lyrics, adminView, or board frame (§4A). This is the
-	// security-critical assertion.
+	// Give any errant frame time to arrive, then assert the §4A invariants.
 	time.Sleep(300 * time.Millisecond)
+
+	// (1) Mobile must NEVER receive a trusted frame. The server-authoritative
+	// letter reveal ("maskedReveal") is explicitly NOT trusted — it carries only
+	// letters already shown on the stage — but the full SMsgReveal, lyrics,
+	// adminView, board, and trackStart remain stage/admin-only.
 	for _, e := range mobile.received() {
 		switch e.Type {
 		case protocol.SMsgReveal, protocol.SMsgLyrics, protocol.SMsgAdminView, protocol.SMsgBoard, protocol.SMsgTrackStart:
 			t.Fatalf("SANITIZATION BREACH (§4A): mobile received trusted frame %q: %s", e.Type, string(e.Data))
 		}
-		// Also scan raw payloads for the leaked answer strings, belt-and-suspenders.
-		if rd.Artist != "" && len(e.Data) > 0 && containsStr(string(e.Data), rd.Artist) {
+		// The RAW answer string may appear in a mobile frame ONLY inside a
+		// maskedReveal (where letters are per-char array elements, so the full
+		// contiguous artist string never actually appears). Any OTHER frame type
+		// containing the artist substring is a breach.
+		if e.Type != maskedRevealType && rd.Artist != "" && len(e.Data) > 0 && containsStr(string(e.Data), rd.Artist) {
 			t.Fatalf("SANITIZATION BREACH (§4A): mobile frame %q leaked artist %q", e.Type, rd.Artist)
 		}
 	}
+
+	// (2) Co-visibility: every maskedReveal the MOBILE received must byte-equal
+	// one the STAGE received. Since the engine builds ONE envelope and fans the
+	// identical frame to both roles, this encodes "mobile never gets a letter
+	// the stage wasn't sent, and is never ahead of the projector."
+	stageMasks := map[string]bool{}
+	for _, e := range stage.received() {
+		if e.Type == maskedRevealType {
+			stageMasks[string(e.Data)] = true
+		}
+	}
+	mobileMaskCount := 0
+	for _, e := range mobile.received() {
+		if e.Type != maskedRevealType {
+			continue
+		}
+		mobileMaskCount++
+		if !stageMasks[string(e.Data)] {
+			t.Fatalf("CO-VISIBILITY BREACH (§4A): mobile got a maskedReveal the stage never received: %s", string(e.Data))
+		}
+	}
+	if mobileMaskCount == 0 {
+		t.Error("expected mobile to receive at least one maskedReveal frame (streamed reveal)")
+	}
 }
+
+// maskedRevealType mirrors the local smsgMaskedReveal const in package game
+// (a CONTRACT-QUESTION type, not in protocol.go).
+const maskedRevealType protocol.ServerMsgType = "maskedReveal"
 
 func containsStr(haystack, needle string) bool {
 	return len(needle) > 0 && len(haystack) >= len(needle) && stringIndex(haystack, needle) >= 0

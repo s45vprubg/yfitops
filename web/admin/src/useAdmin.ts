@@ -5,7 +5,9 @@ import type {
   AdminGradeData,
   AdminKickData,
   AdminPlaybackData,
+  AdminRevealCfgData,
   AdminSelectData,
+  AdminSetRevealCfgData,
   AdminSetThreshData,
   AdminViewData,
   BoardData,
@@ -36,6 +38,7 @@ export interface AdminState {
   adminView?: AdminViewData;
   telemetry?: TelemetryData;
   scoreboard?: ScoreboardData;
+  revealCfg?: AdminRevealCfgData; // current letter-reveal timing knobs
   nonce: number;
 }
 
@@ -51,6 +54,7 @@ export interface AdminActions {
   reveal: () => void;
   endRound: () => void;
   setThresh: (percent: number) => void;
+  setRevealCfg: (cfg: AdminSetRevealCfgData) => void;
   endGame: () => void;
 }
 
@@ -114,6 +118,9 @@ export function useAdmin(): [AdminState, AdminActions] {
       client.on("scoreboard", (env: ServerEnvelope) => {
         patch({ scoreboard: env.d as ScoreboardData });
       });
+      client.on("adminRevealCfg", (env: ServerEnvelope) => {
+        patch({ revealCfg: env.d as AdminRevealCfgData });
+      });
       // fullSync is a bundle; the backend follows it with the individual
       // payloads above, but accept a combined shape too for robustness.
       client.on("fullSync", (env: ServerEnvelope) => {
@@ -123,6 +130,7 @@ export function useAdmin(): [AdminState, AdminActions] {
           adminView: AdminViewData;
           telemetry: TelemetryData;
           scoreboard: ScoreboardData;
+          revealCfg: AdminRevealCfgData;
         }>;
         patch({
           ...(d.state ? { gameState: d.state } : {}),
@@ -130,6 +138,7 @@ export function useAdmin(): [AdminState, AdminActions] {
           ...(d.adminView ? { adminView: d.adminView } : {}),
           ...(d.telemetry ? { telemetry: d.telemetry } : {}),
           ...(d.scoreboard ? { scoreboard: d.scoreboard } : {}),
+          ...(d.revealCfg ? { revealCfg: d.revealCfg } : {}),
         });
       });
       // Keep the nonce mirror fresh for the status display.
@@ -219,6 +228,8 @@ export function useAdmin(): [AdminState, AdminActions] {
     endRound: () => sendAction("admin.endRound"),
     setThresh: (percent) =>
       sendAction<AdminSetThreshData>("admin.setThresh", { percent }),
+    setRevealCfg: (cfg) =>
+      sendAction<AdminSetRevealCfgData>("admin.setRevealCfg", cfg),
     endGame: () => sendAction("admin.endGame"),
   };
 

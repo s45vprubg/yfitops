@@ -20,6 +20,7 @@ import type {
   BoardData,
   GameState,
   LyricsData,
+  MaskedRevealData,
   RevealData,
   ScoreboardData,
   ServerEnvelope,
@@ -48,6 +49,7 @@ export interface GameView {
   scoreboard: ScoreboardData | null;
   trackStart: TrackStartData | null;
   reveal: RevealData | null;
+  maskedReveal: MaskedRevealData | null;
   revealedArtist: boolean;
   revealedSong: boolean;
   lyrics: LyricsData | null;
@@ -76,6 +78,7 @@ export function useGame() {
     scoreboard: null,
     trackStart: null,
     reveal: null,
+    maskedReveal: null,
     revealedArtist: false,
     revealedSong: false,
     lyrics: null,
@@ -130,6 +133,7 @@ export function useGame() {
           // Leaving the active loop clears stale per-round data.
           if (next === "BOARD" || next === "LOBBY") {
             out.reveal = null;
+            out.maskedReveal = null;
             out.revealedArtist = false;
             out.revealedSong = false;
             out.lyrics = null;
@@ -154,12 +158,13 @@ export function useGame() {
             trackStart: ts,
             timer: { row, maxPoints: ts.maxPoints, basePoints: ts.basePoints, startTime: ts.startTime, frozen: false },
             lockoutHandle: null,
-            ...(isNewTrack ? { lyrics: null, revealedArtist: false, revealedSong: false } : {}),
+            ...(isNewTrack ? { lyrics: null, maskedReveal: null, revealedArtist: false, revealedSong: false } : {}),
           };
         });
       });
 
       client.on("reveal", (e: ServerEnvelope) => patch({ reveal: e.d as RevealData }));
+      client.on("maskedReveal", (e: ServerEnvelope) => patch({ maskedReveal: e.d as MaskedRevealData }));
       client.on("partialReveal", (e: ServerEnvelope) => {
         const { field } = e.d as { field: string };
         if (field === "artist") patch({ revealedArtist: true });
@@ -201,6 +206,10 @@ export function useGame() {
             d: { positionMs: Math.round(s.positionMs), paused: s.paused, trackEnded: s.trackEnded },
           });
         });
+        // If the browser blocks playback (no user gesture yet), re-show the
+        // activation overlay. Otherwise the stage sits silent with no sound and
+        // no tab media indicator, and nobody knows why.
+        spotify.onAutoplayBlocked?.(() => patch({ audioActivated: false }));
         void spotify.connect().then(() => {
           if (!disposed) patch({ spotifyConnectState: spotify.getConnectState() });
         });
@@ -226,6 +235,9 @@ export function useGame() {
           d: { positionMs: Math.round(s.positionMs), paused: s.paused, trackEnded: s.trackEnded },
         });
       });
+      // Re-prompt for activation if this player (the initial createAudioPlayer
+      // one) hits the browser autoplay block.
+      audio.onAutoplayBlocked?.(() => patch({ audioActivated: false }));
 
       // If we have a Spotify token, kick off the SDK connect now.
       if (audio.mode === "spotify") {
@@ -254,10 +266,12 @@ export function useGame() {
 
   const activateAudio = async () => {
     const player = audioRef.current;
-    if (player) {
-      await player.activate();
-      setView((v) => ({ ...v, audioActivated: true }));
-    }
+    if (!player) return;
+    // Only dismiss the overlay if the element actually unlocked. If the browser
+    // still rejected it, keep the prompt up so the operator can try again
+    // rather than leaving the stage silently muted.
+    const ok = await player.activate();
+    if (ok) setView((v) => ({ ...v, audioActivated: true }));
   };
 
   return { view, audio: audioRef, activateAudio };

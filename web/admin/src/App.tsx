@@ -88,6 +88,7 @@ export default function App() {
             onLogout={actions.logout}
             adminSecret={secret}
             spotifyConnected={spotifyConnected}
+            revealCfg={state.revealCfg}
           />
 
           <main className="grid min-h-0 flex-1 grid-cols-[minmax(260px,1fr)_minmax(420px,1.6fr)_minmax(300px,1fr)]">

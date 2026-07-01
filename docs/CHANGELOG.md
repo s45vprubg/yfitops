@@ -4,6 +4,60 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] — 2026-06-29
 
+### Added — Server-authoritative streaming letter reveal (stage + mobile)
+- The decrypt reveal (Artist/Song revealed letter-by-letter) is now driven by
+  the server and streamed to BOTH the projector and the player phones in the
+  same broadcast, so a phone can never learn a letter before the projector
+  shows it. Previously the stage held the full answer and animated locally, and
+  mobile got nothing (§4A). New security invariant: mobile still never receives
+  the trusted `SMsgReveal`/lyrics/adminView/board/trackStart — only a masked
+  frame carrying letters already shown on the stage.
+- `server/internal/game/reveal.go` (new): `revealClock` (count-based, pause = do
+  not advance), deterministic per-round reveal order, per-char mask builder,
+  the `maskedReveal` CONTRACT-QUESTION message + payload, and the live-tunable
+  `revealConfig` knobs (interval, phase-1 delay, alternate artist/song).
+- `server/internal/game/engine.go`: reveal clock lifecycle (arm at `startTrack`,
+  phase-1 one-shot + self-rescheduling letter ticker via `submit`, pause while
+  not ROUND_ACTIVE, finalize at `enterKaraoke`/`enterDailyDouble`, force-field
+  on `gradePartial`, teardown on end/transition/reset); `broadcastMask` fans one
+  identical envelope to stage+mobile+admin; `sendFullSync` resyncs a
+  reconnecting client to the current mask. Live knob handler
+  `onAdminSetRevealCfg` (admin-gated, clamped, applies NEXT round) + echo.
+- `server/cmd/gameserver/main.go`: `YFI_REVEAL_INTERVAL_MS` / `_PHASE1_MS` /
+  `_ALTERNATE` seed the knob defaults (config.go is locked).
+- `web/shared/protocol.ts`: `maskedReveal` + `MaskedRevealData`,
+  `admin.setRevealCfg` + `adminRevealCfg` + payload interfaces.
+- `web/stage`: `ActiveRound` renders from the server mask (revealed letters in
+  the locked color, hidden slots as cosmetic noise); local `computeFrame` reveal
+  driver retired (`glyphAt` kept for noise).
+- `web/mobile`: new `RevealStrip` renders the same mask (§4A carve-out in
+  `useGame`); shown under the buzzer during a round and at karaoke.
+- `web/admin`: collapsible "Reveal settings" panel (interval + noise-delay
+  sliders, alternate toggle) seeded from the server echo; changes apply next
+  round.
+- Tests: `server/internal/game/reveal_test.go` (co-broadcast, alternation,
+  pause-on-buzz, karaoke finalize, knob apply-next-round + role gate); the §4A
+  e2e guard (`e2e_webtransport_test.go`) rewritten to a co-visibility invariant
+  (every mobile mask byte-matches a stage mask; no trusted frame to mobile).
+
+### Fixed — Stage (projector) audio silently dead after autoplay block
+- Root cause: the activation overlay added in the prior release had two
+  silent-failure holes. (1) `SpotifyAudioPlayer.activate()` swallowed a failed
+  `activateElement()` and `useGame` marked `audioActivated: true` regardless, so
+  the overlay dismissed even when the hidden `<audio>` element was never
+  unlocked. (2) The `autoplay_failed` SDK event only `console.warn`ed. Net
+  effect: Spotify transferred playback to the stage's virtual device but the
+  browser kept the element muted — no sound and no tab media indicator, with no
+  way to recover.
+- `web/stage/src/audio/spotify.ts`: `activate()` now returns whether the element
+  actually unlocked and replays any play() that arrived while locked;
+  `autoplay_failed` notifies a new `onAutoplayBlocked` subscription; play()
+  remembers the pending track so activation resumes it immediately.
+- `web/stage/src/audio/types.ts` + `mock.ts`: `activate()` returns `boolean`;
+  added optional `onAutoplayBlocked`.
+- `web/stage/src/net/useGame.ts`: only dismiss the overlay when activation
+  succeeds; re-show it on `onAutoplayBlocked` so the operator can re-enable.
+
 ### Fixed — Playlist import 403 (Feb-2026 Spotify Web API migration)
 - Root cause: the `GET /playlists/{id}/tracks` endpoint was deprecated in
   Spotify's February 2026 Web API migration and now returns 403 for

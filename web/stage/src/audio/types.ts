@@ -35,8 +35,19 @@ export interface AudioPlayer {
   /** The Spotify Virtual Device id, once ready. */
   getDeviceId(): string | null;
 
-  /** Unlock browser autoplay by calling activateElement(). Must be called from a user gesture. */
-  activate(): Promise<void>;
+  /**
+   * Unlock browser autoplay by calling activateElement(). Must be called from a
+   * user gesture. Resolves true if the element is now unlocked, false if the
+   * browser rejected it (so the UI keeps the activation prompt up).
+   */
+  activate(): Promise<boolean>;
+
+  /**
+   * Fired when the browser blocks playback for lack of a user gesture (Spotify's
+   * autoplay_failed). The UI re-shows the activation prompt. Optional: the mock
+   * never hits an autoplay policy. Returns unsubscribe.
+   */
+  onAutoplayBlocked?(cb: () => void): () => void;
 
   /** Apply a backend audio command (the ~20ms local pause-on-buzz path, §9). */
   play(trackURI?: string, positionMs?: number): Promise<void>;

@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -92,10 +93,18 @@ func main() {
 	hub := transport.NewHub()
 
 	// ---- Engine ----
+	// Reveal-timing knob defaults (config.go is a locked contract file, so these
+	// are read from env here rather than added there). They only seed the
+	// initial values; the control room can tune them live.
+	revAlt, revAltSet := envBool("YFI_REVEAL_ALTERNATE")
 	eng := game.NewEngine(repo, lock, audio, lyr, hub, gate, game.Config{
-		SessionID:        cfg.SessionID(),
-		AdminSecret:      cfg.AdminSecret,
-		SkipThresholdPct: cfg.DefaultSkipThresholdPct,
+		SessionID:          cfg.SessionID(),
+		AdminSecret:        cfg.AdminSecret,
+		SkipThresholdPct:   cfg.DefaultSkipThresholdPct,
+		RevealIntervalMs:   envInt("YFI_REVEAL_INTERVAL_MS", 0),
+		RevealPhase1Ms:     envInt("YFI_REVEAL_PHASE1_MS", 0),
+		RevealAlternate:    revAlt,
+		RevealAlternateSet: revAltSet,
 	})
 	if needSampleBoard {
 		eng.SetBoard(store.SampleBoard())
@@ -228,4 +237,28 @@ func randomState() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b[:]), nil
+}
+
+// envInt reads an int env var, returning def if unset or unparseable.
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+// envBool reads a bool env var. The second return reports whether it was set,
+// so an unset var leaves the engine default (true) untouched.
+func envBool(key string) (val bool, set bool) {
+	v := os.Getenv(key)
+	if v == "" {
+		return false, false
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, false
+	}
+	return b, true
 }

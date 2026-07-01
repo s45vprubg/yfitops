@@ -34,6 +34,13 @@ type Config struct {
 	SessionID        string
 	AdminSecret      string
 	SkipThresholdPct int // default 50 (§3.8)
+	// RevealIntervalMs / RevealPhase1Ms / RevealAlternate seed the reveal-timing
+	// knobs. Zero values fall back to defaults in NewEngine. Alternate defaults
+	// to true; use RevealAlternateSet to force it false.
+	RevealIntervalMs   int
+	RevealPhase1Ms     int
+	RevealAlternate    bool
+	RevealAlternateSet bool
 	// Rand seeds track selection; nil uses a time-seeded source.
 	Rand *rand.Rand
 }
@@ -95,6 +102,13 @@ type Engine struct {
 	// that connects AFTER the OAuth dance still learns to initialize the Web
 	// Playback SDK (it then fetches the live token from /api/spotify/token).
 	spotifyAuthed bool
+
+	// Server-authoritative letter reveal (see reveal.go). revealCfg holds the
+	// live-tunable knobs (applied next round); rc is the running reveal clock
+	// for the current round; revealTimer is its off-loop ticker.
+	revealCfg   revealConfig
+	rc          revealClock
+	revealTimer *time.Timer
 }
 
 // NewEngine wires the engine to its dependencies (all injected for testing).
@@ -109,19 +123,31 @@ func NewEngine(repo GameRepo, lock BuzzLock, audio AudioDevice, lyrics LyricsPro
 	if cfg.SessionID == "" {
 		cfg.SessionID = "session"
 	}
+	// Seed the reveal-timing knobs from config, falling back to defaults.
+	revCfg := defaultRevealConfig()
+	if cfg.RevealIntervalMs > 0 {
+		revCfg.IntervalMs = cfg.RevealIntervalMs
+	}
+	if cfg.RevealPhase1Ms > 0 {
+		revCfg.Phase1Ms = cfg.RevealPhase1Ms
+	}
+	if cfg.RevealAlternateSet {
+		revCfg.Alternate = cfg.RevealAlternate
+	}
 	return &Engine{
-		repo:    repo,
-		lock:    lock,
-		audio:   audio,
-		lyrics:  lyrics,
-		bcast:   bcast,
-		gate:    gate,
-		cfg:     cfg,
-		rng:     rng,
-		cmds:    make(chan command, 256),
-		state:   protocol.StateLobby,
-		reg:     newRegistry(),
-		session: &Session{ID: cfg.SessionID, SkipThresholdPct: cfg.SkipThresholdPct, State: string(protocol.StateLobby)},
+		repo:      repo,
+		lock:      lock,
+		audio:     audio,
+		lyrics:    lyrics,
+		bcast:     bcast,
+		gate:      gate,
+		cfg:       cfg,
+		rng:       rng,
+		cmds:      make(chan command, 256),
+		state:     protocol.StateLobby,
+		reg:       newRegistry(),
+		session:   &Session{ID: cfg.SessionID, SkipThresholdPct: cfg.SkipThresholdPct, State: string(protocol.StateLobby)},
+		revealCfg: revCfg.clamp(),
 	}
 }
 
@@ -194,6 +220,7 @@ func (e *Engine) ResetToLobby() error {
 			return
 		}
 		// Clear round state
+		e.clearReveal()
 		e.curCell = nil
 		e.curTrack = nil
 		e.curRow = 0
@@ -346,7 +373,8 @@ func (e *Engine) dispatch(connID string, role protocol.Role, env protocol.Client
 		protocol.CMsgAdminReveal,
 		protocol.CMsgAdminEndRound,
 		protocol.CMsgAdminSetThresh,
-		protocol.CMsgAdminEndGame:
+		protocol.CMsgAdminEndGame,
+		cmsgAdminSetRevealCfg:
 		if role != protocol.RoleAdmin {
 			e.sendError(connID, "forbidden", "admin role required")
 			return
@@ -380,6 +408,8 @@ func (e *Engine) dispatchAdmin(connID string, env protocol.ClientEnvelope) {
 		e.endRound()
 	case protocol.CMsgAdminSetThresh:
 		e.onAdminSetThresh(connID, env)
+	case cmsgAdminSetRevealCfg:
+		e.onAdminSetRevealCfg(connID, env)
 	case protocol.CMsgAdminEndGame:
 		e.transitionTo(protocol.StateGameOver)
 		e.persistScores()
@@ -448,6 +478,17 @@ func (e *Engine) onHeartbeat(connID string, env protocol.ClientEnvelope) {
 // only the sanitized state flag; stage/admin additionally get board + reveal.
 func (e *Engine) sendFullSync(connID string, role protocol.Role) {
 	e.bcast.SendTo(connID, e.envelope(protocol.SMsgState, protocol.StateData{State: e.state}))
+	// Reconnect mid-reveal: send the CURRENT masked frame to ALL roles (mobile
+	// included) so a reconnecting phone resyncs to exactly what the stage shows.
+	// currentMask reflects only rc.*Revealed, so this can never leak ahead.
+	if (e.rc.active || e.rc.finalizing) && e.curTrack != nil {
+		e.bcast.SendTo(connID, e.envelope(smsgMaskedReveal, e.rc.currentMask()))
+	}
+	// Echo current reveal-timing knob values to the admin control room so its
+	// sliders reflect server truth on (re)connect.
+	if role == protocol.RoleAdmin {
+		e.bcast.SendTo(connID, e.envelope(smsgAdminRevealCfg, e.revealCfgData()))
+	}
 	if protocol.TrustedReveal(role) {
 		e.bcast.SendTo(connID, e.envelope(protocol.SMsgBoard, boardData(e.board)))
 		e.bcast.SendTo(connID, e.envelope(protocol.SMsgScoreboard, e.scoreboardData()))
@@ -523,10 +564,14 @@ func (e *Engine) startTrack(cell *Cell, track *Track) {
 
 	e.transitionTo(protocol.StateRoundActive)
 
-	// trackStart carries point ceilings + answer LENGTHS for the decryption
-	// animation. The reveal (actual text) follows immediately — stage is trusted.
+	// trackStart carries point ceilings + answer LENGTHS for the stage timer.
+	// The letter reveal is now server-authoritative: startReveal arms the clock
+	// and streams masked frames to BOTH stage and mobile (see reveal.go). We no
+	// longer send the full answer text to the stage during ROUND_ACTIVE — the
+	// mask stream is the only reveal source, so a hostile client cannot read
+	// ahead from the stage's memory either.
 	e.bcast.Broadcast(protocol.RoleStage, e.trackStartEnvelope())
-	e.revealTo(protocol.RoleStage)
+	e.startReveal()
 	e.bcast.Broadcast(protocol.RoleAdmin, e.adminViewEnvelope())
 
 	// Route playback to the stage's virtual device (§6, §9).
@@ -700,8 +745,10 @@ func (e *Engine) gradePartial(winner *Player, elapsed int64, kind string) {
 		return
 	}
 
-	// Tell stage which field to force-reveal.
+	// Force the graded field fully revealed on BOTH surfaces via the mask, and
+	// keep the stage-only cosmetic signal for its existing settle handling.
 	if kind != "" {
+		e.revealFieldFully(kind)
 		e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgPartialReveal, map[string]string{"field": kind}))
 	}
 	e.resumeAudio()
@@ -778,6 +825,11 @@ func (e *Engine) enterKaraoke() {
 	e.resumeAudio()
 	e.transitionTo(protocol.StateKaraoke)
 
+	// Complete the streamed letter reveal to BOTH surfaces (the answer is now
+	// public on the projector), then send the trusted full reveal + lyrics to
+	// stage/admin only (album art + exact-cased text the karaoke view needs;
+	// mobile still never receives SMsgReveal).
+	e.finalizeReveal()
 	e.revealTo(protocol.RoleStage)
 	e.revealTo(protocol.RoleAdmin)
 	e.fetchAndSendLyrics()
@@ -906,6 +958,7 @@ func (e *Engine) beginTransition() {
 		time.Sleep(delay)
 		e.submit(func() {
 			if e.state == protocol.StateTransition {
+				e.clearReveal()
 				e.curTrack = nil
 				e.curCell = nil
 				e.transitionTo(protocol.StateBoard)
@@ -922,6 +975,9 @@ func (e *Engine) beginTransition() {
 func (e *Engine) enterDailyDouble(performer *Player) {
 	e.transitionTo(protocol.StateDailyDouble)
 	e.resumeAudio()
+	// The answer is already earned; complete the streamed reveal to both
+	// surfaces, plus the trusted full reveal to the stage.
+	e.finalizeReveal()
 	e.revealTo(protocol.RoleStage)
 	e.cellPicker = performer.ID
 
@@ -1059,6 +1115,36 @@ func (e *Engine) onAdminSetThresh(connID string, env protocol.ClientEnvelope) {
 	}
 }
 
+// revealCfgData snapshots the current reveal-timing knobs for the admin echo.
+func (e *Engine) revealCfgData() adminRevealCfgData {
+	c := e.revealCfg
+	return adminRevealCfgData{IntervalMs: c.IntervalMs, Phase1Ms: c.Phase1Ms, Alternate: c.Alternate}
+}
+
+// onAdminSetRevealCfg updates the live reveal-timing knobs. The change is stored
+// on the engine (NOT the in-flight rc); the next startTrack snapshots it, so it
+// applies to the NEXT round. Echoes the clamped values back to all admins.
+func (e *Engine) onAdminSetRevealCfg(connID string, env protocol.ClientEnvelope) {
+	var d adminSetRevealCfgData
+	if err := json.Unmarshal(env.Data, &d); err != nil {
+		e.sendError(connID, "badRevealCfg", err.Error())
+		return
+	}
+	cfg := e.revealCfg
+	if d.IntervalMs != nil {
+		cfg.IntervalMs = *d.IntervalMs
+	}
+	if d.Phase1Ms != nil {
+		cfg.Phase1Ms = *d.Phase1Ms
+	}
+	if d.Alternate != nil {
+		cfg.Alternate = *d.Alternate
+	}
+	e.revealCfg = cfg.clamp()
+	// Echo the applied values to every admin so all control-room tabs agree.
+	e.bcast.Broadcast(protocol.RoleAdmin, e.envelope(smsgAdminRevealCfg, e.revealCfgData()))
+}
+
 // endRound force-ends the current round and returns to the board (§3.10).
 func (e *Engine) endRound() {
 	if e.curTrack != nil {
@@ -1067,6 +1153,7 @@ func (e *Engine) endRound() {
 	e.lock.Release(context.Background(), e.roundKey)
 	_ = e.audio.Pause(context.Background())
 	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{Action: "pause"}))
+	e.clearReveal()
 	e.curTrack = nil
 	e.curCell = nil
 	e.buzzWinner = ""
@@ -1117,6 +1204,163 @@ func (e *Engine) revealTo(role protocol.Role) {
 		Song:     e.curTrack.Song,
 		AlbumArt: e.curTrack.AlbumArt,
 	}))
+}
+
+// ---------------------------------------------------------------------------
+// Server-authoritative letter reveal (see reveal.go). All methods below run on
+// the Run goroutine; the off-loop timers re-enter via submit and self-cancel on
+// a roundKey mismatch.
+// ---------------------------------------------------------------------------
+
+// startReveal arms the reveal clock for the current track and kicks off the
+// phase-1 noise one-shot. Called from startTrack. It snapshots the live knob
+// values so a mid-round config change cannot perturb this round.
+func (e *Engine) startReveal() {
+	if e.curTrack == nil {
+		return
+	}
+	e.stopRevealTimer()
+	cfg := e.revealCfg.clamp()
+	e.rc = revealClock{
+		active:      true,
+		roundKey:    e.roundKey,
+		artist:      upper(e.curTrack.Artist),
+		song:        upper(e.curTrack.Song),
+		artistOrder: buildRevealOrder(upper(e.curTrack.Artist), seedFromRoundKey(e.roundKey, 0x9e3779b97f4a7c15)),
+		songOrder:   buildRevealOrder(upper(e.curTrack.Song), seedFromRoundKey(e.roundKey, 0xc2b2ae3d27d4eb4f)),
+		phase:       revealPhaseSkeleton, // length + spaces visible immediately
+		cfg:         cfg,
+	}
+	// Broadcast the initial length-skeleton frame to stage + mobile.
+	e.broadcastMask()
+
+	// Phase-1 one-shot: after the noise delay, flip to streaming and start the
+	// letter ticker. Capture roundKey to neutralize a stale fire.
+	rk := e.roundKey
+	delay := e.rc.phase1Delay()
+	e.revealTimer = time.AfterFunc(delay, func() {
+		e.submit(func() {
+			if e.rc.roundKey != rk || !e.rc.active {
+				return
+			}
+			e.rc.phase1Done = true
+			if e.rc.phase < revealPhaseStream {
+				e.rc.phase = revealPhaseStream
+			}
+			e.broadcastMask()
+			e.startRevealTicker(rk)
+		})
+	})
+}
+
+// startRevealTicker schedules the next letter tick. Uses a self-rescheduling
+// timer so it can be cleanly stopped and so a change of round is inert.
+func (e *Engine) startRevealTicker(rk string) {
+	if e.rc.allDone() {
+		e.rc.active = false
+		return
+	}
+	e.revealTimer = time.AfterFunc(e.rc.revealInterval(), func() {
+		e.submit(func() { e.revealTick(rk) })
+	})
+}
+
+// revealTick advances the reveal by one letter, unless the round changed or is
+// paused (buzz in progress). Pausing is just "don't advance": the count-based
+// clock resumes automatically when state returns to ROUND_ACTIVE.
+func (e *Engine) revealTick(rk string) {
+	if e.rc.roundKey != rk || !e.rc.active {
+		return // superseded by a new track / cleared
+	}
+	// Pause-on-buzz: do not advance letters while not actively guessing, but
+	// keep the ticker alive so it resumes on return to ROUND_ACTIVE.
+	if e.state != protocol.StateRoundActive {
+		e.startRevealTicker(rk)
+		return
+	}
+	if e.rc.revealOneLetter() {
+		if e.rc.allDone() {
+			e.rc.phase = revealPhaseDone
+		}
+		e.broadcastMask()
+	}
+	if e.rc.allDone() {
+		e.rc.active = false
+		return // fully revealed; stop (no re-arm)
+	}
+	e.startRevealTicker(rk)
+}
+
+// broadcastMask builds ONE envelope and fans the identical frame to stage,
+// mobile, and admin in the same call. This single-envelope fan-out is the
+// mechanism that guarantees mobile is never ahead of the projector (§4A ext).
+func (e *Engine) broadcastMask() {
+	if !e.rc.active && !e.rc.finalizing {
+		return
+	}
+	env := e.envelope(smsgMaskedReveal, e.rc.currentMask())
+	e.bcast.Broadcast(protocol.RoleStage, env)
+	e.bcast.Broadcast(protocol.RoleMobile, env)
+	e.bcast.Broadcast(protocol.RoleAdmin, env)
+}
+
+// finalizeReveal fills all remaining letters and emits the final frame to both
+// surfaces (used at KARAOKE / daily double, where the answer becomes public).
+func (e *Engine) finalizeReveal() {
+	if e.curTrack == nil {
+		return
+	}
+	e.stopRevealTimer()
+	// If the clock was never armed (edge case), arm a minimal one so the mask
+	// carries the right lengths/order.
+	if e.rc.roundKey != e.roundKey || (!e.rc.active && !e.rc.finalizing) {
+		e.rc = revealClock{
+			roundKey:    e.roundKey,
+			artist:      upper(e.curTrack.Artist),
+			song:        upper(e.curTrack.Song),
+			artistOrder: buildRevealOrder(upper(e.curTrack.Artist), seedFromRoundKey(e.roundKey, 0x9e3779b97f4a7c15)),
+			songOrder:   buildRevealOrder(upper(e.curTrack.Song), seedFromRoundKey(e.roundKey, 0xc2b2ae3d27d4eb4f)),
+			cfg:         e.revealCfg.clamp(),
+		}
+	}
+	e.rc.finalizing = true
+	e.rc.completeAll()
+	e.broadcastMask()
+	e.rc.active = false
+}
+
+// revealFieldFully forces one field (artist|song) to fully reveal — used on a
+// partial grade so both surfaces settle that field simultaneously.
+func (e *Engine) revealFieldFully(field string) {
+	if !e.rc.active {
+		return
+	}
+	switch field {
+	case "artist":
+		e.rc.artistRevealed = len(e.rc.artistOrder)
+	case "song":
+		e.rc.songRevealed = len(e.rc.songOrder)
+	default:
+		return
+	}
+	if e.rc.allDone() {
+		e.rc.phase = revealPhaseDone
+	}
+	e.broadcastMask()
+}
+
+// clearReveal tears down the reveal clock and stops its timer. The roundKey
+// guard already neutralizes a stale fire, but stopping is tidy.
+func (e *Engine) clearReveal() {
+	e.stopRevealTimer()
+	e.rc = revealClock{}
+}
+
+func (e *Engine) stopRevealTimer() {
+	if e.revealTimer != nil {
+		e.revealTimer.Stop()
+		e.revealTimer = nil
+	}
 }
 
 func (e *Engine) adminViewEnvelope() protocol.ServerEnvelope {
