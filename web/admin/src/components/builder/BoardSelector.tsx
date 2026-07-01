@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { AdminApi, BoardSummary } from "../../useAdminApi";
+import { useModal } from "../Modal";
 
 interface Props {
   api: AdminApi;
@@ -14,6 +15,7 @@ export default function BoardSelector({ api, boards, selectedId, onSelect, onRef
   const [newName, setNewName] = useState("");
 
   const [error, setError] = useState<string | null>(null);
+  const { confirm } = useModal();
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
@@ -33,7 +35,15 @@ export default function BoardSelector({ api, boards, selectedId, onSelect, onRef
 
   const handleDelete = async () => {
     if (!selectedId) return;
-    if (!confirm("Delete this board and all its tracks?")) return;
+    if (
+      !(await confirm({
+        title: "Delete board?",
+        body: "Delete this board and all its tracks? This cannot be undone.",
+        confirmLabel: "Delete",
+        danger: true,
+      }))
+    )
+      return;
     try {
       await api.deleteBoard(selectedId);
       onRefresh();

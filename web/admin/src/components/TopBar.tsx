@@ -4,6 +4,7 @@ import type { AdminActions, ConnStatus } from "../useAdmin";
 import { createAdminApi, type BoardSummary } from "../useAdminApi";
 import StatusPill from "./StatusPill";
 import RevealSettingsPanel from "./RevealSettingsPanel";
+import { useModal } from "./Modal";
 import { HTTP_URL } from "../config";
 
 interface Props {
@@ -58,6 +59,7 @@ export default function TopBar({
   const [boards, setBoards] = useState<BoardSummary[]>([]);
   const [loadingBoard, setLoadingBoard] = useState(false);
   const [revealPanelOpen, setRevealPanelOpen] = useState(false);
+  const { confirm } = useModal();
   const api = useMemo(() => createAdminApi(adminSecret), [adminSecret]);
 
   const refreshBoards = useCallback(async () => {
@@ -222,8 +224,15 @@ export default function TopBar({
         </button>
       ) : gameActive ? (
         <button
-          onClick={() => {
-            if (confirm("End the entire game? This cannot be undone.")) {
+          onClick={async () => {
+            if (
+              await confirm({
+                title: "End game?",
+                body: "End the entire game? This cannot be undone.",
+                confirmLabel: "End Game",
+                danger: true,
+              })
+            ) {
               actions.endGame();
             }
           }}

@@ -1,6 +1,7 @@
 import type { TelemetryConn, TelemetryData } from "@shared/protocol";
 import type { AdminActions } from "../useAdmin";
 import { Empty, PanelHead } from "./BoardPanel";
+import { useModal } from "./Modal";
 
 interface Props {
   telemetry?: TelemetryData;
@@ -49,6 +50,7 @@ function rttColor(rtt: number): string {
 }
 
 function Row({ c, actions }: { c: TelemetryConn; actions: AdminActions }) {
+  const { confirm } = useModal();
   return (
     <tr className="border-b border-edge/50 hover:bg-panel3/40">
       <td className="px-2 py-1.5">
@@ -76,8 +78,15 @@ function Row({ c, actions }: { c: TelemetryConn; actions: AdminActions }) {
             Kick
           </button>
           <button
-            onClick={() => {
-              if (confirm(`Ban ${c.handle}? They will not be able to rejoin.`)) {
+            onClick={async () => {
+              if (
+                await confirm({
+                  title: "Ban player?",
+                  body: `Ban ${c.handle || "this player"}? They will not be able to rejoin.`,
+                  confirmLabel: "Ban",
+                  danger: true,
+                })
+              ) {
                 actions.kick({ playerID: c.id, ban: true });
               }
             }}

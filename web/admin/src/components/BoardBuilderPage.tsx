@@ -4,6 +4,7 @@ import { createAdminApi, type BoardSummary, type TrackData, type LayoutCell } fr
 import BoardSelector from "./builder/BoardSelector";
 import HoldingArea from "./builder/HoldingArea";
 import BuilderGrid from "./builder/BuilderGrid";
+import { useModal } from "./Modal";
 
 interface Props {
   secret: string;
@@ -11,6 +12,7 @@ interface Props {
 
 export default function BoardBuilderPage({ secret }: Props) {
   const api = useMemo(() => createAdminApi(secret), [secret]);
+  const { confirm, promptText } = useModal();
 
   const [boards, setBoards] = useState<BoardSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -60,7 +62,7 @@ export default function BoardBuilderPage({ secret }: Props) {
 
   const handleAddColumn = async () => {
     if (!selectedId) return;
-    const name = prompt("Category name:");
+    const name = await promptText({ title: "New category", placeholder: "Category name", confirmLabel: "Add" });
     if (!name?.trim()) return;
     await api.addColumn(selectedId, name.trim());
     refresh();
@@ -68,7 +70,15 @@ export default function BoardBuilderPage({ secret }: Props) {
 
   const handleRemoveColumn = async (col: number) => {
     if (!selectedId) return;
-    if (!confirm("Remove this column? Tracks will return to the holding area.")) return;
+    if (
+      !(await confirm({
+        title: "Remove column?",
+        body: "Tracks will return to the holding area.",
+        confirmLabel: "Remove",
+        danger: true,
+      }))
+    )
+      return;
     await api.removeColumn(selectedId, col);
     refresh();
   };
