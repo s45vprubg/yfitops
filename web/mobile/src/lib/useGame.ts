@@ -5,6 +5,7 @@ import type {
   HelloData,
   MaskedRevealData,
   RateData,
+  ScoreboardData,
   ServerEnvelope,
   StateData,
   LockoutData,
@@ -44,6 +45,8 @@ export interface GameView {
   vote: VoteStateData | null;
   // Server-authoritative letter reveal (only stage-visible letters; see above).
   maskedReveal: MaskedRevealData | null;
+  // Live standings (handles + scores) so players see their rank.
+  scoreboard: ScoreboardData | null;
   // Most recent server error message (e.g. bad nonce, kicked).
   error: string | null;
   rttMs: number | null;
@@ -62,6 +65,7 @@ const INITIAL: GameView = {
   lastVerdict: null,
   vote: null,
   maskedReveal: null,
+  scoreboard: null,
   error: null,
   rttMs: null,
 };
@@ -169,6 +173,11 @@ export function useGame() {
       c.on("maskedReveal", (env: ServerEnvelope) => {
         const d = env.d as MaskedRevealData | undefined;
         if (d) patch({ maskedReveal: d });
+      });
+
+      c.on("scoreboard", (env: ServerEnvelope) => {
+        const d = env.d as ScoreboardData | undefined;
+        if (d) patch({ scoreboard: d });
       });
 
       c.on("heartbeat", () => {

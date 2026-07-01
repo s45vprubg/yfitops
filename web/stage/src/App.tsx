@@ -3,10 +3,15 @@
 
 import { useGame } from "./net/useGame";
 import CornerJoin from "./components/CornerJoin";
+import ScoreOverlay from "./components/ScoreOverlay";
 import Lobby from "./views/Lobby";
 import Board from "./views/Board";
 import ActiveRound from "./views/ActiveRound";
 import Karaoke from "./views/Karaoke";
+
+// States where the persistent corner scoreboard is shown. Excludes LOBBY
+// (its own big view), KARAOKE and GAME_OVER (which show scores prominently).
+const SCORE_OVERLAY_STATES = ["BOARD", "TRANSITION", "ROUND_ACTIVE", "LOCKED_OUT", "ADJUDICATE", "DAILY_DOUBLE"];
 
 export default function App() {
   const { view, audio, activateAudio } = useGame();
@@ -24,6 +29,9 @@ export default function App() {
       {/* Persistent corner QR on every view except the lobby (which already has
           a giant one). */}
       {view.state !== "LOBBY" && <CornerJoin />}
+
+      {/* Persistent standings during the board/round flow. */}
+      {SCORE_OVERLAY_STATES.includes(view.state) && <ScoreOverlay scoreboard={view.scoreboard} />}
     </div>
   );
 

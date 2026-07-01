@@ -6,6 +6,7 @@ import TopBar from "./components/TopBar";
 import BoardPanel from "./components/BoardPanel";
 import EvaluationPanel from "./components/EvaluationPanel";
 import TelemetryPanel from "./components/TelemetryPanel";
+import ScorePanel from "./components/ScorePanel";
 import BoardBuilderPage from "./components/BoardBuilderPage";
 import { HTTP_URL } from "./config";
 
@@ -104,7 +105,11 @@ export default function App() {
               players={players}
               actions={actions}
             />
-            <TelemetryPanel telemetry={state.telemetry} actions={actions} />
+            {/* Right column split: live telemetry on top, ranked scoreboard below. */}
+            <div className="grid min-h-0 grid-rows-[1.4fr_1fr]">
+              <TelemetryPanel telemetry={state.telemetry} actions={actions} />
+              <ScorePanel players={players} />
+            </div>
           </main>
 
           {/* Spotify disconnected mid-game warning */}

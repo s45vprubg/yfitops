@@ -6,6 +6,7 @@ import { IdleScreen } from "./screens/IdleScreen";
 import { BuzzScreen } from "./screens/BuzzScreen";
 import { VoteScreen } from "./screens/VoteScreen";
 import { DailyDoubleScreen } from "./screens/DailyDoubleScreen";
+import { getSavedHandle } from "./lib/fingerprint";
 
 // Pure state-flag router (§4A): every branch below keys off the server's
 // GameState + sanitized payloads. No track metadata ever enters this tree.
@@ -71,7 +72,7 @@ export default function App() {
 
       // LOBBY, BOARD, TRANSITION, ADJUDICATE, GAME_OVER
       default:
-        return <IdleScreen state={view.state} />;
+        return <IdleScreen state={view.state} scoreboard={view.scoreboard} me={getSavedHandle()} />;
     }
   };
 

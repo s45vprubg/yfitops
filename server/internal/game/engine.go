@@ -518,6 +518,10 @@ func (e *Engine) onHeartbeat(connID string, env protocol.ClientEnvelope) {
 	e.bcast.SendTo(connID, e.envelope(protocol.SMsgHeartbeat, map[string]int64{
 		"serverTime": now,
 	}))
+	// Push fresh telemetry to admin on heartbeat so RTT / active status stay
+	// live (previously only the 60s ticker / award refreshed it, which looked
+	// dead). Heartbeats are ~2s/player and telemetry is admin-only + tiny.
+	e.broadcastTelemetry()
 }
 
 // sendFullSync delivers an audience-scoped FULL_STATE_SYNC (§9). Mobile gets
@@ -530,14 +534,18 @@ func (e *Engine) sendFullSync(connID string, role protocol.Role) {
 	if (e.rc.active || e.rc.finalizing) && e.curTrack != nil {
 		e.bcast.SendTo(connID, e.envelope(smsgMaskedReveal, e.rc.currentMask()))
 	}
-	// Echo current reveal-timing knob values to the admin control room so its
-	// sliders reflect server truth on (re)connect.
+	// Echo current reveal-timing knob values + telemetry to the admin control
+	// room so its sliders and connections panel reflect server truth on
+	// (re)connect (not just after the next heartbeat/ticker).
 	if role == protocol.RoleAdmin {
 		e.bcast.SendTo(connID, e.envelope(smsgAdminRevealCfg, e.revealCfgData()))
+		e.bcast.SendTo(connID, e.envelope(protocol.SMsgTelemetry, e.telemetryData()))
 	}
+	// Scoreboard goes to everyone (handles + scores only, §4A-safe) so mobile
+	// players see standings on connect too.
+	e.bcast.SendTo(connID, e.envelope(protocol.SMsgScoreboard, e.scoreboardData()))
 	if protocol.TrustedReveal(role) {
 		e.bcast.SendTo(connID, e.envelope(protocol.SMsgBoard, boardData(e.board)))
-		e.bcast.SendTo(connID, e.envelope(protocol.SMsgScoreboard, e.scoreboardData()))
 		if e.curTrack != nil {
 			e.bcast.SendTo(connID, e.trackStartEnvelope())
 		}
@@ -617,6 +625,11 @@ func (e *Engine) startTrack(cell *Cell, track *Track) {
 	// mask stream is the only reveal source, so a hostile client cannot read
 	// ahead from the stage's memory either.
 	e.bcast.Broadcast(protocol.RoleStage, e.trackStartEnvelope())
+	// Clear any lingering lyrics from the previous track immediately, so the
+	// old karaoke lines don't bleed 1-2s into the new song. Lyrics for THIS
+	// track (if any) are fetched later at enterKaraoke; until then the stage
+	// must show none.
+	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgLyrics, protocol.LyricsData{Lines: []protocol.LyricLine{}}))
 	e.startReveal()
 	e.bcast.Broadcast(protocol.RoleAdmin, e.adminViewEnvelope())
 
@@ -1469,12 +1482,14 @@ func (e *Engine) scoreboardData() protocol.ScoreboardData {
 	return protocol.ScoreboardData{Players: players}
 }
 
-// broadcastScoreboard sends scores to trusted roles only (handles aren't track
-// metadata, but the scoreboard is a stage/admin view; mobile shows nothing).
+// broadcastScoreboard sends scores to ALL roles. The scoreboard carries only
+// player handles + scores (no track metadata), so it is §4A-safe for mobile —
+// players want to see their own standing.
 func (e *Engine) broadcastScoreboard() {
 	env := e.envelope(protocol.SMsgScoreboard, e.scoreboardData())
 	e.bcast.Broadcast(protocol.RoleStage, env)
 	e.bcast.Broadcast(protocol.RoleAdmin, env)
+	e.bcast.Broadcast(protocol.RoleMobile, env)
 }
 
 func (e *Engine) broadcastBoard() {
