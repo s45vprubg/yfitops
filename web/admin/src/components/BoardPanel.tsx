@@ -1,10 +1,12 @@
-import type { ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { BoardCell, BoardData, GameState } from "@shared/protocol";
+import { createAdminApi, type BoardSummary } from "../useAdminApi";
 
 interface Props {
   board?: BoardData;
   gameState?: GameState;
   spotifyConnected: boolean;
+  adminSecret: string;
   onSelect: (row: number, col: number) => void;
 }
 
@@ -20,24 +22,55 @@ function canSelectCell(gameState?: GameState, spotifyConnected?: boolean): boole
   return true;
 }
 
-export default function BoardPanel({ board, gameState, spotifyConnected, onSelect }: Props) {
-  const selectable = canSelectCell(gameState, spotifyConnected);
+function isGameActive(s?: GameState): boolean {
+  return !!s && s !== "LOBBY" && s !== "GAME_OVER";
+}
 
-  let hint = "select next cell";
-  if (!board || !board.cells?.length) {
-    hint = "no board";
-  } else if (!spotifyConnected) {
-    hint = "connect spotify first";
-  } else if (!selectable) {
-    hint = "waiting";
-  }
+export default function BoardPanel({ board, gameState, spotifyConnected, adminSecret, onSelect }: Props) {
+  const selectable = canSelectCell(gameState, spotifyConnected);
+  const api = useMemo(() => createAdminApi(adminSecret), [adminSecret]);
+
+  const [boards, setBoards] = useState<BoardSummary[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const refreshBoards = useCallback(async () => {
+    try {
+      setBoards((await api.listBoards()) ?? []);
+    } catch { setBoards([]); }
+  }, [api]);
+  useEffect(() => { refreshBoards(); }, [refreshBoards]);
+
+  const handleLoadBoard = async (boardId: string) => {
+    if (!boardId) return;
+    setLoading(true);
+    try {
+      await api.attachBoard(boardId, "session");
+    } catch { /* engine broadcast updates UI */ }
+    setLoading(false);
+  };
 
   return (
     <section className="flex h-full flex-col border-r border-edge bg-panel2">
-      <PanelHead title="Board" hint={hint} />
+      {/* Header carries the board loader — the board is chosen here, in the
+          board column, rather than up in the top bar. */}
+      <div className="flex items-center justify-between gap-2 border-b border-edge px-3 py-2">
+        <h2 className="text-sm font-bold uppercase tracking-wide text-white">Board</h2>
+        <select
+          disabled={loading || boards.length === 0 || isGameActive(gameState)}
+          onChange={(e) => handleLoadBoard(e.target.value)}
+          defaultValue=""
+          title={isGameActive(gameState) ? "End the game to load a different board" : "Load a board into the game"}
+          className="max-w-[10rem] rounded border border-edge bg-panel px-2 py-1 text-xs text-slate-200 outline-none focus:border-accent disabled:opacity-40"
+        >
+          <option value="" disabled>Load board…</option>
+          {boards.map((b) => (
+            <option key={b.id} value={b.id}>{b.name}</option>
+          ))}
+        </select>
+      </div>
       <div className="flex-1 overflow-auto p-3">
         {!board || !board.cells?.length ? (
-          <Empty>No board loaded. Go to Board Builder → "Load into Game".</Empty>
+          <Empty>No board loaded. Pick one above, or build one in Board Builder.</Empty>
         ) : (
           <BoardGrid board={board} selectable={selectable} onSelect={onSelect} />
         )}

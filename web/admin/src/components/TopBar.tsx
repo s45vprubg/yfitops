@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { GameState } from "@shared/protocol";
 import type { AdminActions, ConnStatus } from "../useAdmin";
-import { createAdminApi, type BoardSummary } from "../useAdminApi";
+import { createAdminApi } from "../useAdminApi";
 import StatusPill from "./StatusPill";
 import { useModal } from "./Modal";
 
@@ -49,28 +49,8 @@ export default function TopBar({
   adminSecret,
   spotifyConnected,
 }: Props) {
-  const [boards, setBoards] = useState<BoardSummary[]>([]);
-  const [loadingBoard, setLoadingBoard] = useState(false);
   const { confirm } = useModal();
   const api = useMemo(() => createAdminApi(adminSecret), [adminSecret]);
-
-  const refreshBoards = useCallback(async () => {
-    try {
-      const list = await api.listBoards();
-      setBoards(list ?? []);
-    } catch { setBoards([]); }
-  }, [api]);
-
-  useEffect(() => { refreshBoards(); }, [refreshBoards]);
-
-  const handleLoadBoard = async (boardId: string) => {
-    if (!boardId) return;
-    setLoadingBoard(true);
-    try {
-      await api.attachBoard(boardId, "session");
-    } catch { /* engine broadcast will update UI */ }
-    setLoadingBoard(false);
-  };
 
   const handleStartGame = async () => {
     try {
@@ -106,20 +86,6 @@ export default function TopBar({
     <header className="relative flex items-center gap-4 border-b border-edge bg-panel2 px-4 py-2.5">
       <div className="rounded border border-edge bg-panel px-2.5 py-1 font-mono text-xs uppercase tracking-wide text-slate-300">
         state: <span className="font-semibold text-white">{gameState ?? "—"}</span>
-      </div>
-
-      <div className="flex items-center gap-1">
-        <select
-          disabled={loadingBoard || boards.length === 0 || gameActive}
-          onChange={(e) => handleLoadBoard(e.target.value)}
-          defaultValue=""
-          className="rounded border border-edge bg-panel px-2 py-1 text-xs text-slate-200 outline-none focus:border-accent disabled:opacity-40"
-        >
-          <option value="" disabled>Load board…</option>
-          {boards.map((b) => (
-            <option key={b.id} value={b.id}>{b.name}</option>
-          ))}
-        </select>
       </div>
 
       <div className="flex-1" />

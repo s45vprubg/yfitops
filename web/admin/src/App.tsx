@@ -106,6 +106,7 @@ export default function App() {
               board={state.board}
               gameState={state.gameState}
               spotifyConnected={spotifyConnected}
+              adminSecret={secret}
               onSelect={(row, col) => actions.select({ row, col })}
             />
             <EvaluationPanel
