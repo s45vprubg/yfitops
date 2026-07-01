@@ -25,6 +25,7 @@ func newRevealHarness(t *testing.T) *harness {
 		SkipThresholdPct: 50,
 		RevealIntervalMs: 250, // clamp floor
 		RevealPhase1Ms:   10,  // ~no noise delay (0 is treated as "unset" -> default)
+		RevealBlockMs:    1,   // effectively no length-hide block for fast tests
 		Rand:             rand.New(rand.NewSource(1)),
 	})
 	e.SetBoard(testBoard())

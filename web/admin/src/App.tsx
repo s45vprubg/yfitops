@@ -60,7 +60,7 @@ export default function App() {
         {([
           ["control", "Control Room"],
           ["builder", "Board Builder"],
-          ["settings", "Settings"],
+          ["settings", "Mixer"],
         ] as [Page, string][]).map(([id, label]) => (
           <button
             key={id}

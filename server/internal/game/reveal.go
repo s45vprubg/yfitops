@@ -46,11 +46,11 @@ const smsgLyricsStatus protocol.ServerMsgType = "lyricsStatus"
 // web/stage/src/anim/decrypt.ts (PHASE1_MS, REVEAL_INTERVAL_MS). Overridable
 // per-deploy via env (see cmd/gameserver) and live via the admin knob.
 const (
-	defaultRevealIntervalMs = 2000
-	defaultRevealPhase1Ms   = 5000
-	defaultRevealBlockMs    = 0    // 0 = show real length immediately (legacy behavior)
-	defaultRevealEaseMs     = 600  // soft morph when the block collapses to real length
-	revealBlockWidth        = 16   // fixed-width noise block shown during the block phase
+	defaultRevealIntervalMs = 3000  // ms between revealed letters
+	defaultRevealPhase1Ms   = 10000 // letters start streaming after this
+	defaultRevealBlockMs    = 15000 // hide the real length behind a block until this
+	defaultRevealEaseMs     = 3000  // soft morph when the block collapses to real length
+	revealBlockWidth        = 16    // fixed-width noise block shown during the block phase
 )
 
 // Clamp bounds for the live knob so a fat-fingered slider can't wedge the game.

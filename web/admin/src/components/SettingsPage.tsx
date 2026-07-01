@@ -31,10 +31,10 @@ export default function SettingsPage({ revealCfg, actions }: Props) {
   }, [thresh, actions]);
 
   // Reveal knobs seed from the server echo until edited.
-  const [intervalMs, setIntervalMs] = useState(revealCfg?.intervalMs ?? 2000);
-  const [phase1Ms, setPhase1Ms] = useState(revealCfg?.phase1Ms ?? 5000);
-  const [blockMs, setBlockMs] = useState(revealCfg?.blockMs ?? 0);
-  const [easeMs, setEaseMs] = useState(revealCfg?.easeMs ?? 600);
+  const [intervalMs, setIntervalMs] = useState(revealCfg?.intervalMs ?? 3000);
+  const [phase1Ms, setPhase1Ms] = useState(revealCfg?.phase1Ms ?? 10000);
+  const [blockMs, setBlockMs] = useState(revealCfg?.blockMs ?? 15000);
+  const [easeMs, setEaseMs] = useState(revealCfg?.easeMs ?? 3000);
   const [alternate, setAlternate] = useState(revealCfg?.alternate ?? true);
   const revealTouched = useRef(false);
 
