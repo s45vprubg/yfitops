@@ -25,6 +25,7 @@ interface Props {
 export default function Karaoke({ reveal, lyrics, lyricsStatus, lockoutHandle, roundWinner, gameState, audio }: Props) {
   const [activeIdx, setActiveIdx] = useState(-1);
   const containerRef = useRef<HTMLDivElement>(null);
+  const scrollerRef = useRef<HTMLDivElement>(null);
   const lineRefs = useRef<(HTMLDivElement | null)[]>([]);
 
   const lines = lyrics?.lines ?? [];
@@ -53,13 +54,23 @@ export default function Karaoke({ reveal, lyrics, lyricsStatus, lockoutHandle, r
     return () => cancelAnimationFrame(raf);
   }, [lines, audio]);
 
-  // Keep the active line scrolled to center.
+  // Transform-based scroll (Apple-Music style): translate the whole lyric
+  // column so the active line sits at a fixed focal point (~42% down). Animating
+  // translateY is GPU-cheap and doesn't reflow, and measuring the active line's
+  // real offset keeps centering correct even when a line wraps to two lines.
   useEffect(() => {
     const el = lineRefs.current[activeIdx];
-    if (el && containerRef.current) {
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    const scroller = scrollerRef.current;
+    const container = containerRef.current;
+    if (!scroller || !container) return;
+    if (!el) {
+      scroller.style.transform = "translateY(0px)";
+      return;
     }
-  }, [activeIdx]);
+    const focal = container.clientHeight * 0.42;
+    const y = focal - (el.offsetTop + el.offsetHeight / 2);
+    scroller.style.transform = `translateY(${y}px)`;
+  }, [activeIdx, lines]);
 
   const isAdjudicating = gameState === "ADJUDICATE";
   // Banner: while adjudicating show who's guessing; at karaoke show the ACTUAL
@@ -94,7 +105,7 @@ export default function Karaoke({ reveal, lyrics, lyricsStatus, lockoutHandle, r
       </div>
 
       {/* Bottom: synced lyrics */}
-      <div ref={containerRef} className="relative flex-1 overflow-hidden px-8 py-10">
+      <div ref={containerRef} className="relative flex-1 overflow-hidden px-8">
         {lines.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-4 text-neon-cyan/40">
             {lyricsStatus === "none" ? (
@@ -107,7 +118,15 @@ export default function Karaoke({ reveal, lyrics, lyricsStatus, lockoutHandle, r
             )}
           </div>
         ) : (
-          <div className="mx-auto flex max-w-4xl flex-col items-center gap-4">
+          // Transform-scrolled column: translateY animates smoothly (GPU, no
+          // reflow). Every line keeps a STABLE box (fixed font-size + line
+          // height); the active line is emphasized only with color/opacity and a
+          // transform scale, so nothing below it shifts when it "grows".
+          <div
+            ref={scrollerRef}
+            className="mx-auto flex max-w-4xl flex-col items-center gap-5 will-change-transform"
+            style={{ transition: "transform 500ms cubic-bezier(0.22, 0.61, 0.36, 1)" }}
+          >
             {lines.map((l, i) => {
               const active = i === activeIdx;
               const past = i < activeIdx;
@@ -118,12 +137,13 @@ export default function Karaoke({ reveal, lyrics, lyricsStatus, lockoutHandle, r
                     lineRefs.current[i] = el;
                   }}
                   className={[
-                    "text-center transition-all duration-200",
+                    "origin-center text-center text-[clamp(1.5rem,2.6vw,2.4rem)] font-bold leading-snug",
+                    "transition-[opacity,transform,color] duration-500 ease-out",
                     active
-                      ? "scale-110 text-[clamp(1.8rem,3.5vw,3rem)] font-extrabold text-neon-green neon-text"
+                      ? "scale-[1.14] text-neon-green neon-text opacity-100"
                       : past
-                        ? "text-[clamp(1.2rem,2vw,1.8rem)] text-neon-cyan/30"
-                        : "text-[clamp(1.2rem,2vw,1.8rem)] text-neon-cyan/60",
+                        ? "scale-100 text-neon-cyan/25 opacity-60"
+                        : "scale-100 text-neon-cyan/55 opacity-80",
                   ].join(" ")}
                 >
                   {l.text || "♪"}
