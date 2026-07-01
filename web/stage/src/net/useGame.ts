@@ -53,6 +53,10 @@ export interface GameView {
   revealedArtist: boolean;
   revealedSong: boolean;
   lyrics: LyricsData | null;
+  // Lyric fetch lifecycle for the karaoke view: "idle" before a reveal,
+  // "loading" while LRCLIB is being queried (show a spinner), "ready" once lines
+  // arrived, "none" when the track has no synced lyrics.
+  lyricsStatus: "idle" | "loading" | "ready" | "none";
   lockoutHandle: string | null;
   timer: TimerAnchor | null;
   animStartTime: number;
@@ -83,6 +87,7 @@ export function useGame() {
     revealedArtist: false,
     revealedSong: false,
     lyrics: null,
+    lyricsStatus: "idle",
     lockoutHandle: null,
     timer: null,
     animStartTime: 0,
@@ -139,6 +144,7 @@ export function useGame() {
             out.revealedArtist = false;
             out.revealedSong = false;
             out.lyrics = null;
+            out.lyricsStatus = "idle";
             out.lockoutHandle = null;
             out.trackStart = null;
             out.timer = null;
@@ -164,7 +170,7 @@ export function useGame() {
             trackStart: ts,
             timer: { row, maxPoints: ts.maxPoints, basePoints: ts.basePoints, startTime: ts.startTime, frozen: false },
             lockoutHandle: null,
-            ...(isNewTrack ? { animStartTime: ts.startTime, lyrics: null, maskedReveal: null, revealedArtist: false, revealedSong: false } : {}),
+            ...(isNewTrack ? { animStartTime: ts.startTime, lyrics: null, lyricsStatus: "idle" as const, maskedReveal: null, revealedArtist: false, revealedSong: false } : {}),
           };
         });
       });
@@ -176,7 +182,11 @@ export function useGame() {
         if (field === "artist") patch({ revealedArtist: true });
         else if (field === "song") patch({ revealedSong: true });
       });
-      client.on("lyrics", (e: ServerEnvelope) => patch({ lyrics: e.d as LyricsData }));
+      client.on("lyrics", (e: ServerEnvelope) => patch({ lyrics: e.d as LyricsData, lyricsStatus: "ready" }));
+      client.on("lyricsStatus", (e: ServerEnvelope) => {
+        const s = (e.d as { status?: string })?.status;
+        if (s === "loading" || s === "ready" || s === "none") patch({ lyricsStatus: s });
+      });
       client.on("lockout", (e: ServerEnvelope) => {
         const handle = (e.d as { byHandle: string }).byHandle;
         setView((v) => ({ ...v, lockoutHandle: handle, timer: v.timer ? { ...v.timer, frozen: true } : v.timer }));

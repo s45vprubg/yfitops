@@ -15,13 +15,14 @@ import type { AudioPlayer } from "../audio";
 interface Props {
   reveal: RevealData | null;
   lyrics: LyricsData | null;
+  lyricsStatus: "idle" | "loading" | "ready" | "none";
   scoreboard: ScoreboardData | null;
   lockoutHandle: string | null;
   gameState: GameState;
   audio: React.RefObject<AudioPlayer | null>;
 }
 
-export default function Karaoke({ reveal, lyrics, scoreboard, lockoutHandle, gameState, audio }: Props) {
+export default function Karaoke({ reveal, lyrics, lyricsStatus, scoreboard, lockoutHandle, gameState, audio }: Props) {
   const [activeIdx, setActiveIdx] = useState(-1);
   const containerRef = useRef<HTMLDivElement>(null);
   const lineRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -88,8 +89,15 @@ export default function Karaoke({ reveal, lyrics, scoreboard, lockoutHandle, gam
       {/* Bottom: synced lyrics */}
       <div ref={containerRef} className="relative flex-1 overflow-hidden px-8 py-10">
         {lines.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-2xl text-neon-cyan/30">
-            no synced lyrics for this track
+          <div className="flex h-full flex-col items-center justify-center gap-4 text-neon-cyan/40">
+            {lyricsStatus === "none" ? (
+              <div className="text-2xl text-neon-cyan/30">no synced lyrics for this track</div>
+            ) : (
+              <>
+                <div className="h-10 w-10 animate-spin rounded-full border-2 border-neon-cyan/20 border-t-neon-cyan/80" />
+                <div className="text-xl tracking-[0.3em]">loading lyrics…</div>
+              </>
+            )}
           </div>
         ) : (
           <div className="mx-auto flex max-w-4xl flex-col items-center gap-4">

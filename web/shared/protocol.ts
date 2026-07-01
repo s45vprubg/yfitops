@@ -71,6 +71,10 @@ export type ServerMsgType =
   // adminRevealCfg: echoes current reveal-timing knob values to the control
   // room so its sliders reflect server truth. Mirrors smsgAdminRevealCfg.
   | "adminRevealCfg"
+  // lyricsStatus: stage-only signal — synced lyrics are "loading" / "ready" /
+  // "none" so the karaoke view shows a spinner during the LRCLIB fetch instead
+  // of flashing "no lyrics". Mirrors smsgLyricsStatus in engine reveal.go.
+  | "lyricsStatus"
   // gradeResult: notifies mobile of a grade outcome (from ui-edits-3).
   | "gradeResult";
 

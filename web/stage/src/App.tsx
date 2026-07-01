@@ -77,6 +77,7 @@ export default function App() {
           <Karaoke
             reveal={view.reveal}
             lyrics={view.lyrics}
+            lyricsStatus={view.lyricsStatus}
             scoreboard={view.scoreboard}
             lockoutHandle={view.lockoutHandle}
             gameState={view.state}

@@ -36,6 +36,12 @@ const smsgAdminRevealCfg protocol.ServerMsgType = "adminRevealCfg"
 // clock snapshots its settings at startTrack).
 const cmsgAdminSetRevealCfg protocol.ClientMsgType = "admin.setRevealCfg"
 
+// CONTRACT-QUESTION: smsgLyricsStatus tells the stage whether synced lyrics are
+// still being fetched ("loading") or definitively absent ("none"), so it can
+// show a spinner instead of flashing "no lyrics" during the ~seconds-long
+// LRCLIB fetch. The actual lines still arrive via the fixed SMsgLyrics frame.
+const smsgLyricsStatus protocol.ServerMsgType = "lyricsStatus"
+
 // Reveal timing defaults (ms). Mirror the old client-side constants in
 // web/stage/src/anim/decrypt.ts (PHASE1_MS, REVEAL_INTERVAL_MS). Overridable
 // per-deploy via env (see cmd/gameserver) and live via the admin knob.

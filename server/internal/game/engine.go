@@ -948,15 +948,38 @@ func (e *Engine) enterKaraoke() {
 	e.broadcastVoteState()
 }
 
+// fetchAndSendLyrics fetches synced lyrics OFF the Run goroutine (the LRCLIB
+// call can take seconds — doing it inline would freeze the whole engine:
+// buzzes, votes, everything). It first tells the stage lyrics are "loading" so
+// it shows a spinner instead of flashing "no lyrics", then broadcasts the lines
+// (or a "none" status) when the fetch returns. The roundKey guard drops a
+// result that arrives after the round already moved on.
 func (e *Engine) fetchAndSendLyrics() {
 	if e.lyrics == nil || e.curTrack == nil {
 		return
 	}
-	lines, err := e.lyrics.Fetch(context.Background(), e.curTrack.Artist, e.curTrack.Song, int(e.curTrack.DurationMs/1000))
-	if err != nil || lines == nil {
-		return
-	}
-	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgLyrics, protocol.LyricsData{Lines: lines}))
+	// Snapshot on-loop, then fetch off-loop.
+	artist, song := e.curTrack.Artist, e.curTrack.Song
+	durSec := int(e.curTrack.DurationMs / 1000)
+	rk := e.roundKey
+
+	// Immediate "loading" signal (stage shows a spinner).
+	e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgLyricsStatus, map[string]string{"status": "loading"}))
+
+	go func() {
+		lines, err := e.lyrics.Fetch(context.Background(), artist, song, durSec)
+		e.submit(func() {
+			if e.roundKey != rk {
+				return // round moved on; drop stale lyrics
+			}
+			if err != nil || len(lines) == 0 {
+				e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgLyricsStatus, map[string]string{"status": "none"}))
+				return
+			}
+			e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgLyricsStatus, map[string]string{"status": "ready"}))
+			e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgLyrics, protocol.LyricsData{Lines: lines}))
+		})
+	}()
 }
 
 func (e *Engine) onVote(connID string, env protocol.ClientEnvelope) {
