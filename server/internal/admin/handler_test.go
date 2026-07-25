@@ -53,6 +53,9 @@ func (m *mockStore) PlaceTrack(_ context.Context, _ string, _, _ int, _ string, 
 }
 func (m *mockStore) UnplaceTrack(_ context.Context, _ string, _, _ int, _ string) error { return nil }
 func (m *mockStore) GetLayout(_ context.Context, _ string) (*Layout, error) { return m.layout, nil }
+func (m *mockStore) RebuildLayout(_ context.Context, _ string, _ int, _ []LayoutColumn) error {
+	return nil
+}
 func (m *mockStore) LoadBoardByID(_ context.Context, _ string) (*game.Board, error) {
 	return &game.Board{Rows: 5, Cols: 1}, nil
 }

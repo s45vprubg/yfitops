@@ -9,7 +9,7 @@ import (
 func (h *Handler) listBoards(w http.ResponseWriter, r *http.Request) {
 	boards, err := h.store.ListBoards(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, boards)
@@ -19,7 +19,7 @@ func (h *Handler) createBoard(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name string `json:"name"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
+	if err := decodeJSON(w, r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -34,17 +34,17 @@ func (h *Handler) createBoard(w http.ResponseWriter, r *http.Request) {
 
 	id := generateID("brd")
 	if err := h.store.CreateBoard(r.Context(), id, body.Name); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	if err := h.store.AddColumn(r.Context(), id, 1, ""); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 
 	board, err := h.store.GetBoard(r.Context(), id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, board)
@@ -54,7 +54,7 @@ func (h *Handler) getBoard(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	board, err := h.store.GetBoard(r.Context(), id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	if board == nil {
@@ -69,7 +69,7 @@ func (h *Handler) renameBoard(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name string `json:"name"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
+	if err := decodeJSON(w, r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -83,7 +83,7 @@ func (h *Handler) renameBoard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.RenameBoard(r.Context(), id, body.Name); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -92,7 +92,7 @@ func (h *Handler) renameBoard(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) deleteBoard(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := h.store.DeleteBoard(r.Context(), id); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

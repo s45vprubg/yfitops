@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -31,7 +32,8 @@ func (h *Handler) searchSpotify(w http.ResponseWriter, r *http.Request) {
 
 	results, err := h.spotify.Search(r.Context(), query, limit)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		log.Printf("admin: spotify search: %v", err)
+		http.Error(w, "Spotify request failed", http.StatusBadGateway)
 		return
 	}
 	writeJSON(w, http.StatusOK, results)
@@ -68,7 +70,7 @@ func (h *Handler) importPlaylist(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		PlaylistURI string `json:"playlistUri"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
+	if err := decodeJSON(w, r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -81,7 +83,8 @@ func (h *Handler) importPlaylist(w http.ResponseWriter, r *http.Request) {
 
 	tracks, err := h.spotify.GetPlaylistTracks(r.Context(), playlistID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		log.Printf("admin: import playlist: %v", err)
+		http.Error(w, "Spotify request failed", http.StatusBadGateway)
 		return
 	}
 

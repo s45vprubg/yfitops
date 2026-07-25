@@ -1,0 +1,137 @@
+[
+  {
+    "id": "uistage-1",
+    "verdict": "CONFIRMED",
+    "real_severity": "high",
+    "evidence": "config.ts:15 HTTP_URL defaults to `http://${host}:8777`; SPOTIFY_TOKEN_URL (line 26) derives from it; fetchSpotifyToken (lines 33-36) sends `Authorization: Bearer ${STAGE_SECRET}` over that plaintext channel. STAGE_SECRET is the shared admin credential (== ADMIN_SECRET). On a hostile LAN the Bearer is captured in cleartext. NOTE: production is full TLS; local dev stays http, so this is a posture/config gap, not architectural.",
+    "fix": "Env-gate transport: in config.ts, if not import.meta.env.DEV and the resolved HTTP_URL does not start with 'https://', throw / refuse to construct the token+cert URLs (fail closed). Default HTTP_URL to https in prod builds. No secret should ever traverse a non-https origin outside dev.",
+    "fix_risk": "low",
+    "fix_touches_files": ["web/stage/src/config.ts"]
+  },
+  {
+    "id": "uistage-2",
+    "verdict": "CONFIRMED",
+    "real_severity": "high",
+    "evidence": "useGame.ts: client.connect()+hello are invoked exactly once inside a mount-time useEffect (lines 107-288, deps []). onState (line 122) only does patch({connected}). client.ts handleClose (lines 96-99) only fires onState(false). There is NO reconnect anywhere in useGame.ts OR client.ts — no retry loop, no re-invocation of the async IIFE, no backoff. After any QUIC drop the stage flips to offline permanently until manual reload. Confirmed genuinely absent.",
+    "fix": "In onState's connected===false branch, if !disposed and not intentionally closed, schedule a reconnect: re-run fetchCertHashes -> new GameClient -> re-wire handlers -> connect -> re-send hello, with capped exponential backoff. Cleanest as a reconnect helper in the IIFE reused by both initial connect and the onState(false) path.",
+    "fix_risk": "medium",
+    "fix_touches_files": ["web/stage/src/net/useGame.ts"]
+  },
+  {
+    "id": "uistage-3",
+    "verdict": "CONFIRMED",
+    "real_severity": "medium",
+    "evidence": "main.tsx renders <App/> with no ErrorBoundary; grep for ErrorBoundary/componentDidCatch/getDerivedStateFromError across stage/mobile/admin src returns nothing. Board.tsx:11-13 destructures `const { rows, cols, cells } = board` then `for (const c of cells)` with no guard — throws if cells is undefined/non-array. Server frames are cast unchecked (useGame.ts:161 `e.d as BoardData`, :184 maskedReveal, etc.). A malformed frame throws during render and, with no boundary, white-screens the projector with no recovery.",
+    "fix": "Add a top-level ErrorBoundary component wrapping <App/> in main.tsx with a fallback that auto-retries; and guard array iteration in Board.tsx (`for (const c of cells ?? [])`) and similar mask/array fields.",
+    "fix_risk": "low",
+    "fix_touches_files": ["web/stage/src/main.tsx", "web/stage/src/views/Board.tsx"]
+  },
+  {
+    "id": "uistage-4",
+    "verdict": "CONFIRMED",
+    "real_severity": "medium",
+    "evidence": "certHash.ts:8 CERT_HASH_URL = `${HTTP_URL}/cert-hash` (plaintext http by default). fetchCertHashes (lines 33-56) fetches it, converts bytes, and returns them straight to WebTransport serverCertificateHashes with no authentication/pinning. On fetch failure it returns undefined (lines 51,54) and GameClient.connect (client.ts:42-44) then omits serverCertificateHashes entirely — connecting with NO pinning. A LAN MITM can substitute both the hash response and the QUIC cert. NOTE: prod is full TLS/CA; env-gated config is the correct fix.",
+    "fix": "Env-gate: require CERT_HASH_URL to be https (or bake the hash at build time via a VITE_ var) outside dev; on fetch failure in dev fail closed (throw) rather than silently returning undefined and dropping pinning.",
+    "fix_risk": "low",
+    "fix_touches_files": ["web/stage/src/net/certHash.ts", "web/stage/src/config.ts"]
+  },
+  {
+    "id": "uistage-5",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "useGame.ts:262-267 and :233-238 both `void client.send({...})` inside audio.onStateChange callbacks that keep firing from the Spotify SDK. After a drop, GameClient.send (client.ts:70-71) throws 'not connected' when this.writer is undefined; the rejected promise is voided -> unhandled rejection on every player_state_changed while offline. Real but low-impact (console noise / global unhandledrejection). Compounds with uistage-2.",
+    "fix": "Guard the sends on connection state (skip when disconnected) or attach `.catch(()=>{})`. Best resolved together with the uistage-2 reconnect work.",
+    "fix_risk": "low",
+    "fix_touches_files": ["web/stage/src/net/useGame.ts"]
+  },
+  {
+    "id": "uimobile-1",
+    "verdict": "CONFIRMED",
+    "real_severity": "high",
+    "evidence": "useGame.ts:202 connect() early-returns if clientRef.current is set; onState (lines 210-211) only patches conn to 'disconnected' and NEVER clears clientRef. handleClose in client.ts:96-99 fires only onState(false). No reconnect and no {t:'resync'} send exists anywhere in mobile useGame.ts (confirmed by full read) or client.ts. joined stays true so JoinScreen never re-shows, and the stale clientRef blocks a fresh connect(). Player is permanently wedged after one drop. Genuinely no recovery path.",
+    "fix": "In onState(false), when not intentionally closed: clearInterval heartbeat, null clientRef, and either auto-reconnect (new GameClient -> connect -> hello with same getDeviceFP()+saved handle -> send {t:'resync'}) with backoff, or at minimum flip joined=false so JoinScreen reappears for manual rejoin.",
+    "fix_risk": "medium",
+    "fix_touches_files": ["web/mobile/src/lib/useGame.ts"]
+  },
+  {
+    "id": "uimobile-2",
+    "verdict": "CONFIRMED",
+    "real_severity": "medium",
+    "evidence": "heartbeatRef interval is cleared ONLY in the unmount effect (lines 257-262). sendHeartbeat (lines 88-94) guards on clientRef.current !== null, but clientRef is never nulled on drop (see uimobile-1), so after a disconnect the interval keeps firing every 2s, calling `void c.send(...)` (line 93) on a dead writer -> unhandled rejection every 2s indefinitely, plus stale pendingPing stamping.",
+    "fix": "In onState(false) clearInterval(heartbeatRef.current) and set it null; restart only on successful (re)connect. Also await/catch c.send in sendHeartbeat.",
+    "fix_risk": "low",
+    "fix_touches_files": ["web/mobile/src/lib/useGame.ts"]
+  },
+  {
+    "id": "uimobile-3",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "StatusBar.tsx:19 LABEL.disconnected = 'reconnecting', yet no reconnect logic exists (see uimobile-1). The dot pulses red 'reconnecting' forever. UI misrepresents recovery as in-progress.",
+    "fix": "Either implement real reconnect (uimobile-1) making the label truthful, or change the label to 'disconnected - reload to rejoin' and surface a reload/rejoin action.",
+    "fix_risk": "low",
+    "fix_touches_files": ["web/mobile/src/components/StatusBar.tsx"]
+  },
+  {
+    "id": "uimobile-4",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "fingerprint.ts:17-24 getDeviceFP mints crypto.randomUUID() (or Math.random fallback) into localStorage['yfitops.deviceFP']. Clearing site data / incognito yields a fresh identity, so a DeviceFP-keyed ban is trivially evaded and a legit user who clears storage loses score. This is a documented zero-trust-client limitation, not a client-side exploit to patch on the client.",
+    "fix": "Accept as documented client limitation; enforce bans server-side on signals the client cannot cheaply reset (IP/subnet + connection heuristics already tracked via cheatReport) rather than trusting DeviceFP as durable identity. No client code change.",
+    "fix_risk": "low",
+    "fix_touches_files": []
+  },
+  {
+    "id": "uimobile-5",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "awaitingBuzzResult (ref, line 80) is set true in buzz() (line 241) and cleared only inside the buzzResult handler (lines 153,156). The 'state' handler (lines 103-142) resets buzzedAndLost/judgedThisRound/wonBuzzThisRound on fresh ROUND_ACTIVE but never touches awaitingBuzzResult, and nothing clears it on disconnect. A buzz whose result is dropped leaves it true across the round boundary; a later/late buzzResult{won:false} then sets buzzedAndLost=true, locking the player out of a round they never buzzed in. Confidence medium — requires a dropped/delayed result frame.",
+    "fix": "Set awaitingBuzzResult.current=false in the state handler on fresh ROUND_ACTIVE (alongside the buzzedAndLost reset) and on disconnect, so only a result for the current in-flight buzz can set buzzedAndLost.",
+    "fix_risk": "low",
+    "fix_touches_files": ["web/mobile/src/lib/useGame.ts"]
+  },
+  {
+    "id": "uimobile-6",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "pendingPing (line 78) is stamped in sendHeartbeat (line 92) and cleared only in the heartbeat echo handler (lines 183-190). Nothing clears it on disconnect. After a stall+recovery, the next echo computes Date.now()-old-timestamp (line 185) yielding an inflated RTT that is also fed back to the server via lastRtt in the heartbeat payload (line 93). Cosmetic on-phone but pollutes RTT telemetry. Confidence medium.",
+    "fix": "Clear pendingPing.current=null on onState(false); optionally clamp/ignore echoes whose elapsed exceeds a few heartbeat intervals.",
+    "fix_risk": "low",
+    "fix_touches_files": ["web/mobile/src/lib/useGame.ts"]
+  },
+  {
+    "id": "uiadmin-1",
+    "verdict": "CONFIRMED",
+    "real_severity": "medium",
+    "evidence": "useAdmin.ts:103 persists the raw admin secret to localStorage['yfitops_admin_secret'] on welcome; :221-222 reads it and auto-logins on mount; logout removes it (:211). The secret (== VITE_STAGE_SECRET, the trusted-role crown jewel) is XSS-stealable and survives across sessions on any shared/kiosk machine. Persistence confirmed.",
+    "fix": "Keep the secret only in-memory (secretRef/state); drop the localStorage setItem/getItem. If session resume is required, exchange it for a short-lived server-issued session token and persist that instead.",
+    "fix_risk": "medium",
+    "fix_touches_files": ["web/admin/src/useAdmin.ts"]
+  },
+  {
+    "id": "uiadmin-2",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "client.ts readLoop (lines 109-113): reads a 4-byte big-endian length then `if (buf.length < 4 + len) break` and keeps buffering — no maximum-length guard. A hostile/corrupt prefix (e.g. 0xFFFFFFFF) makes the client accumulate up to ~4 GiB before dispatch. Server framing caps at 1<<20; the client mirror is missing. NOTE: client.ts's header comment marks it a 'FIXED CONTRACT for the frontends' — adding a defensive cap is behavior-compatible but touches a contract-flagged file; coordinate per CLAUDE.md contract process.",
+    "fix": "After reading len, if (len > 1<<20) close the stream / throw instead of buffering, mirroring server maxFrameLen.",
+    "fix_risk": "medium",
+    "fix_touches_files": ["web/shared/client.ts"]
+  },
+  {
+    "id": "uiadmin-3",
+    "verdict": "CONFIRMED",
+    "real_severity": "medium",
+    "evidence": "BoardBuilderPage.tsx: handleDeleteTrack (57-61), handleToggleOverride (63-67), handleAddColumn (69-75), handleRemoveColumn (77-90) each `await api.X(...)` with no try/catch, then call refresh(). On a rejected API call (500/4xx/network) the await throws, refresh() never runs, no error surfaces, and there's an unhandled rejection; the host believes the edit applied while the board diverges from server truth.",
+    "fix": "Wrap each handler body in try/catch, surface the error to the user, and call refresh() in a finally so the UI reconciles with server state on failure.",
+    "fix_risk": "low",
+    "fix_touches_files": ["web/admin/src/components/BoardBuilderPage.tsx"]
+  },
+  {
+    "id": "uiadmin-4",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "BoardBuilderPage.tsx handleDragEnd:123-126 — cross-cell move does `await api.unplaceTrack(...)` then `await api.placeTrack(...)` non-atomically, refresh() after. If placeTrack fails after unplaceTrack succeeds, the track is removed from its cell but never re-placed; refresh() then shows it back in the holding area with no indication the move failed. Confidence medium (depends on second call failing).",
+    "fix": "Prefer a single server-side move endpoint; failing that, wrap in try/catch and on placeTrack failure re-place the track at its original cell (compensating action) and surface an error.",
+    "fix_risk": "medium",
+    "fix_touches_files": ["web/admin/src/components/BoardBuilderPage.tsx"]
+  }
+]

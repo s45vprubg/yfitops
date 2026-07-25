@@ -25,6 +25,11 @@ import (
 // constructed with a URL like https://host:4433/wt, so the path must match.
 const wtPath = "/wt"
 
+// controlStreamAcceptTimeout bounds how long a freshly-upgraded session may
+// take to open its single control stream before we give up and tear it down
+// (transport-2). A well-behaved client opens the stream immediately.
+const controlStreamAcceptTimeout = 10 * time.Second
+
 // Server is the WebTransport/HTTP3 edge. It accepts QUIC sessions, opens one
 // bidirectional control stream per session, and bridges decoded frames to the
 // game engine through the InboundHandler seam while fanning out engine frames
@@ -35,7 +40,8 @@ type Server struct {
 	handler game.InboundHandler
 
 	wt      *webtransport.Server
-	connSeq atomic.Uint64 // monotonic source of connection IDs
+	connSeq atomic.Uint64   // monotonic source of connection IDs
+	limiter *sessionLimiter // caps concurrent sessions globally + per IP
 }
 
 // NewServer wires the transport to its hub and the engine's inbound handler.
@@ -60,6 +66,16 @@ func NewServer(cfg *config.Config, hub *Hub, handler game.InboundHandler) (*Serv
 		QUICConfig: &quic.Config{
 			EnableDatagrams:                  true,
 			EnableStreamResetPartialDelivery: true,
+			// Defensive limits (transport-2): reap idle/dead sessions and cap
+			// per-session streams. The application opens exactly one
+			// bidirectional control stream per session (see handleSession), but
+			// at the QUIC layer the HTTP/3 CONNECT request is itself a
+			// bidirectional stream, so a legitimate WebTransport session needs 2
+			// incoming bidi streams (CONNECT + control). Cap at 2 to reject a
+			// client that tries to fan out extra streams while still allowing the
+			// normal path. Verified against the E2E WebTransport test.
+			MaxIdleTimeout:     30 * time.Second,
+			MaxIncomingStreams: 2,
 		},
 	}
 	webtransport.ConfigureHTTP3Server(h3)
@@ -68,6 +84,7 @@ func NewServer(cfg *config.Config, hub *Hub, handler game.InboundHandler) (*Serv
 		cfg:     cfg,
 		hub:     hub,
 		handler: handler,
+		limiter: newSessionLimiterFromEnv(),
 	}
 
 	mux := http.NewServeMux()
@@ -129,6 +146,17 @@ func (s *Server) Close() error { return s.wt.Close() }
 // handleSession upgrades an HTTP/3 CONNECT into a WebTransport session, then
 // services its single control stream.
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
+	// Per-IP + global session cap (QA sweep 3). Reject BEFORE the WebTransport
+	// upgrade so a flooding source is turned away cheaply, without spending a
+	// handshake. Acquire pairs with exactly one release on every exit path.
+	ip := clientIP(r.RemoteAddr)
+	if !s.limiter.acquire(ip) {
+		log.Printf("transport: session rejected (limit reached) from %s", ip)
+		http.Error(w, "too many connections", http.StatusServiceUnavailable)
+		return
+	}
+	defer s.limiter.release(ip)
+
 	sess, err := s.wt.Upgrade(w, r)
 	if err != nil {
 		log.Printf("transport: upgrade failed: %v", err)
@@ -137,8 +165,12 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The client opens exactly one bidirectional control stream after the
-	// session is established (client.ts: createBidirectionalStream).
-	stream, err := sess.AcceptStream(sess.Context())
+	// session is established (client.ts: createBidirectionalStream). Bound the
+	// wait (transport-2): a session that upgrades but never opens its control
+	// stream would otherwise park AcceptStream forever, tying up resources.
+	acceptCtx, cancel := context.WithTimeout(sess.Context(), controlStreamAcceptTimeout)
+	defer cancel()
+	stream, err := sess.AcceptStream(acceptCtx)
 	if err != nil {
 		log.Printf("transport: accept control stream: %v", err)
 		sess.CloseWithError(0, "no control stream")
@@ -147,6 +179,30 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 
 	s.serveStream(sess, stream, clientIP(r.RemoteAddr))
 }
+
+// readCanceler is implemented by streams that can abort their receive side
+// (webtransport.Stream.CancelRead). Closing a WebTransport stream only shuts
+// the send direction, so we need CancelRead to unblock a parked Read.
+type readCanceler interface {
+	CancelRead(webtransport.StreamErrorCode)
+}
+
+// streamCloser returns an io.Closer that tears the stream fully down: it closes
+// the send side and, if supported, cancels the receive side so a Read parked in
+// serveStream's loop unblocks and the connection's teardown runs. Idempotency is
+// guaranteed by the caller (conn.stop uses sync.Once).
+func streamCloser(stream io.ReadWriteCloser) io.Closer {
+	return closerFunc(func() error {
+		if rc, ok := stream.(readCanceler); ok {
+			rc.CancelRead(0)
+		}
+		return stream.Close()
+	})
+}
+
+type closerFunc func() error
+
+func (f closerFunc) Close() error { return f() }
 
 // clientIP extracts the host portion of a RemoteAddr ("ip:port" -> "ip").
 func clientIP(remoteAddr string) string {
@@ -161,7 +217,12 @@ func clientIP(remoteAddr string) string {
 func (s *Server) serveStream(sess *webtransport.Session, stream io.ReadWriteCloser, remoteIP string) {
 	connID := fmt.Sprintf("c%d", s.connSeq.Add(1))
 
-	s.hub.add(connID, stream)
+	// Give the hub a closer that fully tears the stream down. A slow client can
+	// be dropped by the hub (enqueue -> stop), and the drop must unblock the
+	// read loop below. *webtransport.Stream.Close() only closes the SEND side,
+	// leaving a parked ReadFrame blocked forever; CancelRead is what actually
+	// unblocks it, after which serveStream's defer runs OnDisconnect+remove.
+	s.hub.add(connID, stream, streamCloser(stream))
 	s.handler.OnConnect(connID, remoteIP)
 	defer func() {
 		s.handler.OnDisconnect(connID)

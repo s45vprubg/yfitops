@@ -25,6 +25,7 @@ type conn struct {
 
 	out    chan protocol.ServerEnvelope
 	w      io.Writer
+	stream io.Closer // underlying transport stream; closed on stop to tear down the read side too
 	seq    atomic.Uint64 // per-connection ServerEnvelope.Seq (protocol.go §Seq)
 	closed chan struct{}
 	once   sync.Once
@@ -50,13 +51,22 @@ func NewHub() *Hub {
 // add registers a connection with the given writer and starts its writer
 // goroutine. New connections default to RoleMobile (the least-trusted role)
 // until a validated Hello promotes them via SetRole.
-func (h *Hub) add(id string, w io.Writer) *conn {
+//
+// The optional streamCloser is the underlying transport stream. stop() closes
+// it so that dropping a connection (e.g. a slow client, see enqueue) also tears
+// down the read side, unblocking serveStream's parked ReadFrame and driving its
+// OnDisconnect/hub.remove teardown. It is variadic so pure-hub unit tests can
+// register a bare io.Writer with no stream to close.
+func (h *Hub) add(id string, w io.Writer, streamCloser ...io.Closer) *conn {
 	c := &conn{
 		id:     id,
 		role:   protocol.RoleMobile,
 		out:    make(chan protocol.ServerEnvelope, sendQueueDepth),
 		w:      w,
 		closed: make(chan struct{}),
+	}
+	if len(streamCloser) > 0 {
+		c.stream = streamCloser[0]
 	}
 	h.mu.Lock()
 	h.conns[id] = c
@@ -170,7 +180,16 @@ func (c *conn) writeLoop() {
 	}
 }
 
-// stop closes the writer goroutine exactly once.
+// stop tears the connection down exactly once: it signals the writer goroutine
+// to exit and closes the underlying stream. Closing the stream unblocks the
+// read loop parked in ReadFrame (serveStream), so a dropped connection actually
+// runs its OnDisconnect/hub.remove teardown instead of lingering as a zombie
+// that can still process inbound frames.
 func (c *conn) stop() {
-	c.once.Do(func() { close(c.closed) })
+	c.once.Do(func() {
+		close(c.closed)
+		if c.stream != nil {
+			_ = c.stream.Close()
+		}
+	})
 }

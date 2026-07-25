@@ -40,7 +40,10 @@ func (c *Client) Search(ctx context.Context, query string, limit int) ([]SearchR
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		resp.Body.Close()
-		if rerr := c.refresh(ctx); rerr != nil {
+		c.mu.Lock()
+		failed := c.accessToken
+		c.mu.Unlock()
+		if rerr := c.refresh(ctx, true, failed); rerr != nil {
 			return nil, fmt.Errorf("spotify: search: %w", rerr)
 		}
 		resp, err = c.doSearch(ctx, query, limit)
@@ -81,6 +84,7 @@ func (c *Client) Search(ctx context.Context, query string, limit int) ([]SearchR
 			Song:       item.Name,
 			AlbumArt:   albumArt,
 			DurationMs: item.DurationMs,
+			Year:       yearFromReleaseDate(item.Album.ReleaseDate),
 		})
 	}
 	return results, nil
@@ -113,7 +117,10 @@ func (c *Client) GetPlaylistTracks(ctx context.Context, playlistID string) ([]Se
 
 		if resp.StatusCode == http.StatusUnauthorized {
 			resp.Body.Close()
-			if rerr := c.refresh(ctx); rerr != nil {
+			c.mu.Lock()
+			failed := c.accessToken
+			c.mu.Unlock()
+			if rerr := c.refresh(ctx, true, failed); rerr != nil {
 				return nil, fmt.Errorf("spotify: playlist: %w", rerr)
 			}
 			resp, err = c.doPlaylistFetch(ctx, playlistID, offset, limit)
@@ -233,7 +240,7 @@ func (c *Client) doPlaylistFetch(ctx context.Context, playlistID string, offset,
 	// country.
 	q.Set("fields", "items(item(uri,name,duration_ms,artists(name),album(images(url),release_date))),next")
 	q.Set("market", "from_token")
-	endpoint := c.apiBase + "/playlists/" + playlistID + "/items?" + q.Encode()
+	endpoint := c.apiBase + "/playlists/" + url.PathEscape(playlistID) + "/items?" + q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {

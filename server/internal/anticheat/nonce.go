@@ -7,14 +7,18 @@ import (
 	"sync"
 )
 
-// NonceGate implements the replay/rate-limiting protection of design_doc §4D:
-// every state transition increments a server-validated cryptographic nonce.
-// Buzz/action requests carrying a stale nonce are discarded, blocking
-// automated playback-macro replay.
+// NonceGate implements the replay/staleness protection of design_doc §4D:
+// every state transition increments a server-owned monotonic counter. The
+// current counter value is broadcast in each server envelope; clients echo it
+// back on buzz/action requests. Validate accepts an action only if its nonce
+// exactly equals the current counter, and Bump advances the counter on every
+// state transition — so any action stamped with a prior counter value is stale
+// and discarded, blocking automated playback-macro replay.
 //
-// The "encrypted" requirement (§4D) is satisfied by issuing an opaque HMAC
-// token to clients rather than the raw counter, so a client cannot fabricate a
-// future nonce — it can only echo back what the server most recently issued.
+// NOTE: the counter is transmitted in cleartext and is not an unforgeable or
+// unpredictable opaque token. Protection comes from exact-equality + bump-on-
+// every-transition, not from secrecy of the counter value. The HMAC helpers
+// below are not on the wire path (see Token).
 type NonceGate struct {
 	mu      sync.RWMutex
 	counter uint64
@@ -49,9 +53,11 @@ func (g *NonceGate) Validate(n uint64) bool {
 	return n == g.counter
 }
 
-// Token returns the opaque HMAC-bound token for the current nonce. This is what
-// is actually transmitted to clients so the raw counter is never exposed and
-// cannot be predicted/forged for a future transition.
+// Token returns an HMAC of the current counter. It is NOT part of the wire
+// protocol: the engine transmits the raw counter (see Current) and Validate
+// compares the raw counter. This method has no production callers and is
+// exercised only by anticheat_test.go; it does not add unforgeability or
+// unpredictability to the deployed scheme.
 func (g *NonceGate) Token() string {
 	g.mu.RLock()
 	c := g.counter

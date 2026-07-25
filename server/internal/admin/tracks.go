@@ -14,7 +14,7 @@ func (h *Handler) listTracks(w http.ResponseWriter, r *http.Request) {
 	boardID := r.PathValue("id")
 	tracks, err := h.store.ListTracks(r.Context(), boardID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, tracks)
@@ -24,7 +24,7 @@ func (h *Handler) unplacedTracks(w http.ResponseWriter, r *http.Request) {
 	boardID := r.PathValue("id")
 	tracks, err := h.store.UnplacedTracks(r.Context(), boardID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, tracks)
@@ -40,7 +40,7 @@ func (h *Handler) addTrack(w http.ResponseWriter, r *http.Request) {
 		AlbumArt   string `json:"albumArt"`
 		DurationMs int64  `json:"durationMs"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
+	if err := decodeJSON(w, r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -78,7 +78,7 @@ func (h *Handler) addTrack(w http.ResponseWriter, r *http.Request) {
 	h.probeLyrics(r.Context(), track)
 
 	if err := h.store.AddTrack(r.Context(), track); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, track)
@@ -124,7 +124,7 @@ func (h *Handler) probeLyricsBatch(tracks []*Track) {
 func (h *Handler) deleteTrack(w http.ResponseWriter, r *http.Request) {
 	trackID := r.PathValue("trackId")
 	if err := h.store.DeleteTrack(r.Context(), trackID); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -136,12 +136,12 @@ func (h *Handler) setTrackOverride(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Override bool `json:"override"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
+	if err := decodeJSON(w, r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 	if err := h.store.SetTrackLyrics(r.Context(), trackID, nil, &body.Override); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -158,7 +158,7 @@ func (h *Handler) rescanLyrics(w http.ResponseWriter, r *http.Request) {
 	boardID := r.PathValue("id")
 	tracks, err := h.store.ListTracks(r.Context(), boardID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 
@@ -191,17 +191,28 @@ func (h *Handler) rescanLyrics(w http.ResponseWriter, r *http.Request) {
 	}()
 	go func() { wg.Wait(); close(results) }()
 
+	// Keep draining until results closes even on error — returning early would
+	// leave the producer + workers blocked on unbuffered sends, so wg.Wait never
+	// returns and close(results) never runs (goroutine leak). Capture the first
+	// error and respond once after the loop.
 	checked, withLyrics := 0, 0
+	var firstErr error
 	for res := range results {
 		has := res.has
 		if err := h.store.SetTrackLyrics(r.Context(), res.id, &has, nil); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		checked++
 		if has {
 			withLyrics++
 		}
+	}
+	if firstErr != nil {
+		serverError(w, firstErr)
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"checked": checked, "withLyrics": withLyrics})
 }

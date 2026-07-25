@@ -1,6 +1,10 @@
 package game
 
-import "github.com/s45vprubg/yfitops/server/internal/protocol"
+import (
+	"unicode"
+
+	"github.com/s45vprubg/yfitops/server/internal/protocol"
+)
 
 // player.go manages the live attendee registry and the Active-User pool math
 // for skip voting (design_doc §3.2 ephemeral resume, §3.8 active pool).
@@ -90,7 +94,9 @@ func (r *registry) resolvePlayer(connID string, h protocol.HelloData) (*Player, 
 		created = true
 	}
 	if h.Handle != "" {
-		p.Handle = h.Handle
+		if sanitized := sanitizeHandle(h.Handle); sanitized != "" {
+			p.Handle = sanitized
+		}
 	}
 	c.playerID = p.ID
 	if r.connByPl[p.ID] == nil {
@@ -98,6 +104,39 @@ func (r *registry) resolvePlayer(connID string, h protocol.HelloData) (*Player, 
 	}
 	r.connByPl[p.ID][connID] = true
 	return p, created
+}
+
+// sanitizeHandle strips control characters and clamps a player-supplied handle
+// to 24 runes. The handle is broadcast (scoreboard/lockout/telemetry) to every
+// role, so an unbounded or control-char-laden handle is a mobile-side injection
+// vector. Returns "" if nothing usable remains (caller keeps the prior handle).
+func sanitizeHandle(s string) string {
+	out := make([]rune, 0, 24)
+	for _, r := range s {
+		// Drop control (Cc), format/bidi/zero-width (Cf: U+202E, U+200B/E/F,
+		// U+2066-2069, U+FEFF), surrogates (Cs) and private-use (Co) runes —
+		// all are render/injection vectors that survive an IsControl-only strip.
+		// EXCEPT U+200D ZERO WIDTH JOINER (Cf): it is required to bind legitimate
+		// emoji ZWJ sequences (👨‍👩‍👧, 👨‍💻); stripping it shatters a valid emoji
+		// handle. It carries no bidi/reorder risk, so keep it (QA sweep 3 s3-sanitize).
+		if r != '\u200d' &&
+			(unicode.IsControl(r) ||
+				unicode.Is(unicode.Cf, r) ||
+				unicode.Is(unicode.Cs, r) ||
+				unicode.Is(unicode.Co, r)) {
+			continue
+		}
+		// A leading combining mark (U+0300-036F etc.) renders on the prior glyph
+		// in stage/admin, so skip marks until we have a base rune.
+		if len(out) == 0 && unicode.Is(unicode.M, r) {
+			continue
+		}
+		out = append(out, r)
+		if len(out) == 24 {
+			break
+		}
+	}
+	return string(out)
 }
 
 // connection returns the conn for a connID.

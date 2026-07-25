@@ -71,8 +71,6 @@ export interface AdminActions {
   endGame: () => void;
 }
 
-const STORAGE_KEY = "yfitops_admin_secret";
-
 const initial: AdminState = {
   status: "idle",
   connected: false,
@@ -83,7 +81,6 @@ export function useAdmin(): [AdminState, AdminActions] {
   const [state, setState] = useState<AdminState>(initial);
   const clientRef = useRef<GameClient | null>(null);
   const secretRef = useRef<string>("");
-  const autoLoginDone = useRef(false);
   const patch = useCallback((p: Partial<AdminState>) => {
     setState((s) => ({ ...s, ...p }));
   }, []);
@@ -100,7 +97,10 @@ export function useAdmin(): [AdminState, AdminActions] {
     (client: GameClient) => {
       client.on("welcome", (env: ServerEnvelope) => {
         const d = env.d as WelcomeData;
-        try { localStorage.setItem(STORAGE_KEY, secretRef.current); } catch {}
+        // Security (uiadmin-1): the admin secret is the crown-jewel trusted-role
+        // credential (== VITE_STAGE_SECRET). Keep it in-memory only — never
+        // persist to localStorage where XSS could steal it or it could survive
+        // on a shared/kiosk machine. An admin re-enters it after a page reload.
         patch({ status: "authed", playerID: d.playerID, error: undefined, adminSecret: secretRef.current });
       });
       client.on("error", (env: ServerEnvelope) => {
@@ -208,20 +208,11 @@ export function useAdmin(): [AdminState, AdminActions] {
   const logout = useCallback(() => {
     clientRef.current?.close().catch(() => {});
     clientRef.current = null;
-    try { localStorage.removeItem(STORAGE_KEY); } catch {}
+    secretRef.current = "";
     setState(initial);
   }, []);
 
   const clearNotice = useCallback(() => patch({ notice: undefined }), [patch]);
-
-  useEffect(() => {
-    if (autoLoginDone.current) return;
-    autoLoginDone.current = true;
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) login(saved);
-    } catch {}
-  }, [login]);
 
   // Generic typed sender. GameClient stamps the latest nonce automatically.
   const sendAction = useCallback(<D>(t: ClientMsgType, d?: D) => {

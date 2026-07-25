@@ -35,6 +35,12 @@ type GameRepo interface {
 	LoadBoard(ctx context.Context, sessionID string) (*Board, error)
 	// Leaderboard returns historical top scores.
 	Leaderboard(ctx context.Context, limit int) ([]protocol.ScoreEntry, error)
+	// MarkTrackPlayed persists that a track has been consumed within the
+	// session's attached board, so a mid-game restart won't re-offer it (§7).
+	MarkTrackPlayed(ctx context.Context, sessionID, trackID string) error
+	// ClearPlayed resets the consumed state for every placement on the session's
+	// board (New Game).
+	ClearPlayed(ctx context.Context, sessionID string) error
 }
 
 // AudioDevice routes playback to the stage's Spotify Virtual Device

@@ -1,0 +1,67 @@
+[
+  {
+    "id": "uistage-1",
+    "surface": "ui-stage",
+    "file": "web/stage/src/config.ts",
+    "line": 34,
+    "category": "secret-leak",
+    "severity": "high",
+    "confidence": "high",
+    "summary": "Stage/admin secret sent as Bearer over PLAINTEXT HTTP to the token endpoint (defeats any transport confidentiality on a hostile LAN).",
+    "code": "export const HTTP_URL = env(\"VITE_HTTP_URL\") ?? `http://${host}:8777`;\n...\nconst res = await fetch(SPOTIFY_TOKEN_URL, { headers: { Authorization: `Bearer ${STAGE_SECRET}` }, cache: \"no-store\" });",
+    "scenario": "SPOTIFY_TOKEN_URL derives from HTTP_URL which defaults to http:// (README: ':8777/tcp — plain HTTP'). The stage GETs the token with Authorization: Bearer <ADMIN_SECRET> in cleartext. Anyone sniffing the conference LAN captures the admin secret and can then impersonate stage/admin roles. Bundle-inlining of VITE_STAGE_SECRET is acknowledged/unavoidable, but shipping it over cleartext HTTP is an additional, avoidable leak beyond the trusted device.",
+    "suggested_fix": "Serve the token/cert endpoints over HTTPS (TLS) and require VITE_HTTP_URL to be https in non-dev; do not transmit the shared secret over an unencrypted channel."
+  },
+  {
+    "id": "uistage-2",
+    "surface": "ui-stage",
+    "file": "web/stage/src/net/useGame.ts",
+    "line": 281,
+    "category": "robustness",
+    "severity": "high",
+    "confidence": "high",
+    "summary": "No WebTransport reconnect: on any connection drop the stage wedges offline until a manual page reload.",
+    "code": "await client.connect();\nawait client.send({ t: \"hello\", d: { role: \"stage\", adminSecret: STAGE_SECRET } });\n...\nonState: (connected) => patch({ connected })",
+    "scenario": "connect() is called exactly once in a mount-time useEffect. When the QUIC/WebTransport session drops (transient wifi blip, server restart), client.handleClose fires onState(false) so the ConnDot flips to 'offline', but nothing ever retries. For a multi-hour unattended conference game the projector silently and permanently loses all state/audio commands after a single network hiccup.",
+    "suggested_fix": "Add reconnect-with-backoff in useGame's onState(false) path (re-run the connect + hello sequence, re-registering handlers), or a reconnect loop in the client wrapper; cap retries and surface status."
+  },
+  {
+    "id": "uistage-3",
+    "surface": "ui-stage",
+    "file": "web/stage/src/main.tsx",
+    "line": 6,
+    "category": "robustness",
+    "severity": "medium",
+    "confidence": "medium",
+    "summary": "No React ErrorBoundary + unvalidated server-frame casts: a malformed/unexpected frame throws during render and white-screens the whole projector with no recovery.",
+    "code": "createRoot(document.getElementById(\"root\")!).render(<StrictMode><App /></StrictMode>);\n// e.g. useGame: client.on(\"board\", (e) => patch({ board: e.d as BoardData }));\n// Board.tsx: for (const c of cells) byKey.set(...)  // throws if cells missing/non-array",
+    "scenario": "Server frames are cast (e.d as BoardData / MaskedRevealData / etc.) with zero shape validation, and there is no top-level ErrorBoundary. A frame missing an expected array (e.g. board.cells undefined, or maskedReveal.artist not iterable) makes a view throw during render; without a boundary the entire stage unmounts to a blank screen and cannot recover without a reload. An unattended projector then shows nothing for the rest of the event.",
+    "suggested_fix": "Wrap <App/> in an ErrorBoundary that renders a fallback and keeps retrying, and defensively coerce/guard array fields (cells, mask arrays, players) before iterating."
+  },
+  {
+    "id": "uistage-4",
+    "surface": "ui-stage",
+    "file": "web/stage/src/net/certHash.ts",
+    "line": 35,
+    "category": "robustness",
+    "severity": "medium",
+    "confidence": "medium",
+    "summary": "WebTransport server-cert hash is fetched over plaintext HTTP and blindly trusted, so a LAN MITM can substitute a hash and defeat cert pinning.",
+    "code": "const res = await fetch(CERT_HASH_URL, { mode: \"cors\" });\n...\nreturn [{ algorithm: \"sha-256\", value: bytes }];  // no validation/pinning, used directly",
+    "scenario": "CERT_HASH_URL is http://host:8777/cert-hash. The returned SHA-256 is passed straight into WebTransport serverCertificateHashes. On a hostile conference LAN an attacker who MITMs the cleartext /cert-hash response supplies their own cert's hash, then MITMs the QUIC session too — the pinning becomes trust-on-first-response over an unauthenticated channel. On fetch failure the code returns undefined and connects with NO pinning at all.",
+    "suggested_fix": "Deliver the cert hash over an authenticated/HTTPS channel (or bake it at build time); on fetch failure fail closed in dev rather than dropping pinning silently."
+  },
+  {
+    "id": "uistage-5",
+    "surface": "ui-stage",
+    "file": "web/stage/src/net/useGame.ts",
+    "line": 263,
+    "category": "robustness",
+    "severity": "low",
+    "confidence": "medium",
+    "summary": "Fire-and-forget client.send() in audio state callbacks produces unhandled promise rejections once the transport is closed.",
+    "code": "audio.onStateChange((s) => { void client.send({ t: \"stage.playerState\", d: {...} }); });",
+    "scenario": "After the WebTransport session drops, this.writer is undefined so GameClient.send() throws 'not connected'. Because the call is `void`ed, every player_state_changed event (which keeps firing from the local Spotify SDK) yields an unhandled rejection, spamming the console and potentially the global unhandledrejection handler while the stage is offline.",
+    "suggested_fix": "Guard sends on connection state (skip when disconnected) or attach a .catch to the voided sends; combine with the reconnect fix in uistage-2."
+  }
+]

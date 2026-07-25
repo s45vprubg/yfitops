@@ -28,6 +28,7 @@ import type {
   TrackStartData,
   WelcomeData,
 } from "@shared/protocol";
+import type { ClientEnvelope } from "@shared/protocol";
 import { WT_URL, STAGE_SECRET, fetchSpotifyToken } from "../config";
 import { fetchCertHashes } from "./certHash";
 import { createAudioPlayer, SpotifyAudioPlayer, type AudioPlayer, type ConnectState } from "../audio";
@@ -103,6 +104,7 @@ export function useGame() {
   const clientRef = useRef<GameClient | null>(null);
   const audioRef = useRef<AudioPlayer | null>(null);
   const spotifyInitedRef = useRef(false); // guard against double-init (push + full-sync)
+  const connectedRef = useRef(false); // live link state, for guarding audio sends
 
   useEffect(() => {
     let disposed = false;
@@ -112,17 +114,52 @@ export function useGame() {
     const patch = (p: Partial<GameView>) => setView((v) => ({ ...v, ...p }));
     patch({ audioMode: audio.mode, spotifyConnectState: audio.getConnectState() });
 
-    (async () => {
-      const serverCertHashes = await fetchCertHashes();
-      if (disposed) return;
-
-      const client = new GameClient({
-        url: WT_URL,
-        serverCertHashes,
-        onState: (connected) => patch({ connected }),
+    // Send only when the current client is actually connected. Audio callbacks
+    // fire on their own cadence (player_state_changed etc.); after a transport
+    // drop an un-guarded client.send() throws "not connected", spamming
+    // unhandled rejections (uistage-5). Guard on state and swallow races.
+    const safeSend = (env: ClientEnvelope) => {
+      const c = clientRef.current;
+      if (!c || !connectedRef.current) return;
+      void c.send(env).catch(() => {
+        /* transport dropped mid-send — reconnect logic will recover */
       });
-      clientRef.current = client;
+    };
 
+    // ---- reconnect-with-backoff (uistage-2) ----
+    // A WebTransport drop previously just flipped connected=false and wedged the
+    // projector until a manual reload. We now re-run the full connect sequence
+    // (fetch cert hashes -> new GameClient -> re-wire handlers -> connect ->
+    // re-send hello) with capped exponential backoff. The audio layer is created
+    // once at mount and is NOT torn down across reconnects.
+    let attempt = 0; // backoff step; reset to 0 on a good link
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let establishing = false; // guard against overlapping connect attempts
+
+    const scheduleReconnect = () => {
+      if (disposed) return;
+      if (reconnectTimer !== null || establishing) return; // one in flight is enough
+      const delay = Math.min(500 * 2 ** attempt, 10_000);
+      attempt++;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        void establish();
+      }, delay);
+    };
+
+    const onState = (connected: boolean) => {
+      connectedRef.current = connected;
+      patch({ connected });
+      if (connected) {
+        attempt = 0; // healthy link — reset the backoff ladder
+      } else if (!disposed) {
+        scheduleReconnect();
+      }
+    };
+
+    // wireClientHandlers registers all server -> stage subscriptions on a client.
+    // Called on every (re)connect so a fresh client re-receives full-sync state.
+    const wireClientHandlers = (client: GameClient) => {
       // ---- server -> stage subscriptions ----
       client.on("welcome", (e: ServerEnvelope) => {
         const _d = e.d as WelcomeData; // role/playerID/nonce; nonce tracked by client
@@ -216,35 +253,6 @@ export function useGame() {
         }
       });
 
-      // initSpotify swaps in a Spotify-backed player. The token provider always
-      // pulls a fresh token from the backend (/api/spotify/token, refreshed
-      // server-side), falling back to a pushed token only if that fails.
-      const initSpotify = (pushedToken: string) => {
-        if (spotifyInitedRef.current) return; // idempotent — push + full-sync may both fire
-        spotifyInitedRef.current = true;
-        audioRef.current?.destroy();
-        const spotify = new SpotifyAudioPlayer(async () => (await fetchSpotifyToken()) ?? pushedToken);
-        audioRef.current = spotify;
-        patch({ audioMode: "spotify", spotifyConnectState: "connecting" });
-        spotify.onReady((deviceId) => {
-          patch({ spotifyConnectState: "ready" });
-          void client.send({ t: "stage.deviceReady", d: { spotifyDeviceID: deviceId } });
-        });
-        spotify.onStateChange((s) => {
-          void client.send({
-            t: "stage.playerState",
-            d: { positionMs: Math.round(s.positionMs), paused: s.paused, trackEnded: s.trackEnded },
-          });
-        });
-        // If the browser blocks playback (no user gesture yet), re-show the
-        // activation overlay. Otherwise the stage sits silent with no sound and
-        // no tab media indicator, and nobody knows why.
-        spotify.onAutoplayBlocked?.(() => patch({ audioActivated: false }));
-        void spotify.connect().then(() => {
-          if (!disposed) patch({ spotifyConnectState: spotify.getConnectState() });
-        });
-      };
-
       // ---- spotifyToken: backend signals Spotify is authenticated. Fires both
       // when the admin completes OAuth AND on full-sync if a stage connects
       // afterward. The token may be empty (a "go fetch it" signal) — initSpotify
@@ -253,42 +261,122 @@ export function useGame() {
         const { token } = (e.d as { token?: string }) ?? {};
         initSpotify(token ?? "");
       });
+    };
 
-      // ---- audio: local player -> backend reports ----
-      audio.onReady((deviceId) => {
-        patch({ spotifyConnectState: audio.getConnectState() });
-        void client.send({ t: "stage.deviceReady", d: { spotifyDeviceID: deviceId } });
+    // initSpotify swaps in a Spotify-backed player. The token provider always
+    // pulls a fresh token from the backend (/api/spotify/token, refreshed
+    // server-side), falling back to a pushed token only if that fails.
+    // Reports go through safeSend so they survive a transport reconnect.
+    const initSpotify = (pushedToken: string) => {
+      if (spotifyInitedRef.current) return; // idempotent — push + full-sync may both fire
+      spotifyInitedRef.current = true;
+      audioRef.current?.destroy();
+      const spotify = new SpotifyAudioPlayer(async () => (await fetchSpotifyToken()) ?? pushedToken);
+      audioRef.current = spotify;
+      patch({ audioMode: "spotify", spotifyConnectState: "connecting" });
+      spotify.onReady((deviceId) => {
+        patch({ spotifyConnectState: "ready" });
+        safeSend({ t: "stage.deviceReady", d: { spotifyDeviceID: deviceId } });
       });
-      audio.onStateChange((s) => {
-        void client.send({
+      spotify.onStateChange((s) => {
+        safeSend({
           t: "stage.playerState",
           d: { positionMs: Math.round(s.positionMs), paused: s.paused, trackEnded: s.trackEnded },
         });
       });
-      // Re-prompt for activation if this player (the initial createAudioPlayer
-      // one) hits the browser autoplay block.
-      audio.onAutoplayBlocked?.(() => patch({ audioActivated: false }));
+      // If the browser blocks playback (no user gesture yet), re-show the
+      // activation overlay. Otherwise the stage sits silent with no sound and
+      // no tab media indicator, and nobody knows why.
+      spotify.onAutoplayBlocked?.(() => patch({ audioActivated: false }));
+      void spotify.connect().then(() => {
+        if (!disposed) patch({ spotifyConnectState: spotify.getConnectState() });
+      });
+    };
 
-      // If we have a Spotify token, kick off the SDK connect now.
-      if (audio.mode === "spotify") {
-        patch({ spotifyConnectState: "connecting" });
-        await audio.connect();
-        if (!disposed) patch({ spotifyConnectState: audio.getConnectState() });
-      }
+    // ---- audio: local player -> backend reports ----
+    // Registered once against the mount-time player; sends route through
+    // safeSend so a mid-drop callback no longer throws "not connected"
+    // (uistage-5). initSpotify's replacement player wires its own callbacks.
+    audio.onReady((deviceId) => {
+      patch({ spotifyConnectState: audio.getConnectState() });
+      safeSend({ t: "stage.deviceReady", d: { spotifyDeviceID: deviceId } });
+    });
+    audio.onStateChange((s) => {
+      safeSend({
+        t: "stage.playerState",
+        d: { positionMs: Math.round(s.positionMs), paused: s.paused, trackEnded: s.trackEnded },
+      });
+    });
+    // Re-prompt for activation if this player (the initial createAudioPlayer
+    // one) hits the browser autoplay block.
+    audio.onAutoplayBlocked?.(() => patch({ audioActivated: false }));
 
-      // Send hello as the stage role (gated by the same secret as admin).
+    // establish (re)builds the transport: fresh cert hashes -> new client ->
+    // re-wire handlers -> connect -> re-send hello. Reused by the initial
+    // connect and every backoff retry. Overlap-guarded via `establishing`.
+    const establish = async () => {
+      if (disposed || establishing) return;
+      establishing = true;
       try {
+        const serverCertHashes = await fetchCertHashes();
+        if (disposed) return;
+
+        const client = new GameClient({
+          url: WT_URL,
+          serverCertHashes,
+          // Ignore state events from a superseded client (s2-ui-01): a stale
+          // client's late onState(false) (server closed the control stream but
+          // the QUIC session lingers) must not tear down / reconnect on top of
+          // a healthy newer client.
+          onState: (connected) => {
+            if (client !== clientRef.current) return;
+            onState(connected);
+          },
+        });
+        // Replacing the client: close the previous one first so its handleClose
+        // no longer fires onState(false) (close() sets this.closed), preventing
+        // a leaked client and duplicate reconnect churn (s2-ui-01).
+        const prev = clientRef.current;
+        clientRef.current = client;
+        void prev?.close();
+        wireClientHandlers(client);
+
+        // Send hello as the stage role (gated by the same secret as admin).
         await client.connect();
         await client.send({ t: "hello", d: { role: "stage", adminSecret: STAGE_SECRET } });
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn("[stage] connect failed (running offline/demo):", err);
+        connectedRef.current = false;
         patch({ connected: false });
+        // connect() may reject before onState(false) ever fires — schedule the
+        // retry ourselves so a failed initial/reconnect attempt still recovers.
+        if (!disposed) {
+          establishing = false;
+          scheduleReconnect();
+          return;
+        }
+      } finally {
+        establishing = false;
       }
-    })();
+    };
+
+    // If we have a Spotify token, kick off the SDK connect now (once).
+    if (audio.mode === "spotify") {
+      patch({ spotifyConnectState: "connecting" });
+      void audio.connect().then(() => {
+        if (!disposed) patch({ spotifyConnectState: audio.getConnectState() });
+      });
+    }
+
+    void establish();
 
     return () => {
       disposed = true;
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
       audioRef.current?.destroy();
       void clientRef.current?.close();
     };

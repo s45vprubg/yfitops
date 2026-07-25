@@ -1,0 +1,74 @@
+[
+  {
+    "id": "s2-engine-1",
+    "verdict": "CONFIRMED",
+    "real_severity": "medium",
+    "evidence": "server/internal/game/player.go:113-125 sanitizeHandle strips only unicode.IsControl (category Cc) and clamps to 24 runes; it does not touch format/bidi chars. resolvePlayer (player.go:96-100) applies the sanitized handle whenever non-empty, so any surviving char persists and is broadcast to stage/admin scoreboards. Standalone probe (/tmp/uniprobe) importing unicode: U+202E RLO, U+200B ZWSP, U+FEFF BOM, U+200F RLM, U+200E LRM, U+2066 LRI, U+2069 PDI all report IsControl=false, Cf=true, In(unicode.C)=true -> ALL survive the IsControl-only strip. U+0301 combining acute reports IsControl=false, Cf=false -> also survives. Threat model (CLAUDE.md) explicitly treats mobile as fully hostile, and the handle is a mobile-supplied field broadcast to the projector, so the RTL-override scoreboard-scramble vector is reachable as claimed.",
+    "fix": "In the sanitizeHandle loop, also skip runes where unicode.In(r, unicode.C) is true (covers Cf format chars including bidi overrides) and unicode.In(r, unicode.Mn, unicode.Me) leading combining marks; if nothing usable remains return \"\" so the caller keeps the prior handle. Minimal: change `if unicode.IsControl(r)` to `if unicode.IsControl(r) || unicode.In(r, unicode.Cf)` and add an explicit reject of U+202A-202E / U+2066-2069.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/game/player.go"]
+  },
+  {
+    "id": "s2-engine-2",
+    "verdict": "CONFIRMED",
+    "real_severity": "medium",
+    "evidence": "Traced enterDailyDouble (engine.go:1444-1466: builds ratingPool from online, non-banned mobile players != performer; ratings={} ), onRate (1468-1490: gated on ratingPool[p.ID], writes ratings[p.ID]), checkDailyDoubleComplete (1496-1507: bare `len(e.ratings) >= len(e.ratingPool)`), finishDailyDouble (1509-1525: averages sum over ALL e.ratings entries / len(e.ratings)). onAdminKick (1574-1599) does `delete(e.ratingPool, p.ID)` but NOT delete from e.ratings, then calls checkDailyDoubleComplete while state==StateDailyDouble. OnDisconnect (482-502) does the identical `delete(e.ratingPool, playerID)` (no ratings delete) and also calls checkDailyDoubleComplete when state==StateDailyDouble. Concrete reachable sequence confirmed: pool {A,B,C}; A rates 5, B rates 4 -> ratings={A:5,B:4}, ratingPool={A,B,C}. Admin kicks A -> ratingPool={B,C} (len 2), ratings unchanged (len 2). checkDailyDoubleComplete: 2>=2 -> finishDailyDouble fires though C (online, eligible) never rated -> C's vote silently dropped. finishDailyDouble averages A's kicked 5 into (5+4)/2=4.5, skewing the bonus. Both claims (premature finish + skewed average) hold; both kick and disconnect paths reach it while state==StateDailyDouble.",
+    "fix": "On kick/disconnect also delete the player from e.ratings alongside e.ratingPool (add `delete(e.ratings, p.ID)` in onAdminKick and OnDisconnect). Alternatively count/average only over the intersection: `n:=0; for id:=range e.ratings { if e.ratingPool[id] { n++ } }` and use that set in finishDailyDouble. Deleting from ratings is the smaller change and fixes both symptoms.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/game/engine.go"]
+  },
+  {
+    "id": "s2-store-001",
+    "verdict": "CONFIRMED",
+    "real_severity": "medium",
+    "evidence": "Traced refresh() (spotify.go:241-287): under refreshMu it reads cur=accessToken, exp=expiresAt, then `const skew=2*time.Minute; if cur != \"\" && c.clock().Before(exp.Add(-skew)) { return nil }` BEFORE building/POSTing the refresh_token grant. The three 401 callers all invoke this same refresh(): playerCommand (spotify.go:401-411), Search (search.go:41-50), GetPlaylistTracks (search.go:114-123). On a 401, cur is the just-rejected token (still non-empty) and exp is typically far in the future (freshly minted ~1h token sits inside the skew window ~58 of 60 min), so the guard short-circuits with return nil and no new grant is POSTed. The caller then retries doPlayer/doSearch, which re-read the SAME accessToken under mu (doPlayer:427-430, doSearch:192-194) -> identical dead token -> second 401 -> 'unexpected status 401'. The 401 forced-refresh safety net is therefore inert except in the final ~2 min of token life. Adversarial note on likelihood: a 401 on a locally-valid token requires server-side invalidation (user revokes app, refresh-token rotation by a parallel grant, or a slow/behind server clock). Uncommon, but when it happens playback stays silently broken (Play does not pre-call ValidToken; only GetPlaylistTracks does), which is show-stopping at a live event -> high impact x low likelihood = medium.",
+    "fix": "Add a forced entry point, e.g. refreshForce(ctx) or refresh(ctx, force bool), that still takes refreshMu for serialization but skips the 'comfortably live' short-circuit; have the three 401 callers use the forced variant while ValidToken keeps using the expiry-gated one. Alternatively, on the 401 path capture the token before refresh and, if unchanged, POST a grant unconditionally.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/spotify/spotify.go", "server/internal/spotify/search.go"]
+  },
+  {
+    "id": "s2-store-002",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "LoadBoard (repo_postgres.go:97-114) resolves game_sessions.board_id and delegates to LoadBoardByID (admin_store.go:367-447), which builds each &game.Track at 426-436 setting ID/URI/Artist/Song/AlbumArt/DurationMs/Playable/Year/Genre but NOT Played (defaults false). Confirmed no 'played' column exists in ANY migration (deploy/migrations/0001-0004; grep for 'played' matches only store_test.go and 'playable'/'player'). engine.Run (engine.go:259-261) calls LoadBoard only when e.board==nil, i.e. cold boot, so a mid-game restart reloads with every Track.Played=false; pickTrack/board logic (board.go:41 `if !t.Played && t.Playable`, model.go:52) then re-offers already-consumed tracks. Adversarial: this is an inherent architectural gap, not a regression — there is no durable played state anywhere to lose (ResetToLobby at engine.go:375-379 also just resets Played in memory). Severity low as claimed: restart mid-game is rare and §3.2 resume story never persisted played state.",
+    "fix": "Proper fix is out of single-file scope: add a played/consumed column to board_layout_cell_tracks (new migration), write it when a track is consumed, and scan+restore it in LoadBoardByID. Cheaper interim: document that a mid-game restart resets played state and is not a supported resume.",
+    "fix_risk": "medium",
+    "fix_touches_files": ["deploy/migrations/", "server/internal/store/admin_store.go", "server/internal/game/engine.go"]
+  },
+  {
+    "id": "s2-store-003",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "Search() result loop (search.go:78-84) constructs SearchResult with URI/Artist/Song/AlbumArt/DurationMs but omits Year -> defaults 0. GetPlaylistTracks (search.go:153-160) sets Year: yearFromReleaseDate(item.Track.Album.ReleaseDate) for the same struct. searchTrackItem embeds searchAlbum which decodes release_date (search.go:255-271), and doSearch (191-213) sends NO `fields` filter, so Spotify returns the full album object including release_date -> the data is present and simply not mapped. yearFromReleaseDate (180-189) already exists. Confirmed: manual search-and-add tracks land Year=0 (board_tracks.year 0), so the 0004_track_hints year hint is missing for search-added tracks but present for playlist-imported ones. Inconsistent hint coverage as claimed.",
+    "fix": "In the Search result loop add `Year: yearFromReleaseDate(item.Album.ReleaseDate),` mirroring GetPlaylistTracks.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/spotify/search.go"]
+  },
+  {
+    "id": "s2-admin-1",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "placeTrack (layout.go:147-159) decodes the JSON body only inside `if r.ContentLength > 0`. A chunked request (ContentLength==-1) or empty body skips the decode, leaving body.Pos=0; the `if body.Pos < 0 || body.Pos > 4` validation then passes on the zero value, so a caller-supplied pos is silently dropped and the track lands at pos 0. The finding's 'bypasses validation' framing is correctly rebutted in the record (0 is valid) — it is an ordering bug, not a security bypass. Adversarial reachability check: the shipped admin client (web/admin/src/useAdminApi.ts:98-99 -> req at :58-62) sends the body via fetch with JSON.stringify(body) and Content-Type: application/json; the browser sets a real Content-Length for a string body (not chunked), so ContentLength>0 holds and pos IS honored in production. The defect therefore only triggers behind a proxy that re-chunks, or a non-browser client using Transfer-Encoding: chunked. Latent correctness bug, not exercised by the deployed client -> low.",
+    "fix": "Decode unconditionally and tolerate an empty body: `if err := decodeJSON(...); err != nil && !errors.Is(err, io.EOF) { http.Error(...) ; return }` (io.EOF = no override, keep pos 0). Or gate on `r.ContentLength != 0`.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/admin/layout.go"]
+  },
+  {
+    "id": "s2-admin-2",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "AdminAuth (middleware.go:20-24) compares token to secretBytes via subtle.ConstantTimeCompare. Per the crypto/subtle stdlib contract, ConstantTimeCompare 'returns 0 immediately' when len(x) != len(y) — it is constant-time only for equal-length inputs. So response timing distinguishes a length-mismatch (early return) from an equal-length full byte compare, leaking the secret's length. Content comparison itself is sound. Adversarial exploitability: the timing delta between an early length return and a full compare of a short secret is nanoseconds, swamped by HTTP handling and LAN jitter; the secret is high-entropy so knowing its length barely reduces the brute-force space. Practically unexploitable, but it does violate the CLAUDE.md 'constant-time comparison' requirement. Real severity low (borderline informational).",
+    "fix": "Compare fixed-size digests so neither length nor content is observable: precompute `want := sha256.Sum256(secretBytes)` once, then `got := sha256.Sum256(token); if subtle.ConstantTimeCompare(got[:], want[:]) != 1 { ... }`. Inputs are always 32 bytes.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/admin/middleware.go"]
+  },
+  {
+    "id": "s2-admin-3",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "searchSpotify (spotify.go:32-36) does `http.Error(w, err.Error(), http.StatusBadGateway)` and importPlaylist (spotify.go:82-86) does the same on GetPlaylistTracks error. Those errors wrap the upstream verbatim: e.g. search.go:55 'spotify: search: status %d: %s' with the trimmed response body, and search.go:128 'spotify: playlist: status %d: %s'. So a Spotify 4xx/429 body (rate-limit JSON, endpoint detail) is echoed to the client at 502. Contrast aiBuild (aibuild.go:52-56) which log.Printf's the wrapped error and returns a generic 'AI build failed', and serverError (handler.go:134-137) which logs and returns 'internal error' for 500s. So the sweep-1 leak-suppression pattern exists but these two 502 paths were missed. Adversarial: caller is an authenticated admin (Bearer-gated) and no secret is exposed, so impact is limited to surfacing upstream internals -> low, matching the finding.",
+    "fix": "Mirror aiBuild: log.Printf the wrapped err server-side and return a generic message, e.g. http.Error(w, \"Spotify request failed\", http.StatusBadGateway), in both searchSpotify and importPlaylist.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/admin/spotify.go"]
+  }
+]

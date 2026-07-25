@@ -2,8 +2,11 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/s45vprubg/yfitops/server/internal/admin"
 	"github.com/s45vprubg/yfitops/server/internal/game"
@@ -49,7 +52,7 @@ func (r *PostgresRepo) GetBoard(ctx context.Context, id string) (*admin.Board, e
 		`SELECT id, name, cols, created_at, updated_at FROM boards WHERE id = $1`, id).
 		Scan(&b.ID, &b.Name, &b.Cols, &b.CreatedAt, &b.UpdatedAt)
 	if err != nil {
-		if err.Error() == "no rows in result set" {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("store: get board %s: %w", id, err)
@@ -189,6 +192,69 @@ func (r *PostgresRepo) RemoveColumn(ctx context.Context, boardID string, col int
 	return nil
 }
 
+// RebuildLayout atomically replaces the board's layout in a single transaction:
+// it deletes all existing layout cells + placements, updates the column count,
+// then recreates each column's cells and track placements. Mirrors the SQL of
+// RemoveColumn / UpdateBoardCols / AddColumn / PlaceTrack, run against the tx.
+//
+// NOTE: this transaction path has NOT been exercised against a live Postgres
+// (no local PG available) — it is written by mirroring the existing per-op SQL
+// and MUST be verified end-to-end in staging before being trusted.
+func (r *PostgresRepo) RebuildLayout(ctx context.Context, boardID string, cols int, columns []admin.LayoutColumn) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: rebuild layout: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Clear the existing layout (cells + their track placements). Mirror
+	// RemoveColumn but for the whole board.
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM board_layout_cell_tracks WHERE board_id = $1`, boardID); err != nil {
+		return fmt.Errorf("store: rebuild layout: clear placements: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM board_layout_cells WHERE board_id = $1`, boardID); err != nil {
+		return fmt.Errorf("store: rebuild layout: clear cells: %w", err)
+	}
+
+	// Update the board column count. Mirror UpdateBoardCols.
+	if _, err := tx.Exec(ctx,
+		`UPDATE boards SET cols = $1, updated_at = $2 WHERE id = $3`,
+		cols, time.Now().UnixMilli(), boardID); err != nil {
+		return fmt.Errorf("store: rebuild layout: update cols: %w", err)
+	}
+
+	// Recreate each column's cells (mirror AddColumn) then place tracks
+	// (mirror PlaceTrack).
+	for i, c := range columns {
+		col := i + 1
+		for row := 1; row <= 5; row++ {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO board_layout_cells (board_id, row, col, category, daily_double)
+				 VALUES ($1, $2, $3, $4, FALSE)
+				 ON CONFLICT (board_id, row, col) DO NOTHING`,
+				boardID, row, col, c.Category); err != nil {
+				return fmt.Errorf("store: rebuild layout: add cell row=%d col=%d: %w", row, col, err)
+			}
+		}
+		for _, p := range c.Placements {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO board_layout_cell_tracks (board_id, row, col, track_id, pos)
+				 VALUES ($1, $2, $3, $4, $5)
+				 ON CONFLICT (board_id, row, col, track_id) DO UPDATE SET pos = EXCLUDED.pos`,
+				boardID, p.Row, p.Col, p.TrackID, p.Pos); err != nil {
+				return fmt.Errorf("store: rebuild layout: place track row=%d col=%d: %w", p.Row, p.Col, err)
+			}
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: rebuild layout: commit: %w", err)
+	}
+	return nil
+}
+
 func (r *PostgresRepo) RenameCategory(ctx context.Context, boardID string, col int, name string) error {
 	_, err := r.pool.Exec(ctx,
 		`UPDATE board_layout_cells SET category = $1 WHERE board_id = $2 AND col = $3`,
@@ -303,7 +369,7 @@ func (r *PostgresRepo) LoadBoardByID(ctx context.Context, boardID string) (*game
 		`SELECT blc.row, blc.col, blc.category, blc.daily_double,
 		        bt.id, bt.spotify_uri, bt.artist, bt.song, bt.album_art, bt.duration_ms,
 		        bt.has_synced_lyrics, bt.lyrics_override, bt.year, bt.genre,
-		        blct.pos
+		        blct.pos, blct.played
 		   FROM board_layout_cells blc
 		   LEFT JOIN board_layout_cell_tracks blct
 		     ON blct.board_id = blc.board_id AND blct.row = blc.row AND blct.col = blc.col
@@ -329,9 +395,10 @@ func (r *PostgresRepo) LoadBoardByID(ctx context.Context, boardID string) (*game
 			tYear                           *int
 			tGenre                          *string
 			pos                             *int
+			played                          *bool
 		)
 		if err := rows.Scan(&row, &col, &category, &dailyDouble,
-			&tID, &tURI, &tArtist, &tSong, &tArt, &tDuration, &tHasLyrics, &tOverride, &tYear, &tGenre, &pos); err != nil {
+			&tID, &tURI, &tArtist, &tSong, &tArt, &tDuration, &tHasLyrics, &tOverride, &tYear, &tGenre, &pos, &played); err != nil {
 			return nil, fmt.Errorf("store: scan board-by-id row: %w", err)
 		}
 		if row > maxRow {
@@ -367,6 +434,7 @@ func (r *PostgresRepo) LoadBoardByID(ctx context.Context, boardID string) (*game
 				Playable:   playable,
 				Year:       year,
 				Genre:      deref(tGenre),
+				Played:     derefBool(played),
 			})
 		}
 	}
@@ -386,6 +454,35 @@ func (r *PostgresRepo) AttachBoard(ctx context.Context, sessionID, boardID strin
 		boardID, sessionID)
 	if err != nil {
 		return fmt.Errorf("store: attach board: %w", err)
+	}
+	return nil
+}
+
+// MarkTrackPlayed persists that trackID has been consumed on the session's
+// attached board, so a mid-game restart won't re-offer it (§7). Resolves the
+// board via game_sessions.board_id so the engine can call it with just the
+// session + track it already knows.
+func (r *PostgresRepo) MarkTrackPlayed(ctx context.Context, sessionID, trackID string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE board_layout_cell_tracks SET played = TRUE
+		  WHERE board_id = (SELECT board_id FROM game_sessions WHERE id = $1)
+		    AND track_id = $2`,
+		sessionID, trackID)
+	if err != nil {
+		return fmt.Errorf("store: mark track played: %w", err)
+	}
+	return nil
+}
+
+// ClearPlayed resets played=FALSE for every placement on the session's board
+// (New Game).
+func (r *PostgresRepo) ClearPlayed(ctx context.Context, sessionID string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE board_layout_cell_tracks SET played = FALSE
+		  WHERE board_id = (SELECT board_id FROM game_sessions WHERE id = $1)`,
+		sessionID)
+	if err != nil {
+		return fmt.Errorf("store: clear played: %w", err)
 	}
 	return nil
 }

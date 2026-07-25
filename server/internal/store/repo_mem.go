@@ -100,6 +100,51 @@ func (r *MemRepo) Leaderboard(_ context.Context, limit int) ([]protocol.ScoreEnt
 	return all, nil
 }
 
+// MarkTrackPlayed sets Played=true on the matching track within the session's
+// in-memory board, mirroring the Postgres placement update.
+func (r *MemRepo) MarkTrackPlayed(_ context.Context, sessionID, trackID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b := r.boards[sessionID]
+	if b == nil {
+		return nil
+	}
+	for _, row := range b.Cells {
+		for _, cell := range row {
+			if cell == nil {
+				continue
+			}
+			for _, t := range cell.Tracks {
+				if t.ID == trackID {
+					t.Played = true
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// ClearPlayed resets Played=false for every track on the session's board.
+func (r *MemRepo) ClearPlayed(_ context.Context, sessionID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	b := r.boards[sessionID]
+	if b == nil {
+		return nil
+	}
+	for _, row := range b.Cells {
+		for _, cell := range row {
+			if cell == nil {
+				continue
+			}
+			for _, t := range cell.Tracks {
+				t.Played = false
+			}
+		}
+	}
+	return nil
+}
+
 // SetBoard installs a pre-built board for a session (test helper / seeding).
 func (r *MemRepo) SetBoard(sessionID string, b *game.Board) {
 	r.mu.Lock()

@@ -12,9 +12,23 @@ function env(key: string): string | undefined {
 }
 
 export const WT_URL = env("VITE_WT_URL") ?? `https://${host}:4433/wt`;
-export const HTTP_URL = env("VITE_HTTP_URL") ?? `http://${host}:8777`;
+// Default the backend to https in production builds so the shared secret and
+// cert-hash never traverse cleartext. In dev we keep plain http so `npm run
+// dev` against the local stack works unchanged (§ dev http, no TLS).
+export const HTTP_URL =
+  env("VITE_HTTP_URL") ?? `${import.meta.env.DEV ? "http" : "https"}://${host}:8777`;
 // The mobile PWA's join URL. Defaults to the mobile dev-server port (dev-up.sh).
 export const JOIN_URL = env("VITE_JOIN_URL") ?? `http://${host}:8780`;
+
+// Fail closed on a cleartext backend in production: the stage secret rides on
+// the token/cert URLs as a Bearer, so http:// in a prod build would leak it.
+// DEV is exempt so local http keeps working.
+if (!import.meta.env.DEV && !HTTP_URL.startsWith("https://")) {
+  throw new Error(
+    `[stage] refusing to build token/cert URLs over cleartext HTTP_URL (${HTTP_URL}); ` +
+      "set VITE_HTTP_URL to an https:// endpoint for production.",
+  );
+}
 
 export const CERT_HASH_URL = `${HTTP_URL}/cert-hash`;
 export const SPOTIFY_AUTH_URL = `${HTTP_URL}/auth/spotify`;

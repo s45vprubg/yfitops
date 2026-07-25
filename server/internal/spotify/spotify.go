@@ -104,6 +104,16 @@ type Client struct {
 	refreshToken string
 	expiresAt    time.Time // when the current access token dies (Spotify ~1h TTL)
 	deviceID     string
+
+	// refreshMu serializes the refresh grant so concurrent callers (ValidToken,
+	// playerCommand's 401 path, GetPlaylistTracks) can't each fire a
+	// refresh_token grant at once. If Spotify rotates the refresh token, two
+	// racing grants would let the loser overwrite the good token with an
+	// invalidated one, forcing re-auth. Only the first caller POSTs; the rest
+	// re-check expiry under refreshMu and reuse the freshly minted token. This is
+	// a coarse serializer distinct from mu, which still guards the short field
+	// reads/writes — never hold mu across the HTTP POST.
+	refreshMu sync.Mutex
 }
 
 // New builds a Client from config (design_doc §6, §9). Token/device fields
@@ -228,10 +238,54 @@ func (c *Client) expiryFrom(expiresIn int) time.Time {
 // refresh obtains a fresh access token using the stored refresh token,
 // porting refreshSpotifyToken (server.js:2283-2300). The refresh grant keeps
 // the existing refresh token unless Spotify rotates it.
-func (c *Client) refresh(ctx context.Context) error {
+//
+// force distinguishes the two entry paths, both of which serialize on refreshMu
+// (spotify-1's single-flight is preserved):
+//   - force=false (ValidToken/expiry-driven): short-circuits if the current
+//     token is comfortably live (skew window), so a stampede of expiry-driven
+//     callers fires exactly one grant and the rest reuse the freshly-minted one.
+//   - force=true (a 401 caller, failedToken = the token the request 401'd on):
+//     the token is locally still live but the SERVER rejected it, so the skew
+//     short-circuit is bypassed and a new grant is POSTed — UNLESS a concurrent
+//     refresh already replaced failedToken while we waited on refreshMu, in
+//     which case that fresh token is reused instead of POSTing again. This keeps
+//     the forced path single-flight too (s2-store-001). failedToken is ignored
+//     when force is false.
+func (c *Client) refresh(ctx context.Context, force bool, failedToken string) error {
+	// Serialize the whole refresh so only one grant runs at a time (spotify-1).
+	// Lock order: refreshMu is always the OUTER lock; mu is taken and released
+	// for short field access inside. mu is never held across refreshMu or the
+	// HTTP POST, so there is no lock cycle and readers aren't blocked on the net.
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+
 	c.mu.Lock()
 	rt := c.refreshToken
+	cur := c.accessToken
+	exp := c.expiresAt
 	c.mu.Unlock()
+
+	const skew = 2 * time.Minute
+	if force {
+		// Forced by a 401: the token was locally "live" but the server rejected
+		// it, so the skew short-circuit must NOT apply. Still single-flight the
+		// forced path: if the current token no longer matches the one the caller
+		// 401'd on, a concurrent refresh already replaced it while we waited for
+		// refreshMu — reuse that instead of POSTing (and risking a clobber of a
+		// rotated refresh token).
+		if cur != "" && cur != failedToken {
+			return nil
+		}
+	} else if cur != "" && c.clock().Before(exp.Add(-skew)) {
+		// A concurrent caller may have already refreshed while we waited for
+		// refreshMu. If the current token is present and comfortably live (same
+		// skew window ValidToken uses to decide a refresh is needed), reuse it
+		// instead of POSTing another grant — which would risk clobbering a
+		// rotated refresh token. Using the skew here means a token freshly minted
+		// by the winner (~1h left) short-circuits, while one still inside the
+		// expiry window does not falsely look valid.
+		return nil
+	}
 	if rt == "" {
 		return fmt.Errorf("spotify: no refresh token; re-authenticate")
 	}
@@ -275,12 +329,15 @@ func (c *Client) ValidToken(ctx context.Context) (string, error) {
 		return tok, nil
 	}
 	if !hasRefresh {
+		if tok != "" && !c.clock().After(exp) {
+			return tok, nil // still valid and no way to refresh; hand it back
+		}
 		if tok != "" {
-			return tok, nil // no way to refresh; hand back what we have
+			return "", fmt.Errorf("spotify: token expired, re-auth required")
 		}
 		return "", fmt.Errorf("spotify: not authenticated")
 	}
-	if err := c.refresh(ctx); err != nil {
+	if err := c.refresh(ctx, false, ""); err != nil {
 		return "", err
 	}
 	c.mu.Lock()
@@ -365,9 +422,16 @@ func (c *Client) playerCommand(ctx context.Context, action string, body []byte) 
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		// Token likely expired — refresh and retry once (legacy parity).
+		// Token likely expired — refresh and retry once (legacy parity). Force
+		// the refresh: the token may still look locally live (Spotify can revoke
+		// early), so the skew short-circuit must not reuse this dead token.
+		// Passing the token we just 401'd on lets a concurrent refresh that
+		// already replaced it be reused instead of re-POSTed (s2-store-001).
 		resp.Body.Close()
-		if rerr := c.refresh(ctx); rerr != nil {
+		c.mu.Lock()
+		failed := c.accessToken
+		c.mu.Unlock()
+		if rerr := c.refresh(ctx, true, failed); rerr != nil {
 			return fmt.Errorf("spotify: %s: %w", action, rerr)
 		}
 		resp, err = c.doPlayer(ctx, action, body)

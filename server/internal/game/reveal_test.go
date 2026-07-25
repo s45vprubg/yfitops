@@ -26,6 +26,7 @@ func newRevealHarness(t *testing.T) *harness {
 		RevealIntervalMs: 250, // clamp floor
 		RevealPhase1Ms:   10,  // ~no noise delay (0 is treated as "unset" -> default)
 		RevealBlockMs:    1,   // effectively no length-hide block for fast tests
+		BuzzWindowMs:     -1,  // resolve buzzes synchronously (deterministic)
 		Rand:             rand.New(rand.NewSource(1)),
 	})
 	e.SetBoard(testBoard())

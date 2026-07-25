@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/rand"
 	"runtime/debug"
+	"sort"
 	"sync"
 	"time"
 
@@ -31,6 +32,12 @@ import (
 // begins (design_doc §3.9). Exposed for tests to shrink.
 var TransitionDelay = 3 * time.Second
 
+// defaultBuzzWindowMs is the buzz-collection window (§4B fairness). All buzzes
+// are serialized on the Run loop, so a short window lets contenders that arrived
+// within a few ms of each other be gathered and ordered by their §4C
+// latency-compensated EffectiveBuzzTime instead of by command-enqueue order.
+const defaultBuzzWindowMs = 40
+
 // Config tunes engine behavior. Zero values are sane defaults.
 type Config struct {
 	SessionID        string
@@ -46,6 +53,16 @@ type Config struct {
 	RevealEaseSet      bool
 	RevealAlternate    bool
 	RevealAlternateSet bool
+	// BuzzWindowMs is the buzz-collection window in ms (§4B fairness). Contenders
+	// buzzing within the window are ordered by §4C EffectiveBuzzTime rather than
+	// command-enqueue order. Sign convention:
+	//   0        => unset; NewEngine substitutes defaultBuzzWindowMs (40).
+	//   > 0      => async window of that many ms (production path).
+	//   < 0      => resolve immediately/synchronously (a 1-contender window that
+	//               resolves inline) — deterministic tests opt out of the timer.
+	// A plain 0 cannot mean "immediate" because production callers leave it unset
+	// and MUST get the fairness window; hence the negative sentinel.
+	BuzzWindowMs int
 	// Rand seeds track selection; nil uses a time-seeded source.
 	Rand *rand.Rand
 }
@@ -61,6 +78,15 @@ type command struct {
 type pendingPartial struct {
 	active    bool
 	remaining int // snapshot of leftover pool at the moment of the partial
+}
+
+// buzzContender is one eligible buzz gathered during the collection window
+// (§4B). effectiveMs is the §4C latency-compensated time; the winner is the
+// contender with the minimum effectiveMs (tie-break arrivalMs, then playerID).
+type buzzContender struct {
+	playerID  string
+	connID    string
+	arrivalMs int64 // server-stamped arrival; the SOLE ordering input (§4B)
 }
 
 // currentPointsFromPool applies the same linear decay as CurrentPoints but with
@@ -111,6 +137,14 @@ type Engine struct {
 	buzzWinner   string // playerID currently holding the lock
 	partial      pendingPartial
 
+	// ---- buzz-collection window (§4B fairness, Run-loop-owned) ----
+	// buzzWindowMs is the resolved window length. >0 opens an async collection
+	// window; <=0 resolves each buzz immediately (a 1-contender window). All of
+	// the fields below are single-writer (Run loop only) — no locks needed.
+	buzzWindowMs   int
+	buzzWindowOpen bool
+	buzzContenders []buzzContender
+
 	cellPicker string // playerID who earns next cell selection ("" = admin only)
 
 	// skip voting (§3.8)
@@ -147,6 +181,11 @@ type Engine struct {
 	// telemetry (shared-IP detection). Run-goroutine-owned.
 	connIP map[string]string
 
+	// telemetryDirty coalesces heartbeat-driven telemetry: onHeartbeat sets it
+	// instead of broadcasting inline (which is O(P^2) on the Run loop and
+	// floodable). A fast ticker flushes it at most once per second. Run-loop-owned.
+	telemetryDirty bool
+
 	// lyricCache memoizes LRCLIB results by artist|song|dur so a track's lyrics
 	// are fetched once (prefetched at startTrack) and served instantly at
 	// karaoke — no loading spinner. A cached entry may be an empty slice
@@ -166,6 +205,13 @@ func NewEngine(repo GameRepo, lock BuzzLock, audio AudioDevice, lyrics LyricsPro
 	}
 	if cfg.SessionID == "" {
 		cfg.SessionID = "session"
+	}
+	// Resolve the buzz-collection window (§4B). 0 => unset => default. A negative
+	// value is the "resolve immediately" sentinel (kept as-is; <=0 is the
+	// synchronous path in onBuzz).
+	buzzWindowMs := cfg.BuzzWindowMs
+	if buzzWindowMs == 0 {
+		buzzWindowMs = defaultBuzzWindowMs
 	}
 	// Seed the reveal-timing knobs from config, falling back to defaults.
 	revCfg := defaultRevealConfig()
@@ -197,10 +243,11 @@ func NewEngine(repo GameRepo, lock BuzzLock, audio AudioDevice, lyrics LyricsPro
 		state:     protocol.StateLobby,
 		reg:       newRegistry(),
 		session:   &Session{ID: cfg.SessionID, SkipThresholdPct: cfg.SkipThresholdPct, State: string(protocol.StateLobby)},
-		revealCfg:   revCfg.clamp(),
-		connIP:      map[string]string{},
-		pointFactor: 1.0,
-		lyricCache:  map[string]*lyricEntry{},
+		revealCfg:    revCfg.clamp(),
+		connIP:       map[string]string{},
+		pointFactor:  1.0,
+		lyricCache:   map[string]*lyricEntry{},
+		buzzWindowMs: buzzWindowMs,
 	}
 }
 
@@ -216,6 +263,11 @@ func (e *Engine) Run(ctx context.Context) error {
 	_ = e.repo.CreateSession(ctx, e.session)
 	telemetryTicker := time.NewTicker(60 * time.Second)
 	defer telemetryTicker.Stop()
+	// Fast ticker flushes coalesced heartbeat telemetry at most once per second
+	// (onHeartbeat sets telemetryDirty instead of broadcasting inline, which is
+	// O(P^2) on this loop and floodable).
+	telemetryFlush := time.NewTicker(1 * time.Second)
+	defer telemetryFlush.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -225,6 +277,11 @@ func (e *Engine) Run(ctx context.Context) error {
 			// (which would kill every connection and the whole game). Recover,
 			// log, and drop that command; the loop keeps serving.
 			e.runCommand(c)
+		case <-telemetryFlush.C:
+			if e.telemetryDirty {
+				e.telemetryDirty = false
+				e.broadcastTelemetry()
+			}
 		case <-telemetryTicker.C:
 			e.broadcastTelemetry()
 		}
@@ -301,6 +358,8 @@ func (e *Engine) ResetToLobby() error {
 		e.trackStartMs = 0
 		e.pausedAtMs = 0
 		e.buzzWinner = ""
+		e.buzzWindowOpen = false
+		e.buzzContenders = nil
 		e.cellPicker = ""
 		e.votingPool = nil
 		e.votes = nil
@@ -327,12 +386,27 @@ func (e *Engine) ResetToLobby() error {
 				}
 			}
 		}
+		// Persist the cleared state so a restart after New Game doesn't
+		// resurrect the previous game's consumed tracks (best-effort).
+		_ = e.repo.ClearPlayed(context.Background(), e.cfg.SessionID)
 		e.transitionTo(protocol.StateLobby)
 		e.broadcastScoreboard()
 		e.broadcastBoard()
 		ch <- result{}
 	}}
 	return (<-ch).err
+}
+
+// consumeTrack marks the current track as played (removing it from its cell
+// pool, §7) AND persists that consumption so a mid-game server restart won't
+// re-offer it. Persistence is best-effort, same fire-and-forget style as
+// SaveScore. Safe to call when there is no current track.
+func (e *Engine) consumeTrack() {
+	if e.curTrack == nil {
+		return
+	}
+	e.curTrack.Played = true
+	_ = e.repo.MarkTrackPlayed(context.Background(), e.cfg.SessionID, e.curTrack.ID)
 }
 
 // RoleSetter lets the engine promote a connection's authenticated role in the
@@ -381,15 +455,12 @@ func (e *Engine) MarkSpotifyAuthed() {
 	e.submit(func() { e.spotifyAuthed = true })
 }
 
-// submit enqueues fn for the Run loop. It does not wait.
+// submit enqueues fn for the Run loop. It does not wait. If the (generously
+// buffered) command channel is full it applies blocking backpressure: the send
+// blocks until the loop drains one. Running fn inline from a non-Run goroutine
+// is NOT safe (it would race the single-writer state), so we never do that.
 func (e *Engine) submit(fn func()) {
-	select {
-	case e.cmds <- command{fn: fn}:
-	default:
-		// Backpressure: run inline only if the loop is saturated. This should
-		// be vanishingly rare; the channel is generously buffered.
-		e.cmds <- command{fn: fn}
-	}
+	e.cmds <- command{fn: fn}
 }
 
 // submitSync enqueues fn and waits for the loop to finish it. Used by tests to
@@ -430,11 +501,15 @@ func (e *Engine) OnDisconnect(connID string) {
 			// Drop from active vote/rating pools and recompute thresholds (§3.8).
 			delete(e.votingPool, playerID)
 			delete(e.ratingPool, playerID)
+			delete(e.ratings, playerID) // keep ratings in sync with pool (§3.8)
 			if p := e.reg.players[playerID]; p != nil {
 				p.Active = false
 			}
 			if e.state == protocol.StateKaraoke {
 				e.evaluateSkipVotes()
+			}
+			if e.state == protocol.StateDailyDouble {
+				e.checkDailyDoubleComplete()
 			}
 			e.broadcastTelemetry()
 		}
@@ -474,10 +549,18 @@ func (e *Engine) dispatch(connID string, role protocol.Role, env protocol.Client
 		}
 		e.dispatchAdmin(connID, env)
 
-	case protocol.CMsgStagePlayerState:
-		e.onStagePlayerState(connID, env)
-	case protocol.CMsgStageDeviceReady:
-		e.onStageDeviceReady(connID, env)
+	case protocol.CMsgStagePlayerState,
+		protocol.CMsgStageDeviceReady:
+		if role != protocol.RoleStage && role != protocol.RoleAdmin {
+			e.sendError(connID, "forbidden", "stage role required")
+			return
+		}
+		switch env.Type {
+		case protocol.CMsgStagePlayerState:
+			e.onStagePlayerState(connID, env)
+		case protocol.CMsgStageDeviceReady:
+			e.onStageDeviceReady(connID, env)
+		}
 	default:
 		e.sendError(connID, "unknown", fmt.Sprintf("unhandled type %q", env.Type))
 	}
@@ -575,10 +658,10 @@ func (e *Engine) onHeartbeat(connID string, env protocol.ClientEnvelope) {
 	e.bcast.SendTo(connID, e.envelope(protocol.SMsgHeartbeat, map[string]int64{
 		"serverTime": now,
 	}))
-	// Push fresh telemetry to admin on heartbeat so RTT / active status stay
-	// live (previously only the 60s ticker / award refreshed it, which looked
-	// dead). Heartbeats are ~2s/player and telemetry is admin-only + tiny.
-	e.broadcastTelemetry()
+	// Push fresh telemetry to admin so RTT / active status stay live. Coalesced:
+	// mark dirty and let the 1s flush ticker broadcast, rather than broadcasting
+	// inline on every heartbeat (O(P^2) on the Run loop and floodable).
+	e.telemetryDirty = true
 }
 
 // sendFullSync delivers an audience-scoped FULL_STATE_SYNC (§9). Mobile gets
@@ -673,6 +756,11 @@ func (e *Engine) startTrack(cell *Cell, track *Track) {
 	e.buzzWinner = ""
 	e.roundWinner = "" // no winner yet this round
 	e.partial = pendingPartial{}
+	// Fresh round: any buzz window from a prior round is dead. A stale AfterFunc
+	// is already neutralized by the roundKey compare in resolveBuzzWindow, but
+	// clearing here is belt-and-suspenders (and the new roundKey below rearms).
+	e.buzzWindowOpen = false
+	e.buzzContenders = nil
 	e.roundKey = fmt.Sprintf("%s:r%dc%d:%s:%d", e.cfg.SessionID, cell.Row, cell.Col, track.ID, e.trackStartMs)
 
 	// New track => everyone may guess again (§3.4 one guess per track).
@@ -755,20 +843,144 @@ func (e *Engine) onBuzz(connID string, env protocol.ClientEnvelope, arrivalMs in
 		return
 	}
 
-	// §4B/§4C: compute the latency-compensated effective time. We are already
-	// serialized on the Run loop, so the FIRST buzz dispatched here is the first
-	// to reach the lock — but we still go through BuzzLock so the atomic
-	// single-winner guarantee holds even across a distributed Redis backend.
-	_ = anticheat.EffectiveBuzzTime(arrivalMs, p.RTTMs)
+	// §4B: order by the server-stamped arrival time ALONE — it is the only
+	// unforgeable ordering input. We gather every eligible buzz that lands within
+	// a short collection window and pick the earliest arrival; command-enqueue
+	// order does not decide the winner. The atomic BuzzLock is still taken for the
+	// chosen winner so the cross-instance single-winner guarantee holds even
+	// across a distributed Redis backend.
+	//
+	// NOTE (QA sweep 3, s3-fe): we deliberately do NOT apply §4C RTT latency
+	// compensation. RTT was sourced from the client heartbeat (hb.RTTMs), and in a
+	// zero-trust model a hostile mobile forges a high RTT to earn an earlier
+	// effective time (EffectiveBuzzTime subtracts RTT/2), winning every contested
+	// buzz. QUIC's own SmoothedRTT is not exposed by webtransport-go, and any
+	// echo-based measurement is still gameable by a pong-delaying client, so no
+	// server-trustable RTT exists. On a same-LAN venue real RTT spread is tiny, so
+	// arrival-only ordering is both fair enough and unforgeable.
+	c := buzzContender{playerID: p.ID, connID: connID, arrivalMs: arrivalMs}
 
-	won, err := e.lock.TryAcquire(context.Background(), e.roundKey, p.ID)
-	if err != nil || !won {
-		e.bcast.SendTo(connID, e.envelope(protocol.SMsgBuzzResult, protocol.BuzzResultData{Won: false}))
+	if e.buzzWindowOpen {
+		// A window is already collecting: append (deduping by playerID, keeping the
+		// earliest effective time). Do NOT send a result yet — resolution decides.
+		e.addContender(c)
 		return
 	}
 
-	// Winner. Pause audio IMMEDIATELY via the direct stage path (~20ms, §9),
-	// NOT the Spotify API round-trip.
+	// Open a new collection window for this round.
+	e.buzzWindowOpen = true
+	e.buzzContenders = []buzzContender{c}
+	if e.buzzWindowMs <= 0 {
+		// Synchronous path (tests / back-compat): resolve the 1-contender window
+		// immediately — identical to the old serial first-buzz-wins behavior.
+		e.resolveBuzzWindow(e.roundKey)
+		return
+	}
+	// Async path: schedule resolution after the window elapses. Capture roundKey
+	// so a late timer firing into a new round is ignored.
+	rk := e.roundKey
+	time.AfterFunc(time.Duration(e.buzzWindowMs)*time.Millisecond, func() {
+		e.submit(func() { e.resolveBuzzWindow(rk) })
+	})
+}
+
+// addContender appends a contender to the open window, deduping by playerID: a
+// double-buzz from the same player keeps only their EARLIEST effective time
+// (and its arrival) rather than double-counting.
+func (e *Engine) addContender(c buzzContender) {
+	for i := range e.buzzContenders {
+		if e.buzzContenders[i].playerID == c.playerID {
+			if c.arrivalMs < e.buzzContenders[i].arrivalMs {
+				e.buzzContenders[i] = c
+			}
+			return
+		}
+	}
+	e.buzzContenders = append(e.buzzContenders, c)
+}
+
+// resolveBuzzWindow closes the collection window and awards the buzz to the
+// contender with the earliest server arrival time (tie-break: playerID). It
+// re-validates eligibility, takes the atomic BuzzLock for the
+// winner (preserving the cross-instance single-winner guarantee), runs the
+// winner path, and tells every other contender they lost. roundKey is compared
+// against the live round so a stale timer from a superseded round is a no-op.
+func (e *Engine) resolveBuzzWindow(roundKey string) {
+	if e.state != protocol.StateRoundActive || e.roundKey != roundKey || !e.buzzWindowOpen {
+		return // stale / superseded / already resolved
+	}
+
+	// Order contenders by (arrivalMs, playerID) for full determinism — server
+	// arrival time is the sole, unforgeable ordering input (§4B; see onBuzz note
+	// on why §4C RTT compensation is intentionally not applied).
+	order := make([]buzzContender, len(e.buzzContenders))
+	copy(order, e.buzzContenders)
+	sort.Slice(order, func(i, j int) bool {
+		a, b := order[i], order[j]
+		if a.arrivalMs != b.arrivalMs {
+			return a.arrivalMs < b.arrivalMs
+		}
+		return a.playerID < b.playerID
+	})
+
+	// Pick the best still-eligible contender. A contender that went offline /
+	// banned / already-guessed since buzzing is skipped in favor of the next.
+	var winner *buzzContender
+	winIdx := -1
+	for i := range order {
+		p := e.reg.players[order[i].playerID]
+		if p == nil || p.Banned || p.GuessedThisTrack || !e.reg.online(p.ID) {
+			continue
+		}
+		winner = &order[i]
+		winIdx = i
+		break
+	}
+	if winner == nil {
+		// Nobody eligible remains; close the window, round stays active.
+		e.buzzWindowOpen = false
+		e.buzzContenders = nil
+		return
+	}
+
+	p := e.reg.players[winner.playerID]
+
+	// Atomic cross-instance single-winner guarantee (§4 hard rule).
+	won, err := e.lock.TryAcquire(context.Background(), e.roundKey, p.ID)
+	if err != nil || !won {
+		// Another instance took the round: this whole window loses.
+		for i := range order {
+			for _, cid := range e.reg.connIDs(order[i].playerID) {
+				e.bcast.SendTo(cid, e.envelope(protocol.SMsgBuzzResult, protocol.BuzzResultData{Won: false}))
+			}
+		}
+		e.buzzWindowOpen = false
+		e.buzzContenders = nil
+		return
+	}
+
+	// Winner path (factored out of the old inline block; behavior identical).
+	e.awardBuzzWinner(p, winner.arrivalMs)
+
+	// Every OTHER contender loses.
+	for i := range order {
+		if i == winIdx {
+			continue
+		}
+		for _, cid := range e.reg.connIDs(order[i].playerID) {
+			e.bcast.SendTo(cid, e.envelope(protocol.SMsgBuzzResult, protocol.BuzzResultData{Won: false}))
+		}
+	}
+
+	e.buzzWindowOpen = false
+	e.buzzContenders = nil
+}
+
+// awardBuzzWinner runs the winning-buzz side effects: pause audio via the direct
+// stage path (~20ms, §9), transition LOCKED -> ADJUDICATE, tell the winner they
+// won + lock out mobile, hand the admin the evaluation context, and log the
+// buzz with its arrival time (§3.4, §3.5, §4B, §8C).
+func (e *Engine) awardBuzzWinner(p *Player, arrivalMs int64) {
 	e.buzzWinner = p.ID
 	e.pausedAtMs = nowMs() - e.trackStartMs
 	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{
@@ -853,7 +1065,7 @@ func (e *Engine) gradeCorrect(winner *Player, elapsed int64) {
 	e.lock.Release(context.Background(), e.roundKey)
 	e.bcast.Broadcast(protocol.RoleAdmin, e.adminViewEnvelope())
 
-	e.curTrack.Played = true // consume this track from the pool (§7)
+	e.consumeTrack() // consume this track from the pool (§7)
 
 	if e.curCell.DailyDouble {
 		e.enterDailyDouble(winner)
@@ -888,7 +1100,7 @@ func (e *Engine) gradePartial(winner *Player, elapsed int64, kind string) {
 		e.buzzWinner = ""
 		e.lock.Release(context.Background(), e.roundKey)
 		e.bcast.Broadcast(protocol.RoleAdmin, e.adminViewEnvelope())
-		e.curTrack.Played = true
+		e.consumeTrack()
 		e.enterKaraoke()
 		return
 	}
@@ -988,9 +1200,7 @@ func (e *Engine) award(p *Player, pts int) {
 // adminReveal is the admin force-revealing the answer mid-round. It enters
 // karaoke (shows answer + lyrics, disables guessing) without awarding points.
 func (e *Engine) adminReveal() {
-	if e.curTrack != nil {
-		e.curTrack.Played = true
-	}
+	e.consumeTrack()
 	e.buzzWinner = ""
 	e.lock.Release(context.Background(), e.roundKey)
 	e.enterKaraoke()
@@ -1296,6 +1506,21 @@ func (e *Engine) onRate(connID string, env protocol.ClientEnvelope) {
 	e.ratings[p.ID] = d.Stars
 
 	// Once every eligible rater has voted, average + apply the bonus (§7).
+	e.checkDailyDoubleComplete()
+}
+
+// checkDailyDoubleComplete finishes the daily double once every eligible rater
+// has voted. Called on each rating AND whenever the rating pool shrinks (a rater
+// disconnected/kicked), so a departing rater can't deadlock the phase. If the
+// pool is empty it skips straight to karaoke (mirrors enterDailyDouble).
+func (e *Engine) checkDailyDoubleComplete() {
+	if e.state != protocol.StateDailyDouble {
+		return
+	}
+	if len(e.ratingPool) == 0 {
+		e.enterKaraoke()
+		return
+	}
 	if len(e.ratings) >= len(e.ratingPool) {
 		e.finishDailyDouble()
 	}
@@ -1350,8 +1575,17 @@ func (e *Engine) onAdminAward(connID string, env protocol.ClientEnvelope) {
 		e.sendError(connID, "badAward", err.Error())
 		return
 	}
+	if d.Delta < -1000 {
+		d.Delta = -1000
+	}
+	if d.Delta > 1000 {
+		d.Delta = 1000
+	}
 	if p := e.reg.players[d.PlayerID]; p != nil {
 		p.Score += d.Delta
+		if p.Score < 0 {
+			p.Score = 0
+		}
 		_ = e.repo.SaveScore(context.Background(), e.cfg.SessionID, p.ID, p.Handle, p.Score)
 		e.broadcastScoreboard()
 	}
@@ -1373,11 +1607,15 @@ func (e *Engine) onAdminKick(connID string, env protocol.ClientEnvelope) {
 	p.Active = false
 	delete(e.votingPool, p.ID)
 	delete(e.ratingPool, p.ID)
+	delete(e.ratings, p.ID) // keep ratings in sync with pool (§3.8)
 	for _, cid := range e.reg.connIDs(p.ID) {
 		e.bcast.SendTo(cid, e.envelope(protocol.SMsgError, protocol.ErrorData{Code: "kicked", Message: "removed by admin"}))
 	}
 	if e.state == protocol.StateKaraoke {
 		e.evaluateSkipVotes()
+	}
+	if e.state == protocol.StateDailyDouble {
+		e.checkDailyDoubleComplete()
 	}
 }
 
@@ -1460,9 +1698,7 @@ func (e *Engine) onAdminSetRevealCfg(connID string, env protocol.ClientEnvelope)
 
 // endRound force-ends the current round and returns to the board (§3.10).
 func (e *Engine) endRound() {
-	if e.curTrack != nil {
-		e.curTrack.Played = true
-	}
+	e.consumeTrack()
 	e.lock.Release(context.Background(), e.roundKey)
 	_ = e.audio.Pause(context.Background())
 	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{Action: "pause"}))
@@ -1470,6 +1706,8 @@ func (e *Engine) endRound() {
 	e.curTrack = nil
 	e.curCell = nil
 	e.buzzWinner = ""
+	e.buzzWindowOpen = false
+	e.buzzContenders = nil
 	e.partial = pendingPartial{}
 	e.transitionTo(protocol.StateBoard)
 	e.broadcastBoard()
@@ -1744,9 +1982,7 @@ func (e *Engine) scheduleAutoKaraoke(rk string) {
 			// Only auto-advance from the live-round states; if an admin already
 			// graded/revealed/ended, do nothing.
 			if e.state == protocol.StateRoundActive || e.state == protocol.StateLocked {
-				if e.curTrack != nil {
-					e.curTrack.Played = true
-				}
+				e.consumeTrack()
 				e.buzzWinner = ""
 				e.lock.Release(context.Background(), e.roundKey)
 				e.enterKaraoke()

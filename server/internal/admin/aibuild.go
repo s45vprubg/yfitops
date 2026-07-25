@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"log"
 	"net/http"
+	"strings"
 )
 
 // aiBuild uses the AI categorizer to lay out a board from its track library:
@@ -28,7 +30,8 @@ func (h *Handler) aiBuild(w http.ResponseWriter, r *http.Request) {
 
 	tracks, err := h.store.ListTracks(r.Context(), boardID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Printf("admin: aiBuild list tracks board=%s: %v", boardID, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 	if len(tracks) == 0 {
@@ -46,7 +49,10 @@ func (h *Handler) aiBuild(w http.ResponseWriter, r *http.Request) {
 
 	proposal, err := h.ai.BuildCategories(r.Context(), in, rows, cols)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		// The upstream error can contain sensitive detail (e.g. request URLs);
+		// log it server-side and return a generic message to the client.
+		log.Printf("admin: aiBuild categorize board=%s: %v", boardID, err)
+		http.Error(w, "AI build failed", http.StatusBadGateway)
 		return
 	}
 
@@ -57,39 +63,33 @@ func (h *Handler) aiBuild(w http.ResponseWriter, r *http.Request) {
 	}
 	placed := map[string]bool{}
 
-	// Clear the existing layout so we start clean (remove all current columns).
-	if layout, lerr := h.store.GetLayout(r.Context(), boardID); lerr == nil && layout != nil {
-		seen := map[int]bool{}
-		for _, c := range layout.Cells {
-			if !seen[c.Col] {
-				seen[c.Col] = true
-				_ = h.store.RemoveColumn(r.Context(), boardID, c.Col)
-			}
-		}
-	}
-
-	_ = h.store.UpdateBoardCols(r.Context(), boardID, len(cats))
-
+	// Build the new layout in memory (applying the same row/byID/placed/dup
+	// guards that previously gated PlaceTrack), then swap it in atomically so a
+	// failure can't leave a corrupt half-built board.
+	columns := make([]LayoutColumn, 0, len(cats))
 	applied := 0
 	for ci, cat := range cats {
 		col := ci + 1
-		if err := h.store.AddColumn(r.Context(), boardID, col, cat.Name); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		lc := LayoutColumn{Category: sanitizeCategory(cat.Name)}
 		row := 1
 		for _, tid := range cat.TrackIDs {
 			if row > rows || !byID[tid] || placed[tid] {
 				continue // full column, unknown id, or already placed elsewhere
 			}
-			if err := h.store.PlaceTrack(r.Context(), boardID, row, col, tid, row-1); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
+			lc.Placements = append(lc.Placements, LayoutPlacement{
+				Row: row, Col: col, TrackID: tid, Pos: row - 1,
+			})
 			placed[tid] = true
 			applied++
 			row++
 		}
+		columns = append(columns, lc)
+	}
+
+	if err := h.store.RebuildLayout(r.Context(), boardID, len(cats), columns); err != nil {
+		log.Printf("admin: aiBuild rebuild layout board=%s: %v", boardID, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]int{
@@ -97,6 +97,22 @@ func (h *Handler) aiBuild(w http.ResponseWriter, r *http.Request) {
 		"placed":     applied,
 		"total":      len(tracks),
 	})
+}
+
+// sanitizeCategory caps a proposed (AI-generated, attacker-influenceable)
+// category name to 100 chars and strips control characters, matching the
+// addColumn HTTP handler's 100-char cap.
+func sanitizeCategory(name string) string {
+	name = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, name)
+	if r := []rune(name); len(r) > 100 {
+		name = string(r[:100])
+	}
+	return name
 }
 
 // atoiClamp parses a small positive int within [lo,hi]; returns 0 on failure.

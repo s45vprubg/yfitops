@@ -53,6 +53,9 @@ export interface GameView {
 }
 
 const HEARTBEAT_MS = 2000;
+// Auto-reconnect backoff: doubles from base up to the cap (§3.2 resume).
+const RECONNECT_BASE_MS = 500;
+const RECONNECT_MAX_MS = 8000;
 
 const INITIAL: GameView = {
   conn: "idle",
@@ -78,6 +81,17 @@ export function useGame() {
   const pendingPing = useRef<number | null>(null);
   // True between sending a buzz and receiving the buzzResult response.
   const awaitingBuzzResult = useRef(false);
+  // Reconnect bookkeeping (§3.2 resume). We keep the handle + deviceFP stable
+  // across drops so the server re-attaches this device to its saved score.
+  const unmountedRef = useRef(false);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const handleRef = useRef<string>("");
+  // Holds the latest establish() so scheduleReconnect can call it without a
+  // useCallback dependency cycle (establish -> handleDisconnect -> schedule).
+  const establishRef = useRef<
+    (handle: string, isReconnect: boolean) => void
+  >(() => {});
 
   const patch = useCallback((p: Partial<GameView>) => {
     setView((v) => ({ ...v, ...p }));
@@ -85,13 +99,32 @@ export function useGame() {
 
   const lastRtt = useRef<number>(0);
 
-  const sendHeartbeat = useCallback(() => {
+  const sendHeartbeat = useCallback(async () => {
     const c = clientRef.current;
     if (!c) return;
     const clientTime = Date.now();
     pendingPing.current = clientTime;
-    void c.send({ t: "heartbeat", d: { clientTime, rttMs: lastRtt.current } });
+    // Awaited/caught so a write on a dead stream doesn't become an unhandled
+    // rejection every HEARTBEAT_MS; onState(false) will tear the interval down.
+    try {
+      await c.send({ t: "heartbeat", d: { clientTime, rttMs: lastRtt.current } });
+    } catch {
+      /* stream is gone; disconnect handler will clean up */
+    }
   }, []);
+
+  const stopHeartbeat = useCallback(() => {
+    if (heartbeatRef.current) {
+      clearInterval(heartbeatRef.current);
+      heartbeatRef.current = null;
+    }
+  }, []);
+
+  const startHeartbeat = useCallback(() => {
+    stopHeartbeat();
+    void sendHeartbeat();
+    heartbeatRef.current = setInterval(() => void sendHeartbeat(), HEARTBEAT_MS);
+  }, [sendHeartbeat, stopHeartbeat]);
 
   const wireHandlers = useCallback(
     (c: GameClient) => {
@@ -123,6 +156,9 @@ export function useGame() {
               next.wonBuzzThisRound = false;
               next.lockedBy = null;
               next.lastVerdict = null;
+              // A stale buzzResult from a prior round must not spuriously flip
+              // buzzedAndLost now (uimobile-5).
+              awaitingBuzzResult.current = false;
             }
           }
           if (d.state === "BOARD" || d.state === "LOBBY" || d.state === "TRANSITION") {
@@ -183,9 +219,14 @@ export function useGame() {
       c.on("heartbeat", () => {
         if (pendingPing.current != null) {
           const rtt = Date.now() - pendingPing.current;
-          lastRtt.current = rtt;
-          patch({ rttMs: rtt });
           pendingPing.current = null;
+          // Ignore an echo that arrives after a stall/recover — the elapsed
+          // time reflects the gap, not the link RTT, and would be fed back to
+          // the server (§4B) as a bogus latency sample.
+          if (rtt <= HEARTBEAT_MS * 5) {
+            lastRtt.current = rtt;
+            patch({ rttMs: rtt });
+          }
         }
       });
 
@@ -197,23 +238,72 @@ export function useGame() {
     [patch],
   );
 
-  const connect = useCallback(
-    async (handle: string) => {
+  // Schedule a reconnect attempt with capped exponential backoff. Guards
+  // against overlapping schedules and against firing after unmount.
+  const scheduleReconnect = useCallback(() => {
+    if (unmountedRef.current) return;
+    if (reconnectTimerRef.current) return;
+    const attempt = reconnectAttemptRef.current;
+    const delay = Math.min(RECONNECT_BASE_MS * 2 ** attempt, RECONNECT_MAX_MS);
+    reconnectAttemptRef.current = attempt + 1;
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null;
+      if (unmountedRef.current || clientRef.current) return;
+      establishRef.current(handleRef.current, true);
+    }, delay);
+  }, []);
+
+  // Runs when the transport drops on its own (GameClient onState(false)) — NOT
+  // on our own close(), which sets client.closed and suppresses this callback.
+  // Tears down the dead client so a fresh connect() can proceed (uimobile-1),
+  // stops the heartbeat so it can't write to a dead stream (uimobile-2), and
+  // clears the RTT/buzz latches that would otherwise go stale (uimobile-5/6).
+  const handleDisconnect = useCallback(() => {
+    stopHeartbeat();
+    pendingPing.current = null;
+    awaitingBuzzResult.current = false;
+    // Close the dead client before dropping the ref so its own handleClose can't
+    // fire another onState(false) later (close() sets client.closed) — otherwise
+    // a lingering QUIC session leaks and churns reconnects (s2-ui-02).
+    const prev = clientRef.current;
+    clientRef.current = null;
+    void prev?.close();
+    if (unmountedRef.current) return;
+    patch({ conn: "disconnected" });
+    scheduleReconnect();
+  }, [patch, scheduleReconnect, stopHeartbeat]);
+
+  const establish = useCallback(
+    async (handle: string, isReconnect: boolean) => {
       if (clientRef.current) return;
+      handleRef.current = handle;
       patch({ conn: "connecting", error: null });
       saveHandle(handle);
 
-      const serverCertHashes = await fetchCertHashes();
-      const client = new GameClient({
-        url: WT_URL,
-        serverCertHashes,
-        onState: (connected) =>
-          patch({ conn: connected ? "connected" : "disconnected" }),
-      });
-      clientRef.current = client;
-      wireHandlers(client);
-
+      let client: GameClient;
       try {
+        const serverCertHashes = await fetchCertHashes();
+        client = new GameClient({
+          url: WT_URL,
+          serverCertHashes,
+          onState: (connected) => {
+            // Ignore state events from a superseded client (s2-ui-02): a stale
+            // client's late onState(false) must not disconnect a healthy newer
+            // one. close() sets client.closed so the intended path stays quiet.
+            if (client !== clientRef.current) return;
+            if (connected) {
+              reconnectAttemptRef.current = 0;
+              patch({ conn: "connected" });
+            } else {
+              handleDisconnect();
+            }
+          },
+        });
+        // establish() early-returns if clientRef.current is set, so the old
+        // client is always torn down (and close()d) by handleDisconnect before
+        // we get here — no previous client to close on this path (s2-ui-02).
+        clientRef.current = client;
+        wireHandlers(client);
         await client.connect();
       } catch (e) {
         patch({
@@ -221,18 +311,47 @@ export function useGame() {
           error: e instanceof Error ? e.message : "Connection failed",
         });
         clientRef.current = null;
+        // Keep trying — a mid-game drop must not permanently wedge the player.
+        scheduleReconnect();
         return;
       }
 
-      await client.send<HelloData>({
-        t: "hello",
-        d: { role: "mobile", handle, deviceFP: getDeviceFP() },
-      });
-
-      sendHeartbeat();
-      heartbeatRef.current = setInterval(sendHeartbeat, HEARTBEAT_MS);
+      // Re-attach with the SAME deviceFP + saved handle so the server resumes
+      // this device's score (§3.2), then ask for a fresh state snapshot.
+      // Guarded (s2-ui-03): a write-side reject here must not become an
+      // unhandled rejection that strands clientRef non-null with no heartbeat
+      // and no reconnect — mirror the connect() catch.
+      try {
+        await client.send<HelloData>({
+          t: "hello",
+          d: { role: "mobile", handle, deviceFP: getDeviceFP() },
+        });
+        if (isReconnect) {
+          await client.send({ t: "resync" });
+        }
+        startHeartbeat();
+      } catch (e) {
+        patch({
+          conn: "disconnected",
+          error: e instanceof Error ? e.message : "Connection failed",
+        });
+        clientRef.current = null;
+        void client.close();
+        scheduleReconnect();
+        return;
+      }
     },
-    [patch, sendHeartbeat, wireHandlers],
+    [handleDisconnect, patch, scheduleReconnect, startHeartbeat, wireHandlers],
+  );
+
+  useEffect(() => {
+    establishRef.current = (handle, isReconnect) =>
+      void establish(handle, isReconnect);
+  }, [establish]);
+
+  const connect = useCallback(
+    (handle: string) => void establish(handle, false),
+    [establish],
   );
 
   const buzz = useCallback(() => {
@@ -256,6 +375,8 @@ export function useGame() {
 
   useEffect(() => {
     return () => {
+      unmountedRef.current = true;
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (heartbeatRef.current) clearInterval(heartbeatRef.current);
       void clientRef.current?.close();
     };

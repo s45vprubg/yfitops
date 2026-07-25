@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -85,78 +86,31 @@ func (r *PostgresRepo) LogEvent(ctx context.Context, sessionID, kind string, det
 	return nil
 }
 
-// LoadBoard reconstructs the Board/Cell/Track grid for a session from
-// board_cells + board_cell_tracks + tracks (§7). Dimensions are derived from
-// the max row/col present.
+// LoadBoard reconstructs the Board/Cell/Track grid for a session by resolving
+// the persisted game_sessions.board_id link and loading that board from the
+// 0002 layout tables (board_layout_cells + board_layout_cell_tracks +
+// board_tracks) via LoadBoardByID. The older 0001 board_cells tables are never
+// populated, so the link is the only durable source of a session's board.
+//
+// If the session has no board attached (board_id null/empty), it returns the
+// same "no board for session" error as before so engine.Run boots boardless.
 func (r *PostgresRepo) LoadBoard(ctx context.Context, sessionID string) (*game.Board, error) {
-	rows, err := r.pool.Query(ctx,
-		`SELECT bc.row, bc.col, bc.category, bc.daily_double,
-		        t.id, t.spotify_uri, t.artist, t.song, t.album_art, t.duration_ms,
-		        bct.played, bct.pos
-		   FROM board_cells bc
-		   LEFT JOIN board_cell_tracks bct
-		     ON bct.session_id = bc.session_id AND bct.row = bc.row AND bct.col = bc.col
-		   LEFT JOIN tracks t ON t.id = bct.track_id
-		  WHERE bc.session_id = $1
-		  ORDER BY bc.row, bc.col, bct.pos`,
-		sessionID)
+	var boardID *string
+	err := r.pool.QueryRow(ctx,
+		`SELECT board_id FROM game_sessions WHERE id = $1`, sessionID).
+		Scan(&boardID)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("store: no board for session %s", sessionID)
+		}
 		return nil, fmt.Errorf("store: load board %s: %w", sessionID, err)
 	}
-	defer rows.Close()
-
-	cells := map[cellCoord]*game.Cell{}
-	maxRow, maxCol := 0, 0
-
-	for rows.Next() {
-		var (
-			row, col    int
-			category    string
-			dailyDouble bool
-			// track columns are nullable (LEFT JOIN may yield a cell with no
-			// tracks), so scan into pointers.
-			tID, tURI, tArtist, tSong, tArt *string
-			tDuration                       *int64
-			played                          *bool
-			pos                             *int
-		)
-		if err := rows.Scan(&row, &col, &category, &dailyDouble,
-			&tID, &tURI, &tArtist, &tSong, &tArt, &tDuration, &played, &pos); err != nil {
-			return nil, fmt.Errorf("store: scan board row: %w", err)
-		}
-		if row > maxRow {
-			maxRow = row
-		}
-		if col > maxCol {
-			maxCol = col
-		}
-		c := cellCoord{row, col}
-		cell := cells[c]
-		if cell == nil {
-			cell = &game.Cell{Row: row, Col: col, Category: category, DailyDouble: dailyDouble}
-			cells[c] = cell
-		}
-		if tID != nil {
-			cell.Tracks = append(cell.Tracks, &game.Track{
-				ID:         deref(tID),
-				SpotifyURI: deref(tURI),
-				Artist:     deref(tArtist),
-				Song:       deref(tSong),
-				AlbumArt:   deref(tArt),
-				DurationMs: derefInt64(tDuration),
-				Played:     played != nil && *played,
-			})
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: iterate board rows: %w", err)
-	}
-	if len(cells) == 0 {
+	if boardID == nil || *boardID == "" {
 		return nil, fmt.Errorf("store: no board for session %s", sessionID)
 	}
-
-	board := newGridFromCells(cells, maxRow, maxCol)
-	return board, nil
+	// Reuse the 0002-layout loader so the *game.Board shape matches exactly what
+	// the live attach handler produces.
+	return r.LoadBoardByID(ctx, *boardID)
 }
 
 // Leaderboard returns the top historical scores across all sessions (§11).

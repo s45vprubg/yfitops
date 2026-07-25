@@ -1,0 +1,14 @@
+[
+  {
+    "id": "s3-fe-01",
+    "file": "server/internal/game/engine.go",
+    "line": 651,
+    "category": "anticheat / buzz-fairness (§4B/§4C)",
+    "severity": "high",
+    "confidence": "high",
+    "summary": "onHeartbeat trusts a CLIENT-SUPPLIED rttMs and feeds it verbatim into the buzz-ordering EffectiveBuzzTime. The §4C 50ms cap holds, but the RTT value itself is attacker-controlled, so a hostile mobile client that reports rttMs>=100 always earns the maximum 50ms deduction on its server-arrival time — a deterministic head start in every contested buzz.",
+    "code": "var hb struct {\n\tClientTime int64 `json:\"clientTime\"`\n\tRTTMs      int   `json:\"rttMs,omitempty\"`\n}\n_ = json.Unmarshal(env.Data, &hb)\n...\nif hb.RTTMs > 0 {\n\tif p.RTTMs == 0 { p.RTTMs = hb.RTTMs } else { p.RTTMs = (p.RTTMs*3 + hb.RTTMs) / 4 }\n}\n// ...later, onBuzz line 853:\neff := anticheat.EffectiveBuzzTime(arrivalMs, p.RTTMs)",
+    "scenario": "1. Hostile mobile sends heartbeat frames with a forged {rttMs: 100} (or any value >=100) every ~2s. 2. Server stores p.RTTMs -> converges to 100. 3. On buzz, EffectiveBuzzTime(arrivalMs, 100) = arrivalMs - 50. 4. An honest low-latency player on the same LAN reports its true rttMs (e.g. 5), getting only arrivalMs - 2. 5. Within the 40ms buzz-collection window (resolveBuzzWindow orders by min effectiveMs), the cheater's effective time is ~48ms earlier than the honest player's, so the cheater wins essentially every close buzz despite buzzing at the same wall-clock instant. The server never independently measures RTT (it echoes serverTime but never uses ClientTime), so the client fully controls the only latency input to buzz ordering. This is precisely the '§4C forged high RTT must NOT buy advantage' invariant (ADVERSARIAL_REVIEW_HANDOFF.md line 29): the cap bounds the magnitude but the sign is backwards — a HIGHER reported RTT yields an EARLIER effective time, so inflating RTT is rewarded, not neutralized.",
+    "suggested_fix": "Do not accept rttMs from the client. Measure RTT server-side: stamp send time when emitting SMsgHeartbeat (already returns serverTime), and on the next inbound heartbeat compute RTT = serverArrival - lastServerSendEcho using a server-held timestamp keyed per connection (the client echoing back the serverTime it last saw is fine as an opaque token, but the delta must be computed from server clocks). Then EffectiveBuzzTime consumes a server-measured RTT that a client cannot inflate. At minimum, ignore the hb.RTTMs field entirely for the ordering path and derive RTTMs from the ClientTime/serverTime round trip the server controls."
+  }
+]

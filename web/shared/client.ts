@@ -8,6 +8,11 @@
 //
 // The server mirrors this framing in internal/transport.
 
+// MAX_FRAME_LEN mirrors the server's maxFrameLen (internal/transport/framing.go,
+// 1<<20). Frames larger than this are a protocol violation and are refused
+// rather than buffered (see readLoop).
+const MAX_FRAME_LEN = 1 << 20;
+
 import type { ClientEnvelope, ServerEnvelope, ServerMsgType } from "./protocol";
 
 type Handler = (env: ServerEnvelope) => void;
@@ -109,6 +114,16 @@ export class GameClient {
       for (;;) {
         if (buf.length < 4) break;
         const len = new DataView(buf.buffer, buf.byteOffset, 4).getUint32(0, false);
+        // CONTRACT-QUESTION (QA sweep uiadmin-2): mirror the server's 1 MiB
+        // maxFrameLen (internal/transport/framing.go). Without this cap a corrupt
+        // or hostile 4-byte prefix (e.g. 0xFFFFFFFF) makes the client buffer up to
+        // ~4 GiB before dispatch — an unbounded-memory hang. A frame over the cap
+        // is a protocol violation; tear the stream down rather than buffer it.
+        if (len > MAX_FRAME_LEN) {
+          reader.cancel("frame too large").catch(() => {});
+          this.handleClose();
+          return;
+        }
         if (buf.length < 4 + len) break;
         const body = buf.subarray(4, 4 + len);
         buf = buf.subarray(4 + len);

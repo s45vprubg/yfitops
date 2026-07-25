@@ -37,6 +37,26 @@ import (
 
 func main() {
 	cfg := config.Load()
+
+	// Production guard: refuse to boot with known dev-default secrets when
+	// YFI_ENV=prod. config.go is a locked contract file, so this gate lives at
+	// the caller. It must NOT fire in dev (YFI_ENV != "prod").
+	if os.Getenv("YFI_ENV") == "prod" {
+		var defaulted []string
+		if cfg.AdminSecret == "changeme-admin" {
+			defaulted = append(defaulted, "ADMIN_SECRET")
+		}
+		if cfg.NonceSecret == "dev-nonce-secret" {
+			defaulted = append(defaulted, "YFI_NONCE_SECRET")
+		}
+		if cfg.JoinSecret == "dev-join-secret" {
+			defaulted = append(defaulted, "YFI_JOIN_SECRET")
+		}
+		if len(defaulted) > 0 {
+			log.Fatalf("config: refusing to start in prod with dev-default secret(s): %s — set a non-default value", strings.Join(defaulted, ", "))
+		}
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -160,6 +180,9 @@ func main() {
 			MaxAge:   600, // 10 minutes to complete the dance
 			HttpOnly: true,
 			SameSite: http.SameSiteLaxMode,
+			// Secure only over https — a Secure cookie is dropped by browsers on
+			// plaintext http, which would break the local-dev OAuth dance.
+			Secure: strings.HasPrefix(cfg.SpotifyRedirectURI, "https"),
 		})
 		http.Redirect(w, r, audio.AuthURL(state), http.StatusFound)
 	})

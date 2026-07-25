@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
 )
@@ -9,7 +11,7 @@ func (h *Handler) getLayout(w http.ResponseWriter, r *http.Request) {
 	boardID := r.PathValue("id")
 	layout, err := h.store.GetLayout(r.Context(), boardID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	if layout == nil {
@@ -25,7 +27,7 @@ func (h *Handler) addColumn(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Category string `json:"category"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
+	if err := decodeJSON(w, r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -40,7 +42,7 @@ func (h *Handler) addColumn(w http.ResponseWriter, r *http.Request) {
 
 	board, err := h.store.GetBoard(r.Context(), boardID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	if board == nil {
@@ -54,11 +56,11 @@ func (h *Handler) addColumn(w http.ResponseWriter, r *http.Request) {
 
 	newCol := board.Cols + 1
 	if err := h.store.AddColumn(r.Context(), boardID, newCol, body.Category); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	if err := h.store.UpdateBoardCols(r.Context(), boardID, newCol); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 
@@ -75,7 +77,7 @@ func (h *Handler) removeColumn(w http.ResponseWriter, r *http.Request) {
 
 	board, err := h.store.GetBoard(r.Context(), boardID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	if board == nil {
@@ -88,11 +90,11 @@ func (h *Handler) removeColumn(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.store.RemoveColumn(r.Context(), boardID, col); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	if err := h.store.UpdateBoardCols(r.Context(), boardID, board.Cols-1); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 
@@ -110,7 +112,7 @@ func (h *Handler) renameCategory(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Category string `json:"category"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
+	if err := decodeJSON(w, r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -118,9 +120,13 @@ func (h *Handler) renameCategory(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "category is required", http.StatusBadRequest)
 		return
 	}
+	if len(body.Category) > 100 {
+		http.Error(w, "category too long (max 100)", http.StatusBadRequest)
+		return
+	}
 
 	if err := h.store.RenameCategory(r.Context(), boardID, col, body.Category); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -143,12 +149,20 @@ func (h *Handler) placeTrack(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Pos int `json:"pos"`
 	}
-	if r.ContentLength > 0 {
-		_ = decodeJSON(r, &body)
+	// Decode unconditionally: gating on ContentLength drops a chunked body
+	// (ContentLength == -1), silently forcing pos to 0. An empty body yields
+	// io.EOF, which we treat as "no override, pos stays 0".
+	if err := decodeJSON(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if body.Pos < 0 || body.Pos > 4 {
+		http.Error(w, "pos must be 0-4", http.StatusBadRequest)
+		return
 	}
 
 	if err := h.store.PlaceTrack(r.Context(), boardID, row, col, trackID, body.Pos); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -169,7 +183,7 @@ func (h *Handler) unplaceTrack(w http.ResponseWriter, r *http.Request) {
 	trackID := r.PathValue("trackId")
 
 	if err := h.store.UnplaceTrack(r.Context(), boardID, row, col, trackID); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		serverError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -181,7 +195,7 @@ func (h *Handler) attachBoard(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		SessionID string `json:"sessionId"`
 	}
-	if err := decodeJSON(r, &body); err != nil {
+	if err := decodeJSON(w, r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
@@ -190,14 +204,16 @@ func (h *Handler) attachBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.AttachBoard(r.Context(), body.SessionID, boardID); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	// Load the board first: a load failure must not leave persistent state
+	// (session.board_id) pointing at a board the live engine never picked up.
+	board, err := h.store.LoadBoardByID(r.Context(), boardID)
+	if err != nil {
+		serverError(w, err)
 		return
 	}
 
-	board, err := h.store.LoadBoardByID(r.Context(), boardID)
-	if err != nil {
-		http.Error(w, "attached but failed to load: "+err.Error(), http.StatusInternalServerError)
+	if err := h.store.AttachBoard(r.Context(), body.SessionID, boardID); err != nil {
+		serverError(w, err)
 		return
 	}
 

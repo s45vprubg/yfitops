@@ -9,18 +9,27 @@ export default function Board({ board }: { board: BoardData | null }) {
   }
 
   const { rows, cols, cells } = board;
+  // Clamp dimensions before they drive Array.from({length}) — a corrupt frame
+  // with huge rows/cols is a synchronous OOM the ErrorBoundary can't catch.
+  // A real board is at most 5 rows and the admin caps columns at 8, so 12
+  // comfortably exceeds anything legitimate.
+  const MAX_DIM = 12;
+  const r = Math.min(Math.max(Math.floor(rows) || 0, 0), MAX_DIM);
+  const c = Math.min(Math.max(Math.floor(cols) || 0, 0), MAX_DIM);
   const byKey = new Map<string, BoardCell>();
-  for (const c of cells) byKey.set(`${c.row}:${c.col}`, c);
+  // Guard against a malformed frame (missing/non-array cells) white-screening
+  // the projector — iterate defensively.
+  for (const cell of cells ?? []) byKey.set(`${cell.row}:${cell.col}`, cell);
 
   // Categories: take the category string from the first cell in each column.
   // Columns are 1-indexed from the server.
   const categories: string[] = [];
-  for (let col = 1; col <= cols; col++) {
+  for (let col = 1; col <= c; col++) {
     let cat = "";
-    for (let r = 1; r <= rows; r++) {
-      const c = byKey.get(`${r}:${col}`);
-      if (c?.category) {
-        cat = c.category;
+    for (let row = 1; row <= r; row++) {
+      const cell = byKey.get(`${row}:${col}`);
+      if (cell?.category) {
+        cat = cell.category;
         break;
       }
     }
@@ -32,7 +41,7 @@ export default function Board({ board }: { board: BoardData | null }) {
       <h2 className="mb-6 text-center text-3xl font-bold uppercase tracking-[0.4em] text-neon-cyan neon-cyan">
         select a track
       </h2>
-      <div className="grid flex-1 gap-3" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+      <div className="grid flex-1 gap-3" style={{ gridTemplateColumns: `repeat(${c}, minmax(0, 1fr))` }}>
         {categories.map((cat, col) => (
           <div
             key={`cat-${col}`}
@@ -42,9 +51,9 @@ export default function Board({ board }: { board: BoardData | null }) {
           </div>
         ))}
 
-        {Array.from({ length: rows }).map((_, rIdx) => {
+        {Array.from({ length: r }).map((_, rIdx) => {
           const row = rIdx + 1;
-          return Array.from({ length: cols }).map((__, cIdx) => {
+          return Array.from({ length: c }).map((__, cIdx) => {
             const col = cIdx + 1;
             const cell = byKey.get(`${row}:${col}`);
             const exhausted = cell?.exhausted ?? false;

@@ -1,0 +1,41 @@
+[
+  {
+    "id": "transport-1",
+    "surface": "transport",
+    "file": "server/internal/transport/hub.go",
+    "line": 144,
+    "category": "dos",
+    "severity": "medium",
+    "confidence": "high",
+    "summary": "enqueue's 'drop the connection' on full send queue only stops the WRITER goroutine; the read loop, the stream, and the hub map entry all survive, leaving a zombie connection that still processes inbound frames.",
+    "code": "func (c *conn) enqueue(env protocol.ServerEnvelope) {\n\tselect {\n\tcase <-c.closed:\n\t\treturn\n\tcase c.out <- env:\n\tdefault:\n\t\tlog.Printf(\"transport: send queue full for conn %s; dropping connection\", c.id)\n\t\tc.stop()\n\t}\n}\n// stop() only does: c.once.Do(func() { close(c.closed) }) -- it never closes the stream or removes the conn.",
+    "scenario": "A hostile mobile client opens a conn and deliberately never reads its own outbound stream. After 64 frames the buffer fills; the next enqueue logs 'dropping connection' and calls stop(), which only kills the writer. But serveStream's read loop is still blocked in fr.ReadFrame() with no signal from c.closed, so it keeps calling handler.OnMessage: the ghost can still spam buzz frames (winning the lock and stalling rounds it never answers), still counts in telemetry/scoreboard/vote pools, and its conn entry + stream + read goroutine leak until the attacker chooses to close the socket. OnDisconnect never fires. Nothing about the connection is actually 'dropped' except its output.",
+    "suggested_fix": "Make the drop tear down the whole connection, not just the writer. Give conn a closer for the underlying stream (the io.ReadWriteCloser held in serveStream) and have stop()/enqueue close it, which unblocks fr.ReadFrame() -> serveStream returns -> OnDisconnect + hub.remove run. Alternatively have the hub call a registered teardown callback that closes the stream on drop."
+  },
+  {
+    "id": "transport-2",
+    "surface": "transport",
+    "file": "server/internal/transport/server.go",
+    "line": 60,
+    "category": "dos",
+    "severity": "medium",
+    "confidence": "medium",
+    "summary": "QUICConfig sets no MaxIdleTimeout and there is no application-level cap on concurrent sessions or streams; a hacker-conference attacker can flood QUIC sessions to exhaust goroutines/memory.",
+    "code": "QUICConfig: &quic.Config{\n\tEnableDatagrams:                  true,\n\tEnableStreamResetPartialDelivery: true,\n},\n// no MaxIdleTimeout, no MaxIncomingStreams, no global/per-IP session or connection limit anywhere in the transport.",
+    "scenario": "A local attacker scripts thousands of WebTransport CONNECTs. Each accepted session runs handleSession + AcceptStream + serveStream (2+ goroutines, a frameReader with up to ~1MiB buf, a conn with a 64-deep channel). There is no ceiling: memory and goroutine count grow with attacker connections. handleSession also blocks in AcceptStream for any session that upgrades but never opens a control stream, relying solely on quic-go's default idle timeout (~30s) since none is configured. No per-IP throttle exists to blunt a flood.",
+    "suggested_fix": "Set an explicit quic.Config.MaxIdleTimeout (e.g. 30s) and MaxIncomingStreams=1 (only the single control stream is expected), and enforce a global and/or per-IP connection cap in handleSession (reject with CloseWithError once exceeded). Add a read/accept deadline so a session that never opens its control stream is reaped quickly."
+  },
+  {
+    "id": "transport-3",
+    "surface": "transport",
+    "file": "server/internal/anticheat/nonce.go",
+    "line": 55,
+    "category": "crypto",
+    "severity": "low",
+    "confidence": "high",
+    "summary": "LOCKED FILE. The HMAC Token() the §4D contract claims is 'what is actually transmitted to clients so the raw counter is never exposed' is dead code — it is never called in production; the engine transmits the raw counter and Validate() compares the raw counter, so the 'unforgeable/unpredictable' property is unmet.",
+    "code": "// Token returns the opaque HMAC-bound token ... This is what is actually\n// transmitted to clients so the raw counter is never exposed and cannot be\n// predicted/forged for a future transition.\nfunc (g *NonceGate) Token() string { ... }\n// Reality: grep shows Token() has ZERO non-test callers. engine.go sends\n// gate.Current() (the raw uint64) in WelcomeData.Nonce and every\n// ServerEnvelope.Nonce, and onBuzz/onVote/onRate call gate.Validate(env.Nonce)\n// against the raw counter.",
+    "scenario": "The counter is a monotonic +1 value broadcast in cleartext in every server envelope, so a client trivially knows and can predict any future nonce value — directly contradicting the contract comment. In practice the replay protection still holds (Validate requires exact equality with the current counter, and a captured/stale buzz is dropped after the next Bump), so this is a documentation/contract-integrity deviation rather than an exploitable replay hole. The sign() HMAC-SHA256 + hex encoding itself is correct. Flagged low because the advertised cryptographic guarantee does not exist and the token API is unwired dead code. This file is a LOCKED contract; the wiring fix belongs in the caller, not here.",
+    "suggested_fix": "Either wire the token: have the engine transmit gate.Token() (not the raw counter) and add a NonceGate.ValidateToken(tok string) that recomputes sign(secret, counter) and compares with hmac.Equal — so clients echo the opaque token as §4D specifies. Or, if the raw-counter scheme is accepted as sufficient, correct the nonce.go doc comment and remove the unused Token()/sign() to avoid a false security claim. (Requires a contract owner sign-off since nonce.go is locked.)"
+  }
+]

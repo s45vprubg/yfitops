@@ -1,0 +1,173 @@
+[
+  {
+    "id": "engine-1",
+    "verdict": "CONFIRMED",
+    "real_severity": "high",
+    "evidence": "dispatch (engine.go:445-484) gates only admin.* types behind `if role != protocol.RoleAdmin` (461-475). The two stage.* cases fall THROUGH that gate: `case protocol.CMsgStagePlayerState: e.onStagePlayerState` (477) and `case protocol.CMsgStageDeviceReady: e.onStageDeviceReady` (479) have NO role check. onStageDeviceReady (1482-1488) unmarshals StageDeviceReadyData and calls e.audio.SetDevice(d.SpotifyDeviceID) unconditionally — a mobile conn reroutes every subsequent Play/Pause/Resume to an attacker device or a bogus ID (NO_ACTIVE_DEVICE). onStagePlayerState (1490-1504): if d.TrackEnded, in StateKaraoke -> beginTransition() (skips skip-vote), in StateRoundActive -> endRound() (kills the live round). Role is the transport's current role (server.go:199 hub.roleOf); a mobile that never sent the admin secret stays RoleMobile, so all of this is reachable without the secret. onHello (523) only gates admin/stage AT HELLO — it never prevents a mobile-role conn from sending stage.* frames. Confirmed by trace; the guard that exists for admin.* is provably absent for stage.*.",
+    "fix": "In dispatch, wrap the two stage cases in a role gate mirroring the admin block: `if role != protocol.RoleStage && role != protocol.RoleAdmin { e.sendError(connID, \"forbidden\", \"stage role required\"); return }` before calling onStagePlayerState/onStageDeviceReady.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/game/engine.go"]
+  },
+  {
+    "id": "engine-2",
+    "verdict": "CONFIRMED",
+    "real_severity": "medium",
+    "evidence": "AIRTIGHT on current behavior. onBuzz (732-792) computes `_ = anticheat.EffectiveBuzzTime(arrivalMs, p.RTTMs)` (762) and immediately discards it to the blank identifier — it is never stored, compared, or used to order anything. The winner is decided solely by `won, err := e.lock.TryAcquire(ctx, e.roundKey, p.ID)` (764): the FIRST caller to reach TryAcquire wins (MemLock/RedisLock are first-acquire-wins on roundKey). Ordering into onBuzz is: transport stamps arrivalUnixMs at frame edge (server.go:185), calls OnMessage -> e.submit(func(){ e.dispatch(...) }) (engine.go:421) which enqueues onto e.cmds; the single Run loop dequeues FIFO. So the winner = whichever buzz command was ENQUEUED first onto e.cmds, which is a race between N connection goroutines each running submit() — NOT the stamped arrivalMs. A buzz with a lower (earlier) arrivalMs / lower EffectiveBuzzTime can lose to a later-arriving buzz that happened to win the goroutine race to the channel. arrivalMs survives only into the audit LogEvent (790) — never into winner selection. EffectiveBuzzTime is genuinely dead for ordering. §4B (arrival is the ONLY ordering input) and §4C (RTT compensation) are both unmet. Single-winner still holds (lock is atomic). Confirmed by trace.",
+    "fix": "Resolve the winner by min(EffectiveBuzzTime) rather than enqueue order: on the first buzz in ROUND_ACTIVE, open a short collection window (e.g. transition to a LOCKED-pending state, collect contending {playerID, effectiveTime} for ~30-50ms), then award the lock to the min effectiveTime. Minimal interim: stop discarding EffectiveBuzzTime and store it on the winner so §4C at least records compensation. Note: real fix is a design change already planned.",
+    "fix_risk": "medium",
+    "fix_touches_files": ["server/internal/game/engine.go"]
+  },
+  {
+    "id": "engine-3",
+    "verdict": "CONFIRMED",
+    "real_severity": "medium",
+    "evidence": "Independently re-verified (not trusting prior verdict). enterDailyDouble (1254-1276) builds ratingPool from online mobilePlayers excluding the performer; empty pool -> enterKaraoke immediately (1273-1275). finishDailyDouble is called from EXACTLY ONE site: onRate (1299-1301) `if len(e.ratings) >= len(e.ratingPool) { e.finishDailyDouble() }`. OnDisconnect (425-442) on full disconnect does `delete(e.ratingPool, playerID)` (432) but only re-evaluates `if e.state == protocol.StateKaraoke { e.evaluateSkipVotes() }` (436-438) — no StateDailyDouble branch, never re-checks the finish condition. onAdminKick (1360-1382) has the identical gap: deletes from ratingPool (1375) but only re-checks Karaoke (1379-1381). Trace: pool={A,B}; A rates -> ratings={A}, 1>=2 false; B disconnects -> pool={A}, state==DailyDouble so no re-check -> len(ratings)==1==len(ratingPool) but nothing fires finishDailyDouble. Stuck. No rescue timer: telemetryTicker is telemetry-only; scheduleAutoKaraoke (1734-1756) advances ONLY from StateRoundActive/StateLocked (1746), never DailyDouble; dispatchAdmin escapes are endRound/endGame only. Hostile mobile that never sends rate also hangs indefinitely (no per-phase timeout). Confirmed by trace.",
+    "fix": "Extract a helper `checkDailyDoubleComplete()` that does `if e.state==StateDailyDouble && len(e.ratings) >= len(e.ratingPool) { e.finishDailyDouble() }` (guarding len(ratingPool)==0 -> enterKaraoke), and call it from onRate and after the ratingPool delete in both OnDisconnect and onAdminKick (add a StateDailyDouble branch beside the StateKaraoke one). Add a roundKey-keyed daily-double timeout to defend against never-rate.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/game/engine.go"]
+  },
+  {
+    "id": "engine-4",
+    "verdict": "CONFIRMED",
+    "real_severity": "medium",
+    "evidence": "onHeartbeat (555-582) runs on the single Run loop and unconditionally calls e.broadcastTelemetry() (581) on EVERY heartbeat frame, with no per-conn rate limit and no nonce/role check (any role, incl. an unauthenticated mobile before Hello — playerForConn may be nil but the broadcastTelemetry still runs). broadcastTelemetry (1887-1890) builds telemetryData() (O(P) over players) AND cheatReportData() (1906-1941): cheatReportData does two passes over mobile players, each calling playerIP(p.ID) (1893-1900) which iterates connIDs(p.ID), i.e. ~O(P * conns) plus building the ipPlayers map — effectively O(P^2)-ish with the per-player IP scan. All executed serially on the Run goroutine that also handles buzz/grade/reveal. A hostile mobile floods heartbeat frames (transport has NO inbound rate limit — server.go read loop dispatches every frame); each enqueues a command and forces a full telemetry+cheat rebuild+admin broadcast, starving the game loop. Confirmed by trace. Severity medium: no auth needed, cheap client-side flood, but impact is degradation/latency not takeover.",
+    "fix": "Coalesce heartbeat-driven telemetry: set a dirty flag on heartbeat and let a ~1-2s ticker (or the existing 60s ticker at higher frequency) flush broadcastTelemetry at most once per interval, instead of rebuilding on every frame. Optionally throttle inbound heartbeats per conn at the transport edge.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/game/engine.go"]
+  },
+  {
+    "id": "engine-5",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "onAdminAward (1347-1358) unmarshals AdminAwardData then `if p := e.reg.players[d.PlayerID]; p != nil { p.Score += d.Delta; SaveScore; broadcastScoreboard }` — d.Delta is applied verbatim with NO clamp, no range check, no floor. Contrast onAdminSetThresh (1390-1395, clamped 50-100) and onRate (1293, 1-5). A delta of math.MaxInt (or huge negative) yields absurd/negative/overflowing scores, persisted and broadcast. GATED behind the admin secret (dispatch 471-474 requires RoleAdmin, onHello 523 gates the secret), so exploitability requires admin — hence low. Confirmed; behavior is as described but precondition (admin) limits severity, matching the finding's own 'low'.",
+    "fix": "Clamp d.Delta to a sane per-action range (e.g. [-1000,1000]) and floor the resulting p.Score (e.g. at 0 or a documented min) before SaveScore/broadcast.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/game/engine.go"]
+  },
+  {
+    "id": "player-1",
+    "verdict": "CONFIRMED",
+    "real_severity": "medium",
+    "evidence": "resolvePlayer (player.go:67-101) stores the client handle verbatim: `if h.Handle != \"\" { p.Handle = h.Handle }` (92-94) — no length cap, no rune limit, no control-char strip anywhere on the engine/registry surface (grep of player.go/engine.go shows no sanitize). Transport frame cap is maxFrameLen = 1<<20 = 1 MiB (framing.go:27), so a Hello with a ~1MiB Handle is accepted (onHello 516-521 just json.Unmarshals HelloData). That handle is then echoed to ALL roles: scoreboardData (1844-1852) includes Handle for every mobile player and broadcastScoreboard fans it to stage+admin+mobile (1857-1862) on every score change; SMsgLockout {ByHandle: p.Handle} (784) goes to all mobiles on every buzz; telemetry/cheatReport also carry Handle. A 1MiB handle amplified across N connections per scoreboard/lockout broadcast is a bandwidth/CPU amplification vector, and unsanitized control/unicode bytes flow to stage/admin renderers. Confirmed by trace. Medium: only mobile role required, real amplification, but bounded by the 1MiB frame cap (not unbounded).",
+    "fix": "In resolvePlayer, clamp Handle to a small max (e.g. 24 runes) and strip control characters before assigning: `p.Handle = sanitizeHandle(h.Handle)`.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/game/player.go"]
+  },
+  {
+    "id": "engine-6",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "submit (385-393): `select { case e.cmds <- command{fn: fn}: default: e.cmds <- command{fn: fn} }`. The default branch performs the IDENTICAL blocking channel send as the primary case — it is a no-op fallback. The comment 'run inline only if the loop is saturated' is false: nothing runs inline; when the 256-deep buffer (NewEngine:196) is full, the default send blocks the calling connection goroutine until space frees. So if the Run loop stalls (e.g. synchronous lock.TryAcquire against a hung Redis) under a heartbeat/buzz flood, every OnConnect/OnMessage/OnDisconnect goroutine calling submit blocks indefinitely — the fallback provides zero relief and only obscures the stall. Confirmed by inspection; the two branches are textually identical sends. Low: correctness/clarity defect, only bites under a separate stall condition, no data exposure. StartGame/ResetToLobby use raw `e.cmds <-` directly (268, 290) so they'd block too, but that's the same underlying blocking-send reality.",
+    "fix": "Drop the misleading default branch and document that submit applies blocking backpressure, OR implement real relief (bounded send with a timeout/context that logs+drops the frame when the loop is wedged). Do NOT run fn inline from a non-Run goroutine — it mutates Run-owned state and would break the single-writer invariant.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/game/engine.go"]
+  },
+  {
+    "id": "transport-1",
+    "verdict": "CONFIRMED",
+    "real_severity": "medium",
+    "evidence": "enqueue (hub.go:138-147) on a full out buffer logs 'dropping connection' and calls c.stop() (146). stop() (174-176) does ONLY `c.once.Do(func() { close(c.closed) })` — it closes the writer's quit channel and nothing else. writeLoop (151-171) selects on c.closed and returns (kills the WRITER only). But serveStream's read loop (server.go:172-200) is blocked in fr.ReadFrame() on the stream and has NO reference to c.closed — closing c.closed does not unblock ReadFrame. The stream is only Closed in serveStream's defer (169), which runs only when ReadFrame returns an error. So after the drop: the read goroutine keeps calling handler.OnMessage for every inbound frame (the ghost can still buzz/vote), the conn stays in hub.conns (remove() 71-79 is never called by stop), OnDisconnect never fires, and the stream+goroutine leak until the attacker closes the socket. Only the OUTPUT is dropped. Confirmed by trace. Medium: mobile-only, ghost retains inbound influence (can win buzzes) + resource leak, but requires the attacker to deliberately not-read its stream.",
+    "fix": "Make the drop tear down the whole connection. Give conn a reference to the io.ReadWriteCloser stream (passed to hub.add in serveStream:164) and have stop()/enqueue close it, which unblocks fr.ReadFrame() -> serveStream returns -> defer runs OnDisconnect + hub.remove + stream.Close. Alternatively register a teardown callback on the conn that the hub invokes on drop.",
+    "fix_risk": "medium",
+    "fix_touches_files": ["server/internal/transport/hub.go", "server/internal/transport/server.go"]
+  },
+  {
+    "id": "transport-2",
+    "verdict": "CONFIRMED",
+    "real_severity": "medium",
+    "evidence": "server.go:60-63 QUICConfig sets only EnableDatagrams + EnableStreamResetPartialDelivery — no MaxIdleTimeout, no MaxIncomingStreams. handleSession (131-149) upgrades then blocks in sess.AcceptStream(sess.Context()) with no accept deadline. There is no global or per-IP session/connection cap anywhere in transport (grep: no limiter, no semaphore, CheckOrigin returns true for all — 80). Each accepted session spawns handleSession + serveStream + a writer goroutine (hub.add -> go c.writeLoop) + a frameReader with up to 1MiB buf. An attacker scripting many WebTransport CONNECTs grows goroutines/memory unbounded; sessions that upgrade but never open a control stream sit in AcceptStream relying solely on quic-go's default idle timeout (~30s, unconfigured). Confirmed by inspection. Severity medium (not high): quic-go defaults provide SOME backstop (default idle timeout reaps silent sessions), and it needs a deliberate flood; confidence medium in the finding is fair. No app-level ceiling exists.",
+    "fix": "Set explicit quic.Config.MaxIdleTimeout (e.g. 30s) and MaxIncomingStreams=1 (only the single control stream is expected). Enforce a global and/or per-IP session cap in handleSession (CloseWithError once exceeded). Add an AcceptStream deadline so a session that never opens its control stream is reaped promptly.",
+    "fix_risk": "medium",
+    "fix_touches_files": ["server/internal/transport/server.go"]
+  },
+  {
+    "id": "transport-3",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "LOCKED file, verified on merits. NonceGate.Token() (nonce.go:55-60) is called ONLY from anticheat_test.go:41,43 — ZERO production callers (grep '.Token()' across *.go). The engine transmits the RAW counter: WelcomeData.Nonce = e.gate.Current() (engine.go:545), and every envelope carries Nonce: e.gate.Current() (1968). Validation compares the raw counter: Validate(n) returns `n == g.counter` (nonce.go:46-50), invoked in onBuzz (743), onVote (1142), onRate (1282) against env.Nonce. So the counter is a monotonic +1 value broadcast in cleartext in every server envelope — a client trivially predicts any future nonce, contradicting the Token() doc comment ('what is actually transmitted ... never exposed ... cannot be predicted/forged'). Replay protection still functionally holds: Validate requires exact equality with the CURRENT counter and transitionTo Bumps on every state change (1957-1962), so a stale/captured buzz is dropped after the next Bump. sign() HMAC-SHA256+hex is itself correct. Confirmed: documentation/contract-integrity deviation (unwired dead code + false security claim), not an exploitable replay hole. Low.",
+    "fix": "Wiring fix belongs in the CALLER (nonce.go is locked). Either: transmit gate.Token() instead of the raw counter and add NonceGate.ValidateToken(tok) using hmac.Equal(sign(secret,counter), tok) — requires contract-owner sign-off to touch nonce.go. Or accept the raw-counter scheme and file a CONTRACT-QUESTION to correct the nonce.go doc comment and remove the unused Token()/sign(). No safe caller-only fix fully satisfies §4D without a nonce.go change.",
+    "fix_risk": "medium",
+    "fix_touches_files": ["server/internal/anticheat/nonce.go", "server/internal/game/engine.go"]
+  },
+  {
+    "id": "store-1",
+    "verdict": "CONFIRMED",
+    "real_severity": "high",
+    "evidence": "Independently re-verified. LoadBoard (repo_postgres.go:91-102) SELECTs FROM board_cells LEFT JOIN board_cell_tracks LEFT JOIN tracks WHERE bc.session_id=$1 — the 0001_init.sql tables (0001 defines board_cells at line 49, board_cell_tracks at 60, tracks at 37). grep for INSERT INTO board_cells / board_cell_tracks / tracks across server/ = ZERO hits: nothing ever writes those tables. The curation path writes only the 0002 tables: AddTrack -> board_tracks (admin_store.go:90), AddColumn -> board_layout_cells (171), PlaceTrack -> board_layout_cell_tracks (204). AttachBoard (383-386) only does UPDATE game_sessions SET board_id. engine.Run (engine.go:210-215) calls repo.LoadBoard(cfg.SessionID) on boot and sets e.board only if err==nil && b!=nil; board_cells is empty so LoadBoard hits `len(cells)==0` -> returns error 'no board for session' (repo_postgres.go:154-156), e.board stays nil. LoadBoard NEVER joins game_sessions.board_id, so the persisted board_id link is ignored on restart. LoadBoardByID (admin_store.go:301, reads the 0002 tables correctly) is called ONLY from the live attach HTTP handler (layout.go:198), never on boot. Mitigations: sample board is injected only on the IN-MEMORY path (main.go:62-66,116-119 needSampleBoard), NOT the Postgres path; main.go:58-60 logs 'no board attached ... use Board Builder' confirming the human-re-attach reality. A Postgres-backed server silently boots boardless after every restart. Confirmed. High (durable link silently ignored, needs manual recovery each restart).",
+    "fix": "Resolve the board via the persisted link on boot: add a repo method to read game_sessions.board_id and, if set, load via existing LoadBoardByID (0002 tables); wire engine.Run (or main.go) to restore e.board. Minimal: rewrite LoadBoard's query to join game_sessions.board_id -> board_layout_cells/board_layout_cell_tracks/board_tracks keyed by session_id (mirroring LoadBoardByID). Or drop the dead 0001 board_cells/board_cell_tracks/tracks tables and repoint LoadBoard.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/store/repo_postgres.go", "server/cmd/gameserver/main.go"]
+  },
+  {
+    "id": "store-2",
+    "verdict": "CONFIRMED",
+    "real_severity": "medium",
+    "evidence": "lyrics.go Fetch: `body, err := io.ReadAll(resp.Body)` (95) with NO io.LimitReader wrap — the full body is buffered into memory. The 8s http.Client.Timeout (New:50) bounds hang duration but NOT response size (a fast multi-GB or infinite-chunked body within 8s is fully buffered). LRCLIB is external (default https://lrclib.net, overridable via YFI_LRCLIB_URL config — operator-set, not attacker SSRF, but MITM / malicious mirror is in the conference threat model). HasSyncedLyrics (114-117) calls Fetch per-track; the admin import path probes lyrics in a background batch (spotify.go:124 probeLyricsBatch over many tracks), amplifying concurrent fetches. postToken (spotify.go:308) and the search/playlist paths have the same unbounded io.ReadAll pattern but those hit Spotify (also external). Confirmed for the LRCLIB path as described. Medium.",
+    "fix": "Wrap: `body, err := io.ReadAll(io.LimitReader(resp.Body, maxLyricsBytes))` with a sane cap (e.g. 1<<20) and treat an over-cap/truncated body as no-lyrics or an error. Consider the same for spotify.go body reads.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/lyrics/lyrics.go"]
+  },
+  {
+    "id": "store-3",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "0002_boards.sql:44-54: board_layout_cell_tracks PRIMARY KEY (board_id, row, col, track_id); the comment on line 44 claims 'A track can only be in one cell per board' but the PK only dedups an identical (board_id,row,col,track_id) tuple — there is NO UNIQUE(board_id, track_id). PlaceTrack (admin_store.go:202-212) upserts ON CONFLICT (board_id,row,col,track_id) DO UPDATE pos, so placing the same track into a DIFFERENT (row,col) inserts a second row — the same track lands in two cells with no DB guard. UnplacedTracks (135-143) uses `bt.id NOT IN (SELECT blct.track_id ...)` and GetLayout/LoadBoardByID iterate placements, so a doubly-placed track is treated inconsistently (appears in two cells; disappears from unplaced). Confirmed the invariant is unenforced. Severity: I DOWNGRADE to low (finding says medium). It is admin-only (curation UI, gated by admin secret, no live-game or hostile-mobile reach), the category is mislabeled 'race' (it is a sequential/UI double-placement schema gap, not a concurrency race — two concurrent PlaceTracks to the same cell are deduped by the PK; only DIFFERENT cells duplicate, which is a logical placement bug), and impact is a cosmetically wrong board an admin can fix. Real-world exposure is minimal.",
+    "fix": "Add UNIQUE(board_id, track_id) to board_layout_cell_tracks (new migration) and change PlaceTrack to move-on-conflict: ON CONFLICT (board_id, track_id) DO UPDATE SET row=EXCLUDED.row, col=EXCLUDED.col, pos=EXCLUDED.pos. Requires a migration + existing-data dedup.",
+    "fix_risk": "medium",
+    "fix_touches_files": ["deploy/migrations/0002_boards.sql", "server/internal/store/admin_store.go"]
+  },
+  {
+    "id": "store-4",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "GetBoard (admin_store.go:46-58) detects not-found via `if err.Error() == \"no rows in result set\"` (52) — a string match, not errors.Is(err, pgx.ErrNoRows). pgx v5 QueryRow.Scan returns pgx.ErrNoRows unwrapped whose Error() is exactly that string, so it WORKS today. It is brittle: any future wrapping (e.g. fmt.Errorf %w around the scan) or a pgx message change silently breaks the sentinel, and callers in layout.go (41-47, 76-82) treat a non-nil err as StatusInternalServerError, so a legitimately-absent board would return 500 instead of the 404 the nil,nil path yields. pgx.ErrNoRows is already imported/referenced in the package (repo_postgres.go:193 `var _ = pgx.ErrNoRows`), so errors.Is is trivially available. Confirmed as described. Low (works now, latent brittleness).",
+    "fix": "Replace with `if errors.Is(err, pgx.ErrNoRows) { return nil, nil }` (add errors import; pgx already imported).",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/store/admin_store.go"]
+  },
+  {
+    "id": "store-5",
+    "verdict": "CONFIRMED",
+    "real_severity": "medium",
+    "evidence": "LOCKED file, verified on merits. config.go Load() (46-66): AdminSecret env(\"ADMIN_SECRET\",\"changeme-admin\") (58), NonceSecret env(\"YFI_NONCE_SECRET\",\"dev-nonce-secret\") (59), JoinSecret env(\"YFI_JOIN_SECRET\",\"dev-join-secret\") (60) — hardcoded dev defaults, no production guard, no error/warn on default. main.go consumes them directly (cfg.AdminSecret -> engine + admin handler; cfg.NonceSecret -> NonceGate at 93) with NO check that they differ from the defaults and NO YFI_ENV/prod gate anywhere. A prod deploy that forgets ADMIN_SECRET boots silently with 'changeme-admin': an attacker who knows the default passes onHello's admin/stage secret gate (engine.go:523) and issues admin.* actions; the public 'dev-nonce-secret' also defeats any HMAC-nonce guarantee. No log warning, no refusal to start. Confirmed. Medium (silent known-secret boot at a hostile-network conference; requires operator misconfig, so not critical).",
+    "fix": "config.go is locked — gate at the caller (main.go): after config.Load(), if YFI_ENV=prod (or similar) and any of AdminSecret/NonceSecret/JoinSecret still equals its dev default, log.Fatal at boot. File a CONTRACT-QUESTION that config.go should ideally return an error on default secrets in prod.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/cmd/gameserver/main.go"]
+  },
+  {
+    "id": "spotify-1",
+    "verdict": "CONFIRMED",
+    "real_severity": "medium",
+    "evidence": "No single-flight guard exists. ValidToken (264-290) reads token/exp/hasRefresh under mu then RELEASES the lock (269) before calling c.refresh(ctx) (283). refresh (231-256) reads rt under lock, releases, POSTs grant_type=refresh_token (243), then re-locks to write accessToken/refreshToken/expiresAt (248-254). playerCommand's 401 path (367-377) and GetPlaylistTracks (100, 116) also call refresh with no coordination. So two goroutines (e.g. the Stage /api/spotify/token getOAuthToken fetch via ValidToken AND a player-command 401 retry) can both observe an expired token and each fire a concurrent refresh_token grant. If Spotify rotates the refresh token, the ordering is a race: whichever writes c.refreshToken last wins, and a goroutine that POSTed with the now-invalidated old rt can overwrite the good one -> next refresh returns invalid_grant -> forced full re-OAuth mid-event. Confirmed by trace. Medium (needs concurrent expiry + Spotify rotation; real over a multi-hour game). Note: Spotify Authorization-Code refresh tokens are often static, which lowers real-world hit rate — consistent with the finding's medium/medium.",
+    "fix": "Serialize refresh with a dedicated refreshMu held across the whole refresh (or golang.org/x/sync/singleflight keyed on a constant): late callers wait and reuse the fresh token instead of firing duplicate grants. Re-check expiry after acquiring the guard so only the first actually POSTs.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/spotify/spotify.go"]
+  },
+  {
+    "id": "spotify-2",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "ValidToken (277-282): `if !hasRefresh { if tok != \"\" { return tok, nil } return \"\", ... }` — when there is no refresh token but an access token exists, it returns the access token with a nil error EVEN IF exp is in the past (the early non-expired return at 274 already handled the still-valid case, so this branch is reached precisely when the token is missing or within/after the skew window). So a boot with only an access token pushed and >1h elapsed hands the stage a dead token with HTTP 200; the Web Playback SDK then fails opaquely (401 SDK-side) rather than the endpoint returning a clear error prompting re-auth. Confirmed by trace. Low (edge case: access-token-only seed, no refresh; comment even says 'no way to refresh; hand back what we have').",
+    "fix": "In the !hasRefresh branch, if the token is past expiry (c.clock().After(exp)), return an error like the not-authenticated case instead of the stale token, so the endpoint signals re-auth clearly.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/spotify/spotify.go"]
+  },
+  {
+    "id": "spotify-3",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "doPlaylistFetch (search.go:236) builds `endpoint := c.apiBase + \"/playlists/\" + playlistID + \"/items?\" + q.Encode()` with NO url.PathEscape on playlistID. GetPlaylistTracks (94) is an EXPORTED method on *spotify.Client. Today the only caller is admin.importPlaylist (spotify.go:76,82) which validates via extractPlaylistID: every return path is gated by playlistIDPattern = ^[a-zA-Z0-9]+$ (admin/spotify.go:11) — verified all three branches (spotify: prefix 144, open.spotify.com 162, raw ID 168 also requires len>=10) return only regex-matched IDs or \"\". So NOT exploitable via the current HTTP surface. But the safety invariant lives in a DIFFERENT package (admin), not at the point of use; any future direct caller of the exported GetPlaylistTracks with an unvalidated ID controls the request path (traversal/query injection against api.spotify.com). Confirmed exactly as the finding states (safe today, defense-in-depth gap). Low.",
+    "fix": "Escape at the point of use: `endpoint := c.apiBase + \"/playlists/\" + url.PathEscape(playlistID) + \"/items?\" + q.Encode()`, and/or validate the ID inside the spotify package (reject anything with /,?,..).",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/internal/spotify/search.go"]
+  },
+  {
+    "id": "spotify-4",
+    "verdict": "CONFIRMED",
+    "real_severity": "low",
+    "evidence": "main.go:156-163 sets the OAuth state cookie with HttpOnly:true, SameSite:Lax, Path:/auth/spotify, MaxAge:600 but NO Secure attribute. The default SPOTIFY_REDIRECT_URI is http://localhost:8777/auth/spotify/callback (config.go:56) — plaintext HTTP. On a conference LAN a passive attacker can sniff the yfi_spotify_state cookie and the callback ?code= in transit, defeating the state binding and potentially replaying the code. The finding's own note is accurate and verified: the CSRF logic itself is correct — Path=/auth/spotify matches /auth/spotify/callback per RFC 6265 prefix rule, the callback (166-174) short-circuits on missing cookie (err != nil) BEFORE dereferencing want.Value, rejects empty got, and uses subtle.ConstantTimeCompare. So this is purely the missing Secure attribute over plaintext transport. Confirmed. Low.",
+    "fix": "Serve the OAuth endpoints over TLS and set Secure:true on the state cookie (Secure works on localhost in modern browsers). Document that SPOTIFY_REDIRECT_URI must be https for any non-loopback deployment.",
+    "fix_risk": "low",
+    "fix_touches_files": ["server/cmd/gameserver/main.go"]
+  }
+]

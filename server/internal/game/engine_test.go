@@ -75,6 +75,8 @@ func (r *fakeRepo) LoadBoard(context.Context, string) (*Board, error) { return n
 func (r *fakeRepo) Leaderboard(context.Context, int) ([]protocol.ScoreEntry, error) {
 	return nil, nil
 }
+func (r *fakeRepo) MarkTrackPlayed(context.Context, string, string) error { return nil }
+func (r *fakeRepo) ClearPlayed(context.Context, string) error             { return nil }
 
 type audioCall struct {
 	method string
@@ -200,7 +202,13 @@ func newHarness(t *testing.T) *harness {
 	e := NewEngine(repo, lk, audio, fakeLyrics{}, bc, gate, Config{
 		SessionID:        "s1",
 		SkipThresholdPct: 50,
-		Rand:             rand.New(rand.NewSource(1)),
+		// Resolve buzzes synchronously (negative sentinel) so existing
+		// deterministic tests see the old serial first-buzz-wins behavior — the
+		// first buzz opens and immediately resolves a 1-contender window. The
+		// async fairness window (BuzzWindowMs > 0) is exercised separately in
+		// TestBuzz_FairestArrivalWinsWithinWindow.
+		BuzzWindowMs: -1,
+		Rand:         rand.New(rand.NewSource(1)),
 	})
 	e.SetBoard(testBoard())
 	return &harness{e: e, bcast: bc, lock: lk, repo: repo, audio: audio, gate: gate, t: t}
@@ -380,6 +388,100 @@ func TestBuzz_SingleWinner(t *testing.T) {
 	if h.state() != protocol.StateAdjudicate {
 		t.Errorf("state = %s, want ADJUDICATE", h.state())
 	}
+}
+
+// TestBuzz_EarliestArrivalWinsAndForgedRTTBuysNothing proves the buzz-ordering
+// contract after QA sweep 3 (s3-fe): within the collection window the winner is
+// the contender with the EARLIEST server-stamped arrival, and the client's
+// self-reported RTT is IGNORED. The later-arriving player forges a huge RTT
+// (which the old §4C path would have turned into an earlier "effective" time and
+// a win) and must STILL LOSE to the earlier real arrival — a forged RTT buys no
+// advantage. Also pins that the enqueue order does not decide the winner.
+func TestBuzz_EarliestArrivalWinsAndForgedRTTBuysNothing(t *testing.T) {
+	h := newHarness(t)
+	// A very large window so the resolution AfterFunc never fires during the test;
+	// we resolve deterministically via submitSync below.
+	h.e.buzzWindowMs = 60_000
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.joinStage("stage")
+	early := h.join("c1", "fp1", "alice") // earliest ARRIVAL, honest low RTT
+	late := h.join("c2", "fp2", "bob")    // later arrival, forges a huge RTT
+
+	h.selectCell("admin", 1, 1)
+	if h.state() != protocol.StateRoundActive {
+		t.Fatalf("state = %s, want ROUND_ACTIVE", h.state())
+	}
+
+	// bob forges RTT 100 (the max-impact value: old code subtracted the 50ms cap
+	// from his arrival, handing him the win). alice reports an honest RTT 0. RTT
+	// must now be irrelevant to ordering.
+	h.sync(func() {
+		h.e.reg.players[early].RTTMs = 0
+		h.e.reg.players[late].RTTMs = 100
+	})
+
+	nonce := h.gate.Current()
+	arrivalEarly := nowMs()
+	arrivalLate := arrivalEarly + 5 // bob genuinely arrives 5ms LATER
+	var rk string
+	h.sync(func() { rk = h.e.roundKey })
+
+	// Enqueue bob's buzz FIRST (later arrival, forged RTT), then alice's (earlier
+	// arrival). Neither enqueue order nor the forged RTT may decide it — only the
+	// server arrival stamp. Both land in the open window; no result sent yet.
+	h.e.OnMessage("c2", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: nonce}, arrivalLate)
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: nonce}, arrivalEarly)
+	h.sync(func() {})
+
+	// Window is open with two contenders and no winner yet.
+	var open bool
+	var n int
+	h.sync(func() { open, n = h.e.buzzWindowOpen, len(h.e.buzzContenders) })
+	if !open || n != 2 {
+		t.Fatalf("window state: open=%v contenders=%d, want open with 2", open, n)
+	}
+	if h.state() != protocol.StateRoundActive {
+		t.Fatalf("state advanced before resolution: %s", h.state())
+	}
+
+	// Resolve deterministically.
+	h.sync(func() { h.e.resolveBuzzWindow(rk) })
+
+	// alice (earliest arrival) must win, despite bob's forged high RTT and despite
+	// bob buzzing first. The winning conn asserted below is alice's c1.
+	var buzzWinner string
+	h.sync(func() { buzzWinner = h.e.buzzWinner })
+	if buzzWinner != early {
+		t.Fatalf("buzzWinner = %q, want alice (%q) — earliest server arrival must win; a forged RTT must buy nothing", buzzWinner, early)
+	}
+
+	// Exactly one Won:true, and it goes to bob's conn; alice gets Won:false.
+	wins := map[string]bool{}
+	wonCount := 0
+	h.bcast.mu.Lock()
+	for _, f := range h.bcast.frames {
+		if f.env.Type != protocol.SMsgBuzzResult {
+			continue
+		}
+		var br protocol.BuzzResultData
+		_ = json.Unmarshal(f.env.Data, &br)
+		if br.Won {
+			wonCount++
+			wins[f.connID] = true
+		}
+	}
+	h.bcast.mu.Unlock()
+	if wonCount != 1 {
+		t.Fatalf("got %d Won:true frames, want exactly 1", wonCount)
+	}
+	if !wins["c1"] {
+		t.Fatalf("Won:true did not go to alice's conn c1 (earliest arrival); wins=%v", wins)
+	}
+	if h.state() != protocol.StateAdjudicate {
+		t.Fatalf("state = %s, want ADJUDICATE after resolution", h.state())
+	}
+	_ = late
 }
 
 // TestBuzz_StaleNonceDropped: a buzz with a stale nonce is ignored (§4D).

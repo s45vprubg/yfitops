@@ -58,6 +58,11 @@ func (c *LRCLIBClient) WithHTTPClient(h HTTPClient) *LRCLIBClient {
 	return c
 }
 
+// maxLyricsBytes caps how much of an LRCLIB response we buffer, bounding memory
+// against a hostile/oversized body. A body at/over the cap will simply fail the
+// JSON decode cleanly.
+const maxLyricsBytes = 1 << 20
+
 // lrclibResponse is the subset of the LRCLIB /api/get payload we care about.
 type lrclibResponse struct {
 	SyncedLyrics string `json:"syncedLyrics"`
@@ -92,7 +97,7 @@ func (c *LRCLIBClient) Fetch(ctx context.Context, artist, title string, duration
 		return nil, fmt.Errorf("lyrics: unexpected status %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxLyricsBytes))
 	if err != nil {
 		return nil, fmt.Errorf("lyrics: read body: %w", err)
 	}

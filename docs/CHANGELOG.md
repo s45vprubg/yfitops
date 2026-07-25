@@ -61,6 +61,75 @@ All notable changes to this project will be documented in this file.
 - Karaoke winner banner no longer defaults to the scoreboard leader — shows the
   real winner or "nobody :(".
 
+### Security & robustness — QA sweep 1 (2026-07-25)
+Full report: `docs/security/qa-sweep-1.md`. 40 validated findings fixed across
+code, API, and UI layers; preflight passed. Highlights:
+- **Auth:** `stage.*` client messages now require the stage/admin role (a hostile
+  mobile could previously hijack the Spotify device / force round transitions).
+- **Board persistence:** a Postgres-backed server no longer boots boardless on
+  restart — the attached board is restored via `game_sessions.board_id` (was
+  reading orphaned migration-0001 tables). Verify in staging.
+- **Buzz fairness (§4B/§4C):** winner is now the minimum latency-compensated
+  arrival time via a short collection window (`Config.BuzzWindowMs`, default
+  40ms), not goroutine-enqueue order. Single-winner guarantee preserved.
+- **Reconnect:** stage and mobile clients reconnect with backoff after a
+  WebTransport drop instead of wedging until a manual reload; mobile resyncs with
+  the same device fingerprint. Stage gains an ErrorBoundary so a malformed frame
+  can't white-screen the projector.
+- **AI builder:** atomic `RebuildLayout` (single transaction) so a mid-build
+  failure can't corrupt a board; Gemini key moved to a header; upstream errors no
+  longer echoed to clients; category names sanitized; prompt uses a delimited
+  data block against track-name injection. Tx path pending staging verification.
+- **DoS hardening:** admin JSON body cap (`MaxBytesReader`), bounded LRCLIB/Gemini
+  response reads, QUIC idle timeout + stream cap, full teardown of dropped
+  connections (was leaving zombie read loops), heartbeat telemetry coalescing,
+  client frame-length cap mirroring the server.
+- **Secrets/TLS:** admin secret kept in-memory only (no localStorage); OAuth
+  state cookie `Secure` when https; stage refuses non-https endpoints outside dev;
+  boot guard aborts if a dev-default secret is used with `YFI_ENV=prod`.
+- Locked-contract files touched only via caller-side guards or documented
+  `// CONTRACT-QUESTION` comments; see report for owner sign-off items.
+
+### Security & robustness — QA sweep 2 (2026-07-25)
+Full report: `docs/security/qa-sweep-2.md`. An adversarial audit of sweep 1's own
+fixes (plus a live security probe against a local Postgres+Redis stack). 9
+findings fixed (0 crit/high, 4 med, 5 low); 7 were residual bugs inside sweep-1
+fixes. Preflight passed; three items verified against live Postgres / a running
+server. Highlights:
+- **Handle sanitizer** now strips bidi/format/zero-width runes (U+202E etc.), not
+  just control chars — closes the scoreboard render-injection the sweep-1 fix left open.
+- **Daily double** no longer finishes early or skews the bonus when a rater is
+  kicked/disconnects (ratings/ratingPool kept in sync).
+- **Spotify 401 retry** now forces a genuine token refresh (the sweep-1
+  single-flight short-circuit had made refresh-on-401 inert for most of a token's life).
+- **Played-state persistence** (migration 0005): a mid-game server restart no
+  longer re-offers already-consumed tracks. Verified end-to-end on live Postgres.
+- **Client reconnect** (stage + mobile): the superseded GameClient is now closed
+  and late events from it are ignored — kills a reconnect-storm / leak the sweep-1
+  reconnect fix introduced.
+- **Admin auth** compares fixed-size SHA-256 digests (no secret-length timing
+  leak); remaining raw-error 502 leaks and an unclamped stage board render fixed.
+- Live probe confirmed auth, injection defenses, body cap, info-leak suppression,
+  and OAuth state all hold against a running instance.
+
+### Security & robustness — QA sweep 3 + session cap (2026-07-25)
+Full report: `docs/security/qa-sweep-3.md`. A convergence sweep auditing sweep-2's
+fixes + the new session cap, plus a fresh-eyes crown-jewel pass. The crown jewels
+(§4A/§4B/§4D, atomic buzz, scoring, deadlock escapes) all held.
+- **Per-IP QUIC session cap** (the long-deferred flood defense): a `sessionLimiter`
+  caps concurrent WebTransport sessions globally (`YFI_MAX_SESSIONS`, default 2000)
+  and per client IP (`YFI_MAX_SESSIONS_PER_IP`, default 128); rejected pre-upgrade
+  with 503. Generous defaults so a NAT'd venue is never locked out. Verified live.
+- **Buzz ordering is now server-arrival-only** (HIGH fix): the latency-compensated
+  effective time was derived from the client's self-reported RTT, so a hostile
+  mobile forging a high RTT won every contested buzz. RTT compensation is removed
+  (it is unforgeable-vs-fair only on a trusted client, which we don't have);
+  ordering uses the server-stamped arrival alone. A forged RTT now buys nothing.
+- **Emoji handles fixed** (LOW): the sweep-2 handle sanitizer stripped U+200D ZWJ,
+  shattering emoji sequences; ZWJ is now preserved while bidi/zero-width injection
+  chars stay stripped.
+- Still deferred: store-3 `UNIQUE(board_id, track_id)` (migration + dedup, low).
+
 ## [Unreleased] — 2026-06-29
 
 ### Added — Server-authoritative streaming letter reveal (stage + mobile)

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 )
 
@@ -117,7 +118,20 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-func decodeJSON(r *http.Request, v any) error {
+// maxBodyBytes caps admin request bodies so an authenticated caller can't
+// exhaust memory with a giant/deeply-nested JSON payload (field-length checks
+// only run AFTER a full decode, so they provide no protection on their own).
+const maxBodyBytes = 1 << 20
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
 	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	return json.NewDecoder(r.Body).Decode(v)
+}
+
+// serverError logs the underlying error and returns a generic 500 so pgx/schema
+// internals aren't leaked to clients.
+func serverError(w http.ResponseWriter, err error) {
+	log.Printf("[admin] internal error: %v", err)
+	http.Error(w, "internal error", http.StatusInternalServerError)
 }

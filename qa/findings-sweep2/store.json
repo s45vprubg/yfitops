@@ -1,0 +1,38 @@
+[
+  {
+    "id": "s2-store-001",
+    "file": "server/internal/spotify/spotify.go",
+    "line": 263,
+    "category": "correctness",
+    "severity": "medium",
+    "confidence": "high",
+    "summary": "spotify-1's refresh() early-return defeats the 401 refresh-and-retry path for most of a token's lifetime. On a 401 the callers (playerCommand, Search, GetPlaylistTracks) call c.refresh() to obtain a *new* token before retrying — but refresh() now short-circuits with `return nil` whenever the CURRENT access token is non-empty and, per the local clock, still >2min from expiry. A 401 means Spotify considers the token invalid regardless of our local expiry math (revoked creds, server-side invalidation, rotated refresh token, clock skew). So the retry re-sends the SAME dead token via doPlayer, gets another 401, and the command fails with 'unexpected status 401'. Because a freshly minted token sits comfortably inside the skew window for ~58 of its ~60 minutes, the 401-retry mechanism is effectively inert except in the final 2 minutes.",
+    "code": "const skew = 2 * time.Minute\nif cur != \"\" && c.clock().Before(exp.Add(-skew)) {\n    return nil\n}",
+    "scenario": "Stage token is invalidated server-side 10 minutes after issue (user revokes app / refresh token rotated by a parallel grant). Engine issues Play -> doPlayer -> 401 -> playerCommand calls refresh(). refresh() reads cur (the just-401'd token) and exp (~50min out), sees clock.Before(exp-2min)==true, returns nil without POSTing a grant. playerCommand retries with the identical dead token -> second 401 -> returns error. Playback silently stays broken until something forces a genuine refresh.",
+    "suggested_fix": "Make the dedup skip conditional on NOT being a forced refresh. Add a forced/unconditional entry point (e.g. refreshForce, or pass a bool) that the 401 callers use to bypass the 'comfortably live' short-circuit while still holding refreshMu for serialization; keep the short-circuit only for the ValidToken/expiry-driven call. Alternatively, on the 401 path, compare the token before/after refresh and force a POST if unchanged."
+  },
+  {
+    "id": "s2-store-002",
+    "file": "server/internal/store/admin_store.go",
+    "line": 426,
+    "category": "correctness",
+    "severity": "low",
+    "confidence": "high",
+    "summary": "store-1's LoadBoard delegates to LoadBoardByID, which rebuilds every game.Track with the zero-value Played=false (there is no Played column and none is scanned). engine.Run only calls LoadBoard when e.board==nil, i.e. at a cold boot. On a server restart mid-game the board reloads with ALL tracks marked unplayed, so pickTrack (board.go:41 `if !t.Played && t.Playable`) will re-offer tracks that were already consumed in the interrupted game. This is an inherent gap (Played is never persisted anywhere), not a regression from the rewrite, but it is a real correctness issue for the §3.2 resume story: consumed tracks become playable again after a restart.",
+    "code": "cell.Tracks = append(cell.Tracks, &game.Track{\n    ID: deref(tID), ... Playable: playable, ...\n    // Played not set -> defaults false\n})",
+    "scenario": "Game is 3 rounds in; gameserver restarts (deploy/crash). engine.Run sees e.board==nil, LoadBoard rebuilds the board fresh, every Track.Played=false. The board view shows already-answered cells as available and pickTrack can select a track that was already revealed/scored earlier in the session.",
+    "suggested_fix": "Out of scope for this file to fully fix (no persistence for played state exists). Either persist per-track played/consumed state (new column + scan) and restore it here, or document explicitly that a mid-game restart resets played state and is not a supported resume. Rate: low — architectural gap, restart mid-game is rare and there is no existing durable played state to lose."
+  },
+  {
+    "id": "s2-store-003",
+    "file": "server/internal/spotify/search.go",
+    "line": 78,
+    "category": "correctness",
+    "severity": "low",
+    "confidence": "high",
+    "summary": "Search() drops the release year even though it is available. searchTrackItem/searchAlbum decode album.release_date, and doSearch requests no `fields` filter so Spotify returns the full album object — but the SearchResult built at lines 78-84 never sets Year (unlike GetPlaylistTracks, which maps yearFromReleaseDate at search.go:159). Tracks added via manual search-and-add therefore always land with Year=0, so the year gameplay hint (0004_track_hints) is missing for them, while playlist-imported tracks get it. Inconsistent hint coverage depending on ingest path.",
+    "code": "results = append(results, SearchResult{\n    URI: item.URI, Artist: artist, Song: item.Name,\n    AlbumArt: albumArt, DurationMs: item.DurationMs,\n    // Year omitted -> 0\n})",
+    "scenario": "Admin searches a track in the builder and adds it. The add request carries Year=0 (search JSON has no year), so board_tracks.year stays 0 and the stage never shows the year hint for that track — but the same track imported via a playlist would have shown it.",
+    "suggested_fix": "Set `Year: yearFromReleaseDate(item.Album.ReleaseDate)` in the Search result loop, mirroring GetPlaylistTracks."
+  }
+]

@@ -32,10 +32,30 @@ type AdminStore interface {
 	PlaceTrack(ctx context.Context, boardID string, row, col int, trackID string, pos int) error
 	UnplaceTrack(ctx context.Context, boardID string, row, col int, trackID string) error
 	GetLayout(ctx context.Context, boardID string) (*Layout, error)
+	// RebuildLayout atomically replaces a board's entire layout: within one
+	// transaction it clears the existing columns/placements, sets the column
+	// count, then recreates the given columns and their track placements. Used by
+	// the AI builder so a mid-build failure can't leave a corrupt half-built board.
+	RebuildLayout(ctx context.Context, boardID string, cols int, columns []LayoutColumn) error
 
 	// Game-time
 	LoadBoardByID(ctx context.Context, boardID string) (*game.Board, error)
 	AttachBoard(ctx context.Context, sessionID, boardID string) error
+}
+
+// LayoutColumn describes one category column to (re)create in RebuildLayout,
+// with its track placements. Col is implied by the slice index (1-based).
+type LayoutColumn struct {
+	Category   string
+	Placements []LayoutPlacement
+}
+
+// LayoutPlacement is a single track placed at (Row, Col) with ordering Pos.
+type LayoutPlacement struct {
+	Row     int
+	Col     int
+	TrackID string
+	Pos     int
 }
 
 // SpotifySearcher abstracts Spotify search for the admin handler.

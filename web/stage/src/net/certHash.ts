@@ -31,11 +31,28 @@ function looksHex(s: string): boolean {
 export type CertHashes = { algorithm: "sha-256"; value: BufferSource }[];
 
 export async function fetchCertHashes(): Promise<CertHashes | undefined> {
+  const dev = import.meta.env.DEV;
+
+  // In production the backend must be reached over https and the pinned hash
+  // must be obtainable; anything less means we'd connect with NO cert pinning,
+  // so we fail closed. In dev we stay lenient (local http, self-signed cert).
+  if (!dev && !CERT_HASH_URL.startsWith("https://")) {
+    throw new Error(
+      `[stage] refusing to fetch cert hash over cleartext (${CERT_HASH_URL}); require https in production.`,
+    );
+  }
+
   try {
     const res = await fetch(CERT_HASH_URL, { mode: "cors" });
-    if (!res.ok) return undefined;
+    if (!res.ok) {
+      if (!dev) throw new Error(`[stage] cert-hash fetch failed: HTTP ${res.status}`);
+      return undefined;
+    }
     const text = (await res.text()).trim();
-    if (!text) return undefined;
+    if (!text) {
+      if (!dev) throw new Error("[stage] cert-hash fetch returned empty body");
+      return undefined;
+    }
 
     // Try JSON wrapper { hash: "..." } first, then raw string.
     let raw = text;
@@ -48,10 +65,16 @@ export async function fetchCertHashes(): Promise<CertHashes | undefined> {
     }
 
     const bytes = looksHex(raw) ? hexToBytes(raw) : base64ToBytes(raw);
-    if (bytes.length !== 32) return undefined;
+    if (bytes.length !== 32) {
+      if (!dev) throw new Error("[stage] cert-hash was not a 32-byte SHA-256 value");
+      return undefined;
+    }
     return [{ algorithm: "sha-256", value: bytes }];
-  } catch {
-    // No backend / CORS blocked — connect without pinned hashes (prod CA case).
+  } catch (err) {
+    // In dev, no backend / CORS blocked — connect without pinned hashes so
+    // local dev still works. In prod, propagate: connecting unpinned would
+    // silently drop cert pinning.
+    if (!dev) throw err;
     return undefined;
   }
 }
