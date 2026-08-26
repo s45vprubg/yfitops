@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -233,7 +234,11 @@ func TestSpotifyToken_Serves(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "live-token") {
+	got := decodeTokenResp(t, w.Body.String())
+	if !got.Connected {
+		t.Error("connected must be true when a live token is served")
+	}
+	if got.Token == nil || *got.Token != "live-token" {
 		t.Errorf("body missing token: %s", w.Body.String())
 	}
 }
@@ -255,6 +260,31 @@ func TestSpotifyToken_RequiresAuth(t *testing.T) {
 	}
 }
 
+// tokenResp mirrors the GET /api/spotify/token response contract. Token is a
+// pointer so an explicit JSON null is distinguishable from an empty string.
+type tokenResp struct {
+	Token     *string `json:"token"`
+	Connected bool    `json:"connected"`
+}
+
+func decodeTokenResp(t *testing.T, body string) tokenResp {
+	t.Helper()
+	var got tokenResp
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatalf("response is not valid JSON (%v): %s", err, body)
+	}
+	return got
+}
+
+// CONTRACT: GET /api/spotify/token always answers 200 and reports readiness in
+// the body ({token, connected}) rather than via a status code. It previously
+// returned 503 when Spotify was unconfigured and 409 when OAuth had not been
+// completed. Both collapse into connected:false.
+//
+// Why: the admin UI and stage both poll this endpoint for connection state, and
+// a non-2xx status is indistinguishable from a network/auth failure at the
+// fetch layer — so "Spotify isn't set up" looked identical to "the request
+// died". An explicit flag separates them. See docs/CHANGELOG.md.
 func TestSpotifyToken_NotConfigured(t *testing.T) {
 	mux := http.NewServeMux()
 	RegisterSpotifyToken(mux, nil, "test-secret") // nil spotify
@@ -264,7 +294,41 @@ func TestSpotifyToken_NotConfigured(t *testing.T) {
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503, got %d", w.Code)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	got := decodeTokenResp(t, w.Body.String())
+	if got.Connected {
+		t.Error("connected must be false when Spotify is not configured")
+	}
+	if got.Token != nil {
+		t.Errorf("token must be null when Spotify is not configured, got %q", *got.Token)
+	}
+}
+
+// The path that used to answer 409: Spotify is wired up, but ValidToken fails
+// (OAuth never completed, or the refresh was rejected). Same shape as the
+// unconfigured case — and the upstream error text must not reach the client.
+func TestSpotifyToken_RefreshFailed(t *testing.T) {
+	mux := http.NewServeMux()
+	RegisterSpotifyToken(mux, &mockSpotify{tokenErr: context.DeadlineExceeded}, "test-secret")
+
+	req := httptest.NewRequest("GET", "/api/spotify/token", nil)
+	req.Header.Set("Authorization", "Bearer test-secret")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	got := decodeTokenResp(t, w.Body.String())
+	if got.Connected {
+		t.Error("connected must be false when ValidToken fails")
+	}
+	if got.Token != nil {
+		t.Errorf("token must be null when ValidToken fails, got %q", *got.Token)
+	}
+	if strings.Contains(w.Body.String(), context.DeadlineExceeded.Error()) {
+		t.Error("upstream error text leaked to the client")
 	}
 }

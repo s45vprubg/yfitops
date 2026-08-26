@@ -34,7 +34,10 @@ export default function App() {
           headers: { Authorization: `Bearer ${secret}` },
           cache: "no-store",
         });
-        if (!stop) setSpotifyConnected(res.ok);
+        if (stop) return;
+        if (!res.ok) { setSpotifyConnected(false); return; }
+        const body = await res.json() as { connected?: boolean };
+        setSpotifyConnected(body.connected === true);
       } catch {
         if (!stop) setSpotifyConnected(false);
       }

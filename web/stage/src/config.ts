@@ -49,8 +49,9 @@ export async function fetchSpotifyToken(): Promise<string | null> {
       cache: "no-store",
     });
     if (!res.ok) return null;
-    const body = (await res.json()) as { token?: string };
-    return body.token ?? null;
+    const body = (await res.json()) as { token?: string | null; connected?: boolean };
+    if (!body.connected || !body.token) return null;
+    return body.token;
   } catch {
     return null;
   }

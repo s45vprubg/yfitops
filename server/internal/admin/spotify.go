@@ -47,16 +47,15 @@ func (h *Handler) searchSpotify(w http.ResponseWriter, r *http.Request) {
 // other /api route — never exposed to mobile.
 func (h *Handler) spotifyToken(w http.ResponseWriter, r *http.Request) {
 	if h.spotify == nil {
-		http.Error(w, "Spotify not configured", http.StatusServiceUnavailable)
+		writeJSON(w, http.StatusOK, map[string]any{"token": nil, "connected": false})
 		return
 	}
 	token, err := h.spotify.ValidToken(r.Context())
 	if err != nil {
-		// 409: authenticated to the API, but Spotify OAuth not completed yet.
-		http.Error(w, err.Error(), http.StatusConflict)
+		writeJSON(w, http.StatusOK, map[string]any{"token": nil, "connected": false})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"token": token})
+	writeJSON(w, http.StatusOK, map[string]any{"token": token, "connected": true})
 }
 
 func (h *Handler) importPlaylist(w http.ResponseWriter, r *http.Request) {
