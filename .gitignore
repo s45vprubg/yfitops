@@ -25,3 +25,6 @@ reference/legacy-core/
 
 # TS incremental build cache
 *.tsbuildinfo
+
+# local AI tool config (holds a .env with credentials — machine-local only)
+.gemini/

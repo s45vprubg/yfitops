@@ -130,6 +130,133 @@ fixes + the new session cap, plus a fresh-eyes crown-jewel pass. The crown jewel
   chars stay stripped.
 - Still deferred: store-3 `UNIQUE(board_id, track_id)` (migration + dedup, low).
 
+### Added — Dev-only WebSocket fallback for LAN phones (2026-08-25)
+WebTransport requires a secure context, so a phone loading the mobile PWA from a
+plain-HTTP LAN origin (`http://192.168.x.x`) cannot connect at all — `WebTransport`
+is simply undefined there. A WebSocket fallback carries the identical
+length-prefixed framing so real devices can be tested without standing up TLS.
+- New `server/internal/transport/ws.go` (`NewWSHandler`), mounted on `/ws` from
+  `main.go` only when `YFI_DEV_WS=1`. The production compose does not define it
+  at all. Two dev paths set it, because they run the server differently:
+  `docker-compose.dev.yml` for the containerized gameserver, and
+  `scripts/dev-up.sh` (which runs it bare via `go run`, so the compose
+  environment never reaches it) where it defaults on as `${YFI_DEV_WS:-1}`.
+- `GameClient` (`web/shared/client.ts`) gained an optional `wsUrl`. `connect()`
+  prefers WebTransport and only falls back when it is unavailable. The frame
+  parser was extracted into a shared `drainFrames()` so **both** transports get
+  the 1 MiB frame cap from QA sweep 1 (`uiadmin-2`); it signals an oversized
+  frame by returning `null` and each transport tears itself down.
+- **Fails closed in production, in two independent places:** the server refuses
+  to register `/ws` when `YFI_ENV=prod` (logs a warning rather than exiting — a
+  stray dev var should not kill a live event server), and mobile passes `wsUrl`
+  only under `import.meta.env.DEV`. In prod the answer is TLS + WebTransport,
+  not this.
+  - Verified against the actual production bundle: `wsUrl` is `undefined`, so
+    `connect()` takes its `else throw` branch and the WebSocket path is
+    unreachable. Note the bundle *does* still contain `connectWS()`'s body
+    (Rollup cannot tree-shake unused class methods) and the `ws://` URL as an
+    unreferenced dead constant. Inert, but present — do not read its absence
+    from the bundle as the guarantee; the guarantee is `wsUrl === undefined`
+    plus the server-side `YFI_ENV=prod` refusal.
+- Verified on a running dev stack (not just unit tests): the dev server logs
+  `DEV: WebSocket fallback registered on /ws` and completes a real WebSocket
+  handshake (`101` with a correct `Sec-WebSocket-Accept`); a second server
+  booted with `YFI_ENV=prod` **and** `YFI_DEV_WS=1` logged the refusal warning,
+  still came up healthy, and answered `404` to `/ws` — including to a valid
+  upgrade request.
+- Resolved the "requires Chromium" open question (researched 2026-08-25 against
+  MDN browser-compat-data, the W3C editor's draft, and MDN Baseline):
+  WebTransport is **no longer Chromium-only**. Chrome 97, Firefox 114, Safari
+  **26.4** — MDN marks it Baseline "newly available" since March 2026. On iOS
+  every browser is WebKit, so Safari 26.4 covers *all* iPhone browsers, and
+  `serverCertificateHashes` landed in the same versions (Chrome 100, Firefox
+  125, Safari 26.4). `CLAUDE.md`'s "WebTransport requires Chromium" note is
+  stale.
+  - **This does not rescue the LAN-phone case, and that is why the fallback
+    still exists.** WebTransport is restricted to *secure contexts*, which is a
+    property of the **page origin**, not the transport: on
+    `http://192.168.x.x`, `WebTransport` is undefined no matter what the server
+    presents. `serverCertificateHashes` only replaces server *name* auth with
+    hash auth — it never makes an insecure origin secure.
+  - So the venue answer is HTTPS on the mobile PWA origin. With a real cert
+    there, use that same cert for `:4433` and drop `serverCertificateHashes`
+    entirely: the spec caps hash-authenticated certs at a **two-week** total
+    validity period (and forbids RSA keys, requiring ECDSA P-256 — which
+    `certgen.go` already satisfies at 13d+1h), so keeping it in production
+    would mean a fortnightly cert-and-hash redeploy treadmill.
+  - Residual gap, and the only remaining argument for a production fallback:
+    iPhones below iOS 26.4 have no WebTransport at all and old hardware cannot
+    upgrade to get it. If those must play, the fallback has to be promoted to a
+    TLS-backed `wss://` path that is prod-eligible — an explicit decision, not
+    a relaxation of the `ws://` gates above.
+
+### Fixed — store-3: a track can no longer occupy two cells on one board (2026-08-25)
+`0002_boards.sql` claimed "a track can only be in one cell per board" in a
+comment but never enforced it: the primary key is
+`(board_id, row, col, track_id)`, so the same track in two different cells was
+two perfectly legal rows. `PlaceTrack`'s upsert targeted that PK, which only
+deduped a re-place into the *same* cell — placing into a *different* cell
+inserted a second row. The board then served the same song twice, while
+`UnplacedTracks` still counted the track as placed, so the duplicate was
+invisible in the builder UI. Deferred through QA sweeps 1–3 (low, admin-only)
+because it needed a destructive data migration that couldn't be rehearsed
+without a real Postgres.
+- New `deploy/migrations/0006_unique_placement.sql`: dedups existing rows via
+  `row_number() OVER (PARTITION BY board_id, track_id)`, then adds
+  `uq_blct_board_track (board_id, track_id)`. Both steps are idempotent (it is
+  a unique **index**, not a table constraint, so `IF NOT EXISTS` applies while
+  still being a valid `ON CONFLICT` inference target). The dedup tiebreak keeps
+  an already-`played` copy first — dropping it would let the game serve that
+  song again — then `"row", col, pos` for determinism.
+- `PlaceTrack` and `RebuildLayout` both now conflict on `(board_id, track_id)`
+  instead of the PK, turning a cross-cell re-place into a single-statement
+  move. `played` is deliberately absent from `PlaceTrack`'s `SET` list so a
+  track keeps its played state when moved. Aligning `RebuildLayout` matters
+  because with the index in place its old PK target would have raised a unique
+  violation and rolled back an entire board rebuild; its only caller
+  (`admin.aiBuild`) already dedups via its `placed` map, so this is defense in
+  depth.
+- `deploy/Makefile`'s `migrate` target hardcoded 0001–0005 and would have
+  silently skipped 0006 (`scripts/dev-up.sh` already globbed). It now globs
+  `migrations/*.sql`.
+- Verified against the live dev Postgres. The migration reported `DELETE 0` on
+  real data, so the dedup was additionally rehearsed inside a rolled-back
+  transaction against *injected* duplicates — including a case where the
+  `played` copy was not the lowest cell, so the tiebreak order was genuinely
+  exercised. New `TestStaging_PlaceTrack_MovesInsteadOfDuplicating`
+  (`YFI_TEST_DSN`-gated) asserts the move, the preserved `played` flag, that a
+  same-cell re-place still just updates `pos`, and that a raw duplicate
+  `INSERT` is rejected by the index. Proven non-vacuous twice: reverting
+  `PlaceTrack` alone fails on the unique violation, and reverting it *with the
+  index dropped* reproduces the original bug exactly ("track occupies 2
+  cells").
+
+### Changed — BREAKING: `GET /api/spotify/token` reports readiness in the body (2026-08-25)
+The endpoint now **always** answers `200` with `{"token": string|null, "connected": bool}`.
+Previously it returned `503` when Spotify was unconfigured and `409` when OAuth
+had not been completed.
+- Why: both the admin UI and the stage poll this endpoint for connection state,
+  and at the `fetch` layer a non-2xx status is indistinguishable from a network
+  or auth failure — "Spotify isn't set up" looked identical to "the request
+  died". An explicit `connected` flag separates the two.
+- Consumers updated: `web/admin/src/App.tsx` reads `body.connected` instead of
+  inferring from `res.ok`; `web/stage/src/config.ts` requires both `connected`
+  and a non-empty `token` before returning one.
+- Compatibility tests updated for the new contract: `TestSpotifyToken_Serves`
+  now asserts `connected:true`, `TestSpotifyToken_NotConfigured` asserts
+  `200 {connected:false, token:null}` (proven fails-when-reverted), and a new
+  `TestSpotifyToken_RefreshFailed` covers the old `409` path and asserts the
+  upstream error text does not leak.
+- Verified on a running dev stack with real Spotify creds loaded but OAuth not
+  completed — the old `409` path — which now answers
+  `200 {"connected":false,"token":null}`. Auth is unchanged: `401` for both a
+  missing and a wrong bearer.
+- Known trade-off: `503` (never configured) and `409` (configured but token
+  refresh failed) both collapse into `connected:false`, so clients can no longer
+  distinguish them. The server still logs the real error. No consumer branched
+  on `409`, so nothing breaks today — but surfacing a stale-token state in the
+  admin UI would need a distinct signal added back.
+
 ## [Unreleased] — 2026-06-29
 
 ### Added — Server-authoritative streaming letter reveal (stage + mobile)
