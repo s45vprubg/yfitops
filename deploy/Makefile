@@ -29,18 +29,19 @@ config:
 
 # Re-apply migrations against the running postgres container. The init mount
 # only runs on first boot, so use this to apply schema to an existing volume.
-# Idempotent: 0001_init.sql uses CREATE TABLE IF NOT EXISTS.
+# Every migration must be idempotent (CREATE ... IF NOT EXISTS etc.) because
+# this reapplies all of them every time.
+#
+# Globs migrations/*.sql rather than listing files: the list previously stopped
+# at 0005, so a newly added migration was silently skipped by `make migrate`
+# while scripts/dev-up.sh (which already globs) applied it. Lexical order is
+# the intended apply order.
 migrate:
-	$(COMPOSE) -f $(COMPOSE_FILE) exec -T postgres \
-		psql -v ON_ERROR_STOP=1 -U yfitops -d yfitops < migrations/0001_init.sql
-	$(COMPOSE) -f $(COMPOSE_FILE) exec -T postgres \
-		psql -v ON_ERROR_STOP=1 -U yfitops -d yfitops < migrations/0002_boards.sql
-	$(COMPOSE) -f $(COMPOSE_FILE) exec -T postgres \
-		psql -v ON_ERROR_STOP=1 -U yfitops -d yfitops < migrations/0003_track_lyrics.sql
-	$(COMPOSE) -f $(COMPOSE_FILE) exec -T postgres \
-		psql -v ON_ERROR_STOP=1 -U yfitops -d yfitops < migrations/0004_track_hints.sql
-	$(COMPOSE) -f $(COMPOSE_FILE) exec -T postgres \
-		psql -v ON_ERROR_STOP=1 -U yfitops -d yfitops < migrations/0005_track_played.sql
+	@for m in migrations/*.sql; do \
+		echo "==> applying $$m"; \
+		$(COMPOSE) -f $(COMPOSE_FILE) exec -T postgres \
+			psql -v ON_ERROR_STOP=1 -U yfitops -d yfitops < $$m || exit 1; \
+	done
 
 test:
 	cd $(SERVER_DIR) && go test ./...

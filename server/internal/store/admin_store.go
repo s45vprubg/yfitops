@@ -197,9 +197,9 @@ func (r *PostgresRepo) RemoveColumn(ctx context.Context, boardID string, col int
 // then recreates each column's cells and track placements. Mirrors the SQL of
 // RemoveColumn / UpdateBoardCols / AddColumn / PlaceTrack, run against the tx.
 //
-// NOTE: this transaction path has NOT been exercised against a live Postgres
-// (no local PG available) — it is written by mirroring the existing per-op SQL
-// and MUST be verified end-to-end in staging before being trusted.
+// Verified against a live Postgres by TestStaging_RebuildLayout_AtomicRollback
+// (YFI_TEST_DSN-gated): a good rebuild commits cells + placements, and a
+// rebuild that fails partway rolls back with no partial layout left behind.
 func (r *PostgresRepo) RebuildLayout(ctx context.Context, boardID string, cols int, columns []admin.LayoutColumn) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -238,11 +238,19 @@ func (r *PostgresRepo) RebuildLayout(ctx context.Context, boardID string, cols i
 				return fmt.Errorf("store: rebuild layout: add cell row=%d col=%d: %w", row, col, err)
 			}
 		}
+		// Same conflict target as PlaceTrack (uq_blct_board_track, migration
+		// 0006) rather than the PK: with the unique index in place, a payload
+		// listing one track in two cells would otherwise raise a unique
+		// violation and roll the whole rebuild back. Conflicting on
+		// (board_id, track_id) degrades that to last-placement-wins, keeping
+		// both write paths under one rule. Callers should still dedup — the
+		// only current caller (admin.aiBuild) does, via its `placed` map.
 		for _, p := range c.Placements {
 			if _, err := tx.Exec(ctx,
 				`INSERT INTO board_layout_cell_tracks (board_id, row, col, track_id, pos)
 				 VALUES ($1, $2, $3, $4, $5)
-				 ON CONFLICT (board_id, row, col, track_id) DO UPDATE SET pos = EXCLUDED.pos`,
+				 ON CONFLICT (board_id, track_id) DO UPDATE
+				   SET row = EXCLUDED.row, col = EXCLUDED.col, pos = EXCLUDED.pos`,
 				boardID, p.Row, p.Col, p.TrackID, p.Pos); err != nil {
 				return fmt.Errorf("store: rebuild layout: place track row=%d col=%d: %w", p.Row, p.Col, err)
 			}
@@ -265,11 +273,23 @@ func (r *PostgresRepo) RenameCategory(ctx context.Context, boardID string, col i
 	return nil
 }
 
+// PlaceTrack places a track in a cell, MOVING it if it is already placed
+// elsewhere on the same board.
+//
+// The conflict target is the uq_blct_board_track unique index from migration
+// 0006, not the (board_id, row, col, track_id) primary key. Conflicting on the
+// PK only deduped a re-place into the SAME cell; placing into a DIFFERENT cell
+// inserted a second row, leaving one track in two cells (store-3). Conflicting
+// on (board_id, track_id) makes that case a single-statement move instead.
+//
+// played is deliberately absent from the SET list so a track keeps its
+// already-played state when it is moved between cells.
 func (r *PostgresRepo) PlaceTrack(ctx context.Context, boardID string, row, col int, trackID string, pos int) error {
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO board_layout_cell_tracks (board_id, row, col, track_id, pos)
 		 VALUES ($1, $2, $3, $4, $5)
-		 ON CONFLICT (board_id, row, col, track_id) DO UPDATE SET pos = EXCLUDED.pos`,
+		 ON CONFLICT (board_id, track_id) DO UPDATE
+		   SET row = EXCLUDED.row, col = EXCLUDED.col, pos = EXCLUDED.pos`,
 		boardID, row, col, trackID, pos)
 	if err != nil {
 		return fmt.Errorf("store: place track: %w", err)

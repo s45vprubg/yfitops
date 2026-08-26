@@ -247,6 +247,29 @@ preflight PASSED; Go suite green under -race; gameserver redeployed with s3 code
 ## Convergence verdict
 CONVERGED. Sweep 3 = 1 high (a latent activation, closed) + 1 low cosmetic; crown jewels held. A sweep 4 is low-yield unless new features land. Accepted residual risk: the deferred low store-3, and inherent zero-trust limits already documented (DeviceFP ban evasion; RTT comp dropped as unforgeable-vs-fair impossible).
 
+## store-3 — FIXED (2026-08-25), no longer deferred
+The last carried-over deferral from sweep 1 is closed. `board_layout_cell_tracks`
+now has `uq_blct_board_track (board_id, track_id)` via
+`deploy/migrations/0006_unique_placement.sql`, which first dedups any existing
+rows (`row_number() OVER (PARTITION BY board_id, track_id)`, tiebreak keeps an
+already-`played` copy so the game can't re-serve that song). `PlaceTrack` and
+`RebuildLayout` both conflict on that index instead of the
+`(board_id, row, col, track_id)` PK, so a cross-cell re-place is now a move, not
+a duplicate row. `deploy/Makefile`'s `migrate` target was globbed — it hardcoded
+0001–0005 and would have silently skipped 0006.
+
+Verification: applied to the live dev Postgres (`DELETE 0` on real data, so the
+dedup was separately rehearsed against injected duplicates in a rolled-back
+transaction, incl. a case where the `played` copy was not the lowest cell).
+`TestStaging_PlaceTrack_MovesInsteadOfDuplicating` (YFI_TEST_DSN-gated) covers
+the move, the preserved `played` flag, same-cell `pos` update, and rejection of
+a raw duplicate INSERT. Proven fails-when-reverted twice: code-only revert →
+unique violation; code revert **plus** index drop → the original bug reproduced
+("track occupies 2 cells"). Full Go suite + existing staging tests green.
+
+Remaining deferrals are unchanged: uimobile-4 (server-side ban design) and
+adminapi-5 (CORS hardening, not a real vuln).
+
 ## Resume checklist
 - Re-read this file. Check qa/findings/*.json and qa/validation/*.json.
 - Run qa/smoke.sh + `cd server && go test ./...` for a clean baseline before edits.
