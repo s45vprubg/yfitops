@@ -19,3 +19,6 @@ export const WT_URL: string =
 
 export const HTTP_URL: string =
   import.meta.env.VITE_HTTP_URL ?? `http://${host}:8777`;
+
+export const WS_URL: string =
+  import.meta.env.VITE_WS_URL ?? `ws://${host}:8777/ws`;

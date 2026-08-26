@@ -22,3 +22,7 @@ services:
   redis:
     ports:
       - "127.0.0.1:6379:6379"
+
+  gameserver:
+    environment:
+      YFI_DEV_WS: "1"

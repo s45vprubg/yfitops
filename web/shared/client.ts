@@ -7,6 +7,11 @@
 // This keeps the door open for binary later (§11) while staying debuggable.
 //
 // The server mirrors this framing in internal/transport.
+//
+// FALLBACK: When WebTransport is unavailable (non-secure context, e.g. phone
+// over plain HTTP on a LAN), the client falls back to a WebSocket connection
+// with the same length-prefixed binary framing. The server only exposes the
+// /ws endpoint when YFI_DEV_WS=1 — this fallback is dev-only.
 
 // MAX_FRAME_LEN mirrors the server's maxFrameLen (internal/transport/framing.go,
 // 1<<20). Frames larger than this are a protocol violation and are refused
@@ -19,6 +24,9 @@ type Handler = (env: ServerEnvelope) => void;
 
 export interface ClientOptions {
   url: string; // e.g. https://host:4433/wt
+  // wsUrl: WebSocket fallback URL (e.g. ws://host:8777/ws). Only used when
+  // WebTransport is not available (non-secure context).
+  wsUrl?: string;
   // serverCertHashes: for dev self-signed certs, pass the SHA-256 hash so the
   // browser accepts the cert without a CA (WebTransport serverCertificateHashes).
   serverCertHashes?: { algorithm: "sha-256"; value: BufferSource }[];
@@ -27,6 +35,7 @@ export interface ClientOptions {
 
 export class GameClient {
   private wt?: WebTransport;
+  private ws?: WebSocket;
   private writer?: WritableStreamDefaultWriter<Uint8Array>;
   private handlers = new Map<ServerMsgType, Set<Handler>>();
   private anyHandlers = new Set<Handler>();
@@ -43,6 +52,16 @@ export class GameClient {
   }
 
   async connect(): Promise<void> {
+    if (typeof WebTransport !== "undefined") {
+      await this.connectWT();
+    } else if (this.opts.wsUrl) {
+      await this.connectWS();
+    } else {
+      throw new Error("WebTransport unavailable and no WebSocket fallback URL configured");
+    }
+  }
+
+  private async connectWT(): Promise<void> {
     const init: WebTransportOptions = {};
     if (this.opts.serverCertHashes) {
       init.serverCertificateHashes = this.opts.serverCertHashes;
@@ -53,8 +72,29 @@ export class GameClient {
 
     const stream = await this.wt.createBidirectionalStream();
     this.writer = stream.writable.getWriter();
-    this.readLoop(stream.readable.getReader()).catch(() => this.handleClose());
+    this.readLoopWT(stream.readable.getReader()).catch(() => this.handleClose());
     this.wt.closed.then(() => this.handleClose()).catch(() => this.handleClose());
+  }
+
+  private connectWS(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(this.opts.wsUrl!);
+      ws.binaryType = "arraybuffer";
+      this.ws = ws;
+
+      ws.onopen = () => {
+        this.opts.onState?.(true);
+        resolve();
+      };
+      ws.onerror = () => {
+        reject(new Error("WebSocket connection failed"));
+      };
+      ws.onclose = () => this.handleClose();
+      ws.onmessage = (ev) => {
+        const data = new Uint8Array(ev.data as ArrayBuffer);
+        this.feedWS(data);
+      };
+    });
   }
 
   on(type: ServerMsgType, h: Handler): () => void {
@@ -73,15 +113,20 @@ export class GameClient {
   }
 
   async send<D>(env: ClientEnvelope<D>): Promise<void> {
-    if (!this.writer) throw new Error("not connected");
-    // Always stamp the latest observed nonce unless the caller set one.
     if (env.n === undefined) env.n = this.lastNonce;
     const json = JSON.stringify(env);
     const body = new TextEncoder().encode(json);
     const frame = new Uint8Array(4 + body.length);
     new DataView(frame.buffer).setUint32(0, body.length, false);
     frame.set(body, 4);
-    await this.writer.write(frame);
+
+    if (this.writer) {
+      await this.writer.write(frame);
+    } else if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(frame);
+    } else {
+      throw new Error("not connected");
+    }
   }
 
   async close(): Promise<void> {
@@ -96,6 +141,11 @@ export class GameClient {
     } catch {
       /* ignore */
     }
+    try {
+      this.ws?.close();
+    } catch {
+      /* ignore */
+    }
   }
 
   private handleClose() {
@@ -103,39 +153,71 @@ export class GameClient {
     this.opts.onState?.(false);
   }
 
-  private async readLoop(reader: ReadableStreamDefaultReader<Uint8Array>) {
+  // --- WebTransport read loop ---
+  private async readLoopWT(reader: ReadableStreamDefaultReader<Uint8Array>) {
     let buf = new Uint8Array(0);
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
       if (!value) continue;
       buf = concat(buf, value);
-      // Drain as many complete frames as are buffered.
-      for (;;) {
-        if (buf.length < 4) break;
-        const len = new DataView(buf.buffer, buf.byteOffset, 4).getUint32(0, false);
-        // CONTRACT-QUESTION (QA sweep uiadmin-2): mirror the server's 1 MiB
-        // maxFrameLen (internal/transport/framing.go). Without this cap a corrupt
-        // or hostile 4-byte prefix (e.g. 0xFFFFFFFF) makes the client buffer up to
-        // ~4 GiB before dispatch — an unbounded-memory hang. A frame over the cap
-        // is a protocol violation; tear the stream down rather than buffer it.
-        if (len > MAX_FRAME_LEN) {
-          reader.cancel("frame too large").catch(() => {});
-          this.handleClose();
-          return;
-        }
-        if (buf.length < 4 + len) break;
-        const body = buf.subarray(4, 4 + len);
-        buf = buf.subarray(4 + len);
-        try {
-          const env = JSON.parse(new TextDecoder().decode(body)) as ServerEnvelope;
-          this.dispatch(env);
-        } catch {
-          /* malformed frame — skip */
-        }
+      const drained = this.drainFrames(buf);
+      if (drained === null) {
+        // Oversized frame — protocol violation. Tear the stream down.
+        reader.cancel("frame too large").catch(() => {});
+        this.handleClose();
+        return;
       }
+      buf = drained;
     }
     this.handleClose();
+  }
+
+  // --- WebSocket message accumulator ---
+  private wsBuf = new Uint8Array(0);
+
+  private feedWS(data: Uint8Array) {
+    this.wsBuf = concat(this.wsBuf, data);
+    const drained = this.drainFrames(this.wsBuf);
+    if (drained === null) {
+      // Oversized frame — protocol violation. Tear the socket down.
+      this.wsBuf = new Uint8Array(0);
+      try {
+        this.ws?.close(1009, "frame too large");
+      } catch {
+        /* ignore */
+      }
+      this.handleClose();
+      return;
+    }
+    this.wsBuf = drained;
+  }
+
+  // --- Shared frame parser ---
+  // Drains as many complete frames as are buffered, dispatching each. Returns
+  // the unconsumed remainder, or null if the peer sent an oversized frame
+  // (protocol violation — the caller must tear its transport down).
+  private drainFrames(buf: Uint8Array): Uint8Array | null {
+    for (;;) {
+      if (buf.length < 4) break;
+      const len = new DataView(buf.buffer, buf.byteOffset, 4).getUint32(0, false);
+      // CONTRACT-QUESTION (QA sweep uiadmin-2): mirror the server's 1 MiB
+      // maxFrameLen (internal/transport/framing.go). Without this cap a corrupt
+      // or hostile 4-byte prefix (e.g. 0xFFFFFFFF) makes the client buffer up to
+      // ~4 GiB before dispatch — an unbounded-memory hang. A frame over the cap
+      // is a protocol violation; tear the transport down rather than buffer it.
+      if (len > MAX_FRAME_LEN) return null;
+      if (buf.length < 4 + len) break;
+      const body = buf.subarray(4, 4 + len);
+      buf = buf.subarray(4 + len);
+      try {
+        const env = JSON.parse(new TextDecoder().decode(body)) as ServerEnvelope;
+        this.dispatch(env);
+      } catch {
+        /* malformed frame — skip */
+      }
+    }
+    return buf;
   }
 
   private dispatch(env: ServerEnvelope) {

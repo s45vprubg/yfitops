@@ -252,6 +252,26 @@ func main() {
 		log.Printf("admin API: board management skipped (Postgres unavailable); /api/spotify/token still active")
 	}
 
+	// ---- Dev-only WebSocket fallback (phones on LAN without secure context) ----
+	// WebTransport requires a secure context, so a phone on a plain-HTTP LAN
+	// origin cannot use it at all. /ws carries the same framing over cleartext
+	// WebSocket purely so real devices can be tested without standing up TLS.
+	//
+	// It is DEV-ONLY and fails closed: YFI_ENV=prod refuses the route even when
+	// YFI_DEV_WS=1, so a stray var in a prod .env cannot expose an unencrypted
+	// transport. Unlike the default-secret guard above this warns instead of
+	// exiting — dropping a live event server over an unused dev var is worse
+	// than declining the route.
+	if os.Getenv("YFI_DEV_WS") == "1" {
+		if os.Getenv("YFI_ENV") == "prod" {
+			log.Printf("WARNING: YFI_DEV_WS=1 ignored — the cleartext /ws fallback is refused when YFI_ENV=prod; use TLS + WebTransport")
+		} else {
+			wsHandler := transport.NewWSHandler(hub, eng, srv)
+			mux.Handle("/ws", wsHandler)
+			log.Printf("DEV: WebSocket fallback registered on /ws (YFI_DEV_WS=1)")
+		}
+	}
+
 	go func() {
 		log.Printf("HTTP (health/oauth/admin) on %s", cfg.HTTPAddr)
 		if err := http.ListenAndServe(cfg.HTTPAddr, admin.CORSHandler(mux)); err != nil && ctx.Err() == nil {

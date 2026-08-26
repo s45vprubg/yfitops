@@ -14,7 +14,7 @@ import type {
   WelcomeData,
   ErrorData,
 } from "@shared/protocol";
-import { WT_URL } from "./env";
+import { WT_URL, WS_URL } from "./env";
 import { fetchCertHashes } from "./cert";
 import { getDeviceFP, saveHandle } from "./fingerprint";
 
@@ -285,6 +285,12 @@ export function useGame() {
         const serverCertHashes = await fetchCertHashes();
         client = new GameClient({
           url: WT_URL,
+          // DEV-ONLY WebSocket fallback for phones on a plain-HTTP LAN origin,
+          // where WebTransport is unavailable (non-secure context). Gated on
+          // import.meta.env.DEV so a production bundle has no cleartext ws://
+          // path at all — the server likewise refuses /ws when YFI_ENV=prod.
+          // In prod the fix is TLS + WebTransport, not this.
+          wsUrl: import.meta.env.DEV ? WS_URL : undefined,
           serverCertHashes,
           onState: (connected) => {
             // Ignore state events from a superseded client (s2-ui-02): a stale

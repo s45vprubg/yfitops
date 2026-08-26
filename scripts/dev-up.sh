@@ -159,7 +159,13 @@ echo "==> building + starting Go backend (in-memory, sample board)"
 [ -n "${SPOTIFY_CLIENT_ID:-}" ] && echo "    Spotify creds present — real audio available" \
   || echo "    no Spotify creds — stage runs in demo mode (no audio)"
 cd "${ROOT}/server"
+# YFI_DEV_WS=1 mounts the cleartext /ws fallback so phones on the LAN (no
+# secure context -> no WebTransport) can still join. This launcher IS the dev
+# environment, so it defaults on; the server refuses the route outright when
+# YFI_ENV=prod. docker-compose.dev.yml sets the same var for the containerized
+# gameserver, which this flow doesn't use (we run it bare via `go run`).
 ADMIN_SECRET="${ADMIN_SECRET}" \
+YFI_DEV_WS="${YFI_DEV_WS:-1}" \
 YFI_POSTGRES_DSN="${PG_DSN}" \
 YFI_REDIS_ADDR="${REDIS_ADDR}" \
 YFI_HTTP_ADDR=":${HTTP_PORT}" \
