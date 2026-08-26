@@ -277,6 +277,9 @@ export function useGame() {
       spotify.onReady((deviceId) => {
         patch({ spotifyConnectState: "ready" });
         safeSend({ t: "stage.deviceReady", d: { spotifyDeviceID: deviceId } });
+        // Auto-dismiss the activation overlay if the browser allows autoplay
+        // (high MEI / localhost). Falls through silently if blocked.
+        void spotify.activate().then((ok) => { if (ok && !disposed) patch({ audioActivated: true }); });
       });
       spotify.onStateChange((s) => {
         safeSend({
@@ -300,6 +303,7 @@ export function useGame() {
     audio.onReady((deviceId) => {
       patch({ spotifyConnectState: audio.getConnectState() });
       safeSend({ t: "stage.deviceReady", d: { spotifyDeviceID: deviceId } });
+      void audio.activate().then((ok) => { if (ok && !disposed) patch({ audioActivated: true }); });
     });
     audio.onStateChange((s) => {
       safeSend({
