@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## Upgrading past 5c7c623 (2026-08-25)
+
+On an existing Postgres volume, run `cd deploy && make migrate` **before**
+starting the new server: `make up` does not apply migrations, and `PlaceTrack` /
+`RebuildLayout` now infer `ON CONFLICT (board_id, track_id)`, which errors
+(`42P10`) without migration 0006's index. `scripts/dev-up.sh` migrates on its
+own. 0006 dedups existing rows, so a board that currently has one track in two
+cells will lose the duplicate cell. Pre-built frontend `dist/` bundles must be
+rebuilt for the breaking `GET /api/spotify/token` change; `npm run dev` is fine.
+
 ## [Unreleased] — 2026-07-01
 
 ### Added
