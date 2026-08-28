@@ -60,7 +60,7 @@ Requires Docker (with Compose). From the repo root:
 
 ```bash
 cd deploy
-cp .env.example .env          # then edit secrets / Spotify creds
+cp .env.example .env          # then edit secrets / Spotify creds AND set YFI_ENV=prod for a real event (arms the default-secret + cleartext-/ws guards)
 make up                       # build + start postgres, redis, gameserver
 make logs                     # tail logs
 make down                     # stop
@@ -70,9 +70,9 @@ Or without the Makefile: `docker compose up --build` from `deploy/`.
 
 This brings up three services:
 
-- **postgres** (`postgres:16-alpine`) — runs `deploy/migrations/0001_init.sql`
-  and `0002_boards.sql` on first boot. To (re)apply the schema to an existing
-  volume: `make migrate`.
+- **postgres** (`postgres:16-alpine`) — runs every `deploy/migrations/*.sql` in
+  lexical order on first boot (the whole directory is mounted as an init dir).
+  To (re)apply the schema to an existing volume: `make migrate`.
 - **redis** (`redis:7-alpine`) — the atomic buzz lock.
 - **gameserver** — the Go engine, listening on:
   - **`:4433/udp`** — WebTransport / QUIC / HTTP3 (note: UDP).
@@ -87,6 +87,43 @@ engine starts with no board — use the Board Builder to create and load one.
 
 All env vars are documented in [`deploy/.env.example`](./deploy/.env.example)
 and read by `server/internal/config/config.go`.
+
+### Before a real event: set `YFI_ENV=prod`
+
+`YFI_ENV` defaults to `dev`, which downgrades the **default-secret boot guard**
+in `server/cmd/gameserver/main.go` to a warning. Set to anything other than
+`dev` and the server *refuses to start* while `ADMIN_SECRET`,
+`YFI_NONCE_SECRET`, or `YFI_JOIN_SECRET` still hold the dev defaults shipped in
+`.env.example`. Casing and surrounding whitespace don't matter — `prod`,
+`Prod`, `production`, ` PROD ` all arm it.
+
+Copying `.env.example` alone therefore leaves you on `changeme-admin` with the
+guard disarmed — anyone who reaches the port can claim admin and stage. For an
+attendee-facing deployment, set real secrets **and** `YFI_ENV=prod` in
+`deploy/.env`. The guard lives in `main.go` rather than `config.go` because
+`config.go` is a locked contract file.
+
+### The cleartext `/ws` fallback is a separate, explicit decision
+
+WebTransport needs a secure context, so a phone on a plain-HTTP LAN origin
+can't use it at all. `/ws` carries the same framing over unencrypted WebSocket
+for exactly that case, and it takes **two** vars — `YFI_DEV_WS=1` **and**
+`YFI_INSECURE_TRANSPORT=1`. Setting only the first mounts nothing and logs a
+notice naming the missing one.
+
+It is deliberately **independent of `YFI_ENV`**. Keying it off `YFI_ENV` made
+the gate mutually exclusive with its own use case: an operator who needed the
+LAN fallback had to stay out of prod, which also disarmed the secret guard
+above — the flag meant to harden the deployment pushed people into the weaker
+configuration. Registering `/ws` with `YFI_ENV=prod` is now allowed and logs a
+loud warning on every boot.
+
+Understand what you're turning on: `/ws` has **no encryption and no cert
+pinning**. Anyone on the same network can read, forge and replay frames,
+including the admin/stage secret in the hello. This runs at a hacker
+conference; assume they will. Use it only on a network you trust — the real
+answer is TLS + WebTransport. `scripts/dev-up.sh` and
+`deploy/docker-compose.dev.yml` set both vars for you.
 
 ## Running the frontends
 

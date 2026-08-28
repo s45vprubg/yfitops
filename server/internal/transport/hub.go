@@ -57,6 +57,13 @@ func NewHub() *Hub {
 // down the read side, unblocking serveStream's parked ReadFrame and driving its
 // OnDisconnect/hub.remove teardown. It is variadic so pure-hub unit tests can
 // register a bare io.Writer with no stream to close.
+//
+// INVARIANT: the streamCloser MUST NOT BLOCK. stop() is called inline from
+// enqueue, which runs on the engine's single broadcast goroutine
+// (Broadcast/BroadcastAll/SendTo), so a closer that waits on the network freezes
+// the entire game. Use an immediate teardown (WebSocket: CloseNow, never
+// Close(code, reason) — that waits for the peer's close reply; WebTransport:
+// CancelRead + Close, see streamCloser in server.go).
 func (h *Hub) add(id string, w io.Writer, streamCloser ...io.Closer) *conn {
 	c := &conn{
 		id:     id,

@@ -24,13 +24,32 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 
+# Apply ALL migrations, in lexical order. This used to apply only 0001_init.sql,
+# which meant every schema change from 0002 onward was missing and the tests that
+# cover them ran against a stale database. Glob rather than list, for the same
+# reason deploy/Makefile's migrate target globs: a hardcoded list silently stops
+# being complete the moment someone adds a file.
 echo "==> applying migrations"
-docker exec -i yfi-pg psql -U yfitops -d yfitops < "${ROOT}/deploy/migrations/0001_init.sql" >/dev/null
+for mig in "${ROOT}/deploy/migrations/"*.sql; do
+  echo "    $(basename "${mig}")"
+  if ! docker exec -i yfi-pg psql -v ON_ERROR_STOP=1 -U yfitops -d yfitops \
+      < "${mig}" >/dev/null; then
+    echo "ERROR: migration failed: $(basename "${mig}")" >&2
+    exit 1
+  fi
+done
 
+# Both DSN env var names are exported deliberately. server/test/ gates on
+# YFI_TEST_PG; internal/store's staging tests gate on YFI_TEST_DSN. Exporting
+# only the first meant the store tests self-skipped here — including the
+# regression guard for the store-3 unique-placement fix — while still reporting
+# a green run. Set both until the names are unified.
 echo "==> running integration + e2e + unit tests"
 cd "${ROOT}/server"
+PG_DSN="postgres://yfitops:yfitops@localhost:${PG_PORT}/yfitops?sslmode=disable"
 YFI_TEST_REDIS=localhost:${REDIS_PORT} \
-YFI_TEST_PG="postgres://yfitops:yfitops@localhost:${PG_PORT}/yfitops?sslmode=disable" \
+YFI_TEST_PG="${PG_DSN}" \
+YFI_TEST_DSN="${PG_DSN}" \
   go test ./... "$@"
 
 echo "==> done"

@@ -25,4 +25,10 @@ services:
 
   gameserver:
     environment:
+      # Cleartext /ws fallback for LAN phones with no secure context. BOTH vars
+      # are required: YFI_DEV_WS selects the route, YFI_INSECURE_TRANSPORT is the
+      # explicit acknowledgement that the transport is unencrypted. Setting only
+      # the first makes the route a silent 404 (the server logs a NOTICE naming
+      # the missing var). Only ever set this pair in a dev override like this one.
       YFI_DEV_WS: "1"
+      YFI_INSECURE_TRANSPORT: "1"

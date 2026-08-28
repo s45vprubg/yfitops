@@ -36,6 +36,16 @@ export function currentPoints(row: number, elapsedMs: number): number {
 
 // currentPointsFromPool — same linear decay but uses explicit ceiling/floor
 // instead of computing from row. Used after a partial grade shifts the pool.
+//
+// CONTRACT-QUESTION (tech-debt audit, DEBT-005): this is the one piece of the §7
+// curve that does NOT live in the locked scoring.go — its Go twin is a private
+// func in game/engine.go, because scoring.go cannot be edited. So the formula
+// exists three times (scoring.go, engine.go, here) and this copy is the one the
+// stage calls every animation frame (views/ActiveRound.tsx), meaning a drift
+// shows up as the projected number disagreeing with the score actually awarded.
+// The Go side now pins the shared vectors in game/scoring_test.go
+// (TestCurrentPointsFromPool_*); reproduce those here if/when the frontends get
+// a test runner. Worth folding into scoring.go on a contract version bump.
 export function currentPointsFromPool(max: number, base: number, elapsedMs: number): number {
   const t = elapsedMs / 1000.0;
   const bonus = max - base;

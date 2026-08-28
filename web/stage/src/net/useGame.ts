@@ -279,7 +279,12 @@ export function useGame() {
         safeSend({ t: "stage.deviceReady", d: { spotifyDeviceID: deviceId } });
         // Auto-dismiss the activation overlay if the browser allows autoplay
         // (high MEI / localhost). Falls through silently if blocked.
-        void spotify.activate().then((ok) => { if (ok && !disposed) patch({ audioActivated: true }); });
+        // Identity-checked (s4-ui-new-04): `disposed` only means the mount
+        // effect is alive, not that this is still the LIVE player. initSpotify
+        // destroys and replaces audioRef.current at runtime, so a slow
+        // activate() from a dead player must not dismiss the overlay for a
+        // successor that was never activated (silent projector, no re-arm).
+        void spotify.activate().then((ok) => { if (ok && !disposed && audioRef.current === spotify) patch({ audioActivated: true }); });
       });
       spotify.onStateChange((s) => {
         safeSend({
@@ -303,7 +308,9 @@ export function useGame() {
     audio.onReady((deviceId) => {
       patch({ spotifyConnectState: audio.getConnectState() });
       safeSend({ t: "stage.deviceReady", d: { spotifyDeviceID: deviceId } });
-      void audio.activate().then((ok) => { if (ok && !disposed) patch({ audioActivated: true }); });
+      // Identity-checked for the same reason as initSpotify's site above
+      // (s4-ui-new-04): this mount-time player is swapped out by initSpotify.
+      void audio.activate().then((ok) => { if (ok && !disposed && audioRef.current === audio) patch({ audioActivated: true }); });
     });
     audio.onStateChange((s) => {
       safeSend({

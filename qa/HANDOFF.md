@@ -270,6 +270,138 @@ unique violation; code revert **plus** index drop → the original bug reproduce
 Remaining deferrals are unchanged: uimobile-4 (server-side ban design) and
 adminapi-5 (CORS hardening, not a real vuln).
 
+# SWEEP 4 (2026-08-27) — DONE
+
+Full report: `docs/security/qa-sweep-4.md`. Findings/verdicts in
+`qa/findings-sweep4/` and `qa/validation-sweep4/` (now gitignored, on disk only).
+
+## Scoping decision that made this sweep worth running
+Sweep 3's verdict ("a sweep 4 is low-yield unless new features land") was right on
+its own terms and wrong in fact — features HAD landed. Scoping to the ~1100-line
+post-sweep-3 delta instead of re-running sweeps 1-3's surfaces found a brand-new
+transport that had never been QA'd, plus an uncommitted tech-debt audit that had
+never been reviewed. **Do this again: diff against the last sweep's HEAD first,
+and treat "converged" as converged-as-of-that-tree, not converged-forever.**
+
+## Outcome
+10 confirmed findings FIXED (3 high, 4 medium, 3 low) + 2 doc-only fixes for dead
+code that looked like defects. 4 REFUTED. 1 regression caught in a fix before
+commit. `qa/acid.sh` created (did not exist); 27 locked gates, 13 added this sweep.
+
+## The finding that organized the sweep
+`transport/ws.go` (`/ws`) is a SECOND DOOR into the same Hub and engine. Split
+cleanly by where each guarantee is enforced:
+- **Inherited safely** (enforced in the engine): §4A sanitization, §4B arrival
+  stamp, §4D nonce, frame size cap, client-IP capture.
+- **Silently void** (enforced in `server.go`'s WebTransport branch): session
+  limiter, hub-side connection teardown, idle timeout.
+Any future transport gets this exact audit. Anything added to `handleSession`
+needs a twin in `ServeHTTP`.
+
+## Fixed & verified
+- **s4-ws-c1 HIGH** — `/ws` acquired no session limiter slot; sweep 3's flood cap
+  was void while the route was up. Acquire pre-upgrade, one release per exit,
+  shared limiter with `/wt`. `TestWSHandlerHonorsSessionLimiter`.
+- **s4-ws-c2 HIGH** — `hub.add(connID, rw)` omitted the `streamCloser` the WT path
+  passes; a hub-side drop left an open socket and a live read loop (a dropped
+  player who could still buzz). `TestWSHandlerDropTearsDownSocket`.
+- **s4-ws-c3 MED** — no idle reaper vs QUIC's 30s `MaxIdleTimeout`.
+  `TestWSHandlerIdleTimeout`.
+- **s4-ws-x2 HIGH** — prod gates compared raw `YFI_ENV == "prod"`, so
+  `Prod`/`PROD`/`production`/trailing-space failed OPEN. Normalized AND inverted:
+  the secret guard now fires whenever `YFI_ENV != dev`, so a typo fails closed.
+- **s4-engine MED** — 4 sites derived the scoring pool from the board ROW, not the
+  live post-partial/post-halve state: stage projected 140 while the server paid
+  70, admin showed 190. One `roundPool`/`livePool` accessor pair now feeds all 4.
+  NO payout change. 4 `TestPool_*` gates.
+- **s4-ws-x1 HIGH** — buzz ties broke on `playerID`, which IS the client-supplied
+  device fingerprint; 1ms arrival granularity makes ties the COMMON path, so a low
+  fingerprint won every contested buzz all game. Now pre-shuffle + `SliceStable`
+  on arrivalMs alone. `TestQARegression_BuzzTieBreakIsRandomNotPlayerID`.
+- **s4-ui-new-01 MED** — mobile leaked an open QUIC session per reconnect attempt.
+- **s4-ui-02 MED** — one teardown fired `onState(false)` twice on 3 paths.
+- **s4-ui-new-03 LOW** — a text frame became a zero-length array and vanished.
+- **s4-ui-new-04 MED** — stage audio overlay dismissible by a destroyed player.
+- **s4-api-001 LOW** — `/api/spotify/token`'s error branch was silent.
+
+## Owner decisions taken this sweep (do not re-litigate)
+1. **`/ws` decoupled from `YFI_ENV`**, requires `YFI_DEV_WS=1` **and**
+   `YFI_INSECURE_TRANSPORT=1`. Keying it off `YFI_ENV` made the gate mutually
+   exclusive with its own use case and pushed operators OUT of prod.
+2. **Buzz ties broken randomly.** Not by any client-influenced field.
+3. **Payout semantics unchanged (compounding).** The pool fix is display-only.
+
+## REFUTED / not defects (don't re-report)
+- `web/shared/client.ts` is NOT a locked contract file — no `web/` file is on
+  either authoritative list. See "open" below for the real (docs) issue.
+- `math.Floor` vs `int()` in `currentPointsFromPool`: no reachable disagreement
+  (call site clamps both ends ≥0). Changed for spelling consistency only.
+- `decrypt.ts` reveal timings do NOT drift from `reveal.go` — the reveal is
+  server-driven and `computeFrame` + both constants have ZERO callers. Dead code.
+  Do not "sync" the numbers.
+- `SampleBoard`'s `5, 5` is not a duplicate of `Config.BoardRows/BoardCols`; those
+  fields are read from env and used by nothing at all.
+
+## Gotchas learned (ranked — read these before sweep 5)
+1. **A green gate can be structurally incapable of catching its own bug class.**
+   `TestConnDropClosesStreamOnOverflow` (sweep 2) registers a bare `io.Writer`, so
+   it could never catch a real call site omitting the closer argument. When a fix
+   is "pass the right argument," the gate must exercise the CALL SITE.
+2. **`streamCloser` MUST NOT BLOCK.** `conn.stop()` runs inline on the engine's
+   single broadcast goroutine. A validator proposed nhooyr's
+   `c.Close(code, reason)` — it waits ~5s for a peer close-reply from a peer that
+   by construction isn't reading, i.e. a whole-game freeze. Use `CloseNow()`.
+   Invariant is now written into `hub.go`.
+3. **Do NOT make `enqueue` call `hub.remove()`.** Deadlock: `remove()` takes
+   `h.mu.Lock()` while `Broadcast` iterates a snapshot under RLock.
+4. **Grep every consumer of a variable whose semantics you changed.** Decoupling
+   `/ws` from `YFI_ENV` silently broke `dev-up.sh` and `docker-compose.dev.yml`,
+   which set only `YFI_DEV_WS=1`. Both now set the pair.
+5. **`sort.Slice` is UNSTABLE.** A pre-shuffle followed by `sort.Slice` is
+   discarded. `SliceStable` or the randomness is decorative.
+6. **`deploy/docker-compose.yml` has no `env_file:`** — only vars listed under
+   `environment:` reach the container. `GEMINI_API_KEY` never did until this sweep.
+7. **The Bash sandbox blocks UDP binds**, which fails 4 tests with
+   `listen udp 127.0.0.1:0: bind: operation not permitted`. Not a real failure —
+   rerun unsandboxed. And an unsandboxed rerun will report `(cached)`: force
+   `-count=1` or the green is unearned.
+8. `alpine:3.20` (the server image) has BusyBox `wget` but no `curl` — the compose
+   healthcheck uses `wget`.
+9. `new Uint8Array(someString)` silently yields length 0 in JS. No throw.
+
+## Verification (cold)
+`RACE=1 qa/acid.sh` → **ACID PASSED** (27/27 gates present, cold build/vet, `go
+test -count=1` and `-count=1 -race` green all packages, gates proven to execute,
+smoke green). `scripts/preflight.sh` → **PREFLIGHT PASSED** (clean npm reinstall +
+prod build of all 3 frontends). Plus a 5-case live `/ws` boot matrix against a
+freshly built binary (`qa/ws-matrix.sh`), all 5 as specified.
+
+NOT verified, not claimed: the 5 `TestStaging_*` gates self-skip without
+`YFI_TEST_DSN`. `preflight.sh` now WARNS about this instead of implying coverage.
+Run them against real Postgres before an event — see STAGING VERIFICATION above.
+
+## Still open after sweep 4
+- **uimobile-4** — server-side ban enforcement (design, deferred since sweep 1).
+- **adminapi-5** — CORS hardening (deferred since sweep 1).
+- **s4-ui-01 (OWNER CALL)** — is `web/shared/client.ts` a locked contract file?
+  `CLAUDE.md` and `docs/BUILD_CONTRACT.md` say no; the file's own header prose and
+  an earlier section of THIS file say yes. The docs contradict each other.
+- `YFI_BOARD_ROWS`/`YFI_BOARD_COLS` are accepted and ignored (config.go locked).
+- The §7 curve exists 3× (`scoring.go`, `engine.go`, `scoring.ts`). Go pair is
+  pinned by shared vectors; the TS copy can't be — no frontend test runner.
+
+## Sweep 5 recommendation
+WARRANTED, and scoped, not broad. Sweep 4 found 3 highs in code that had shipped
+without review, and it wrote ~10 fixes of its own. Sweep 5 should be an
+adversarial audit OF SWEEP 4'S FIXES plus the surfaces they touch: the new limiter
+acquire/release pairing on `/ws` under real concurrency, the idle timer's
+interaction with the hub writer goroutine, `livePool` against every reachable
+`pointFactor`/partial combination, the buzz shuffle under >2 contenders with mixed
+eligibility, and the `down` latch against every teardown path in all 3 frontends.
+Fixes are where the nastiest bugs live.
+
 ## Resume checklist
-- Re-read this file. Check qa/findings/*.json and qa/validation/*.json.
-- Run qa/smoke.sh + `cd server && go test ./...` for a clean baseline before edits.
+- Re-read this file. Check qa/findings-sweep4/*.json and qa/validation-sweep4/*.json.
+- Run `qa/acid.sh` for a clean baseline before edits — it is the ratchet, and it
+  only grows. Every fix adds a gate, proven RED before it is trusted.
+- `scripts/preflight.sh` is the Definition of Done, not `go test` alone.

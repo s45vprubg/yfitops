@@ -316,7 +316,16 @@ export function useGame() {
           conn: "disconnected",
           error: e instanceof Error ? e.message : "Connection failed",
         });
+        // Close the half-open client, don't just drop it (s4-ui-new-01):
+        // connectWT awaits wt.ready BEFORE createBidirectionalStream, so if
+        // anything after ready throws, the QUIC session is OPEN and this was its
+        // only reference — every backoff retry would leak another live session
+        // and burn a per-IP limiter slot. Captured before nulling the ref (the
+        // local `client` may be unassigned if fetchCertHashes threw), same
+        // prev/null/close order as handleDisconnect.
+        const dead = clientRef.current;
         clientRef.current = null;
+        void dead?.close();
         // Keep trying — a mid-game drop must not permanently wedge the player.
         scheduleReconnect();
         return;

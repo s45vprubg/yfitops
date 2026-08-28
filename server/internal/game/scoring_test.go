@@ -73,6 +73,89 @@ func TestPartialAward(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// currentPointsFromPool — the post-partial decay curve. Defined in engine.go
+// (scoring.go is a locked contract file and cannot host it), mirrored in JS by
+// web/shared/scoring.ts, which the stage calls every animation frame to paint
+// the live point value. Three copies of one formula: these are the vectors all
+// three must reproduce. If you change the curve, change it in all three and
+// update this table.
+// ---------------------------------------------------------------------------
+
+// TestCurrentPointsFromPool_MatchesCurrentPoints proves the pool form is a
+// generalization, not a divergence: fed the row-derived ceiling and the standard
+// base it must agree with CurrentPoints exactly, at every row, across the whole
+// hold/decay/floor range. This is the assertion that catches one copy of the
+// formula being edited without the other.
+func TestCurrentPointsFromPool_MatchesCurrentPoints(t *testing.T) {
+	for row := 1; row <= 5; row++ {
+		for ms := int64(0); ms <= 70000; ms += 125 {
+			want := CurrentPoints(row, ms)
+			got := currentPointsFromPool(MaxPointsForRow(row), BaseValue, ms)
+			if got != want {
+				t.Fatalf("row %d t=%dms: pool form = %d, CurrentPoints = %d", row, ms, got, want)
+			}
+		}
+	}
+}
+
+// TestCurrentPointsFromPool_ShiftedPool covers what CurrentPoints cannot express:
+// the reduced ceiling/floor left alive after a partial guess. The pool below is
+// the real one from a row-5 partial at t=0 — PartialAward leaves remaining=150,
+// and gradeCorrect pairs it with baseP = BaseValue-PartialPoints = 50.
+func TestCurrentPointsFromPool_ShiftedPool(t *testing.T) {
+	const maxP, baseP = 150, 50 // bonus = 100
+
+	cases := []struct {
+		name string
+		ms   int64
+		want int
+	}{
+		{"t=0 holds at ceiling", 0, 150},
+		{"t=5s still holds (boundary inclusive)", 5000, 150},
+		// frac = 1 - (10-5)/55 = 0.9090..., 50 + 90.909... = 140.909... -> 140.
+		// The only vector here that distinguishes floor from round; keep it.
+		{"t=10s floors a fractional value", 10000, 140},
+		// frac = 1 - (32.5-5)/55 = 0.5 -> 50 + 50 = 100.
+		{"t=32.5s halfway", 32500, 100},
+		{"t=60s drops to floor (boundary inclusive)", 60000, 50},
+		{"t=120s stays at floor", 120000, 50},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := currentPointsFromPool(maxP, baseP, c.ms); got != c.want {
+				t.Errorf("currentPointsFromPool(%d, %d, %d) = %d, want %d",
+					maxP, baseP, c.ms, got, c.want)
+			}
+		})
+	}
+}
+
+// TestCurrentPointsFromPool_DegenerateAndMonotonic covers the collapsed pool (a
+// row-1 partial leaves max == base, so there is no bonus to decay) and asserts
+// the curve never rewards waiting.
+func TestCurrentPointsFromPool_DegenerateAndMonotonic(t *testing.T) {
+	// Row 1 partial: PartialAward(1, 0) leaves remaining=50, and gradeCorrect
+	// clamps baseP down to maxP. No bonus -> flat.
+	for _, ms := range []int64{0, 5000, 30000, 60000, 90000} {
+		if got := currentPointsFromPool(50, 50, ms); got != 50 {
+			t.Errorf("flat pool t=%dms = %d, want 50", ms, got)
+		}
+	}
+
+	prev := currentPointsFromPool(150, 50, 0)
+	for ms := int64(0); ms <= 70000; ms += 250 {
+		got := currentPointsFromPool(150, 50, ms)
+		if got > prev {
+			t.Fatalf("pool points increased at t=%dms: %d > %d", ms, got, prev)
+		}
+		if got < 50 {
+			t.Fatalf("pool points fell below the floor at t=%dms: %d", ms, got)
+		}
+		prev = got
+	}
+}
+
 func TestDailyDoubleMultiplier(t *testing.T) {
 	cases := []struct {
 		stars float64

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"runtime/debug"
 	"sort"
@@ -92,6 +93,12 @@ type buzzContender struct {
 // currentPointsFromPool applies the same linear decay as CurrentPoints but with
 // explicit ceiling/floor instead of row-derived values. Used after a partial
 // shifts the scoring pool. (Cannot live in scoring.go — fixed contract.)
+//
+// This is the THIRD copy of the §7 decay curve, and the only one on a hot
+// display path: web/shared/scoring.ts mirrors it verbatim for the stage's 60fps
+// point timer (web/stage/src/views/ActiveRound.tsx), so the two must agree at
+// the floor or the projected number disagrees with the score awarded.
+// TestCurrentPointsFromPool_* pins the vectors both sides must reproduce.
 func currentPointsFromPool(maxP, baseP int, elapsedMs int64) int {
 	t := float64(elapsedMs) / 1000.0
 	bonus := float64(maxP - baseP)
@@ -103,8 +110,55 @@ func currentPointsFromPool(maxP, baseP int, elapsedMs int64) int {
 	default:
 		span := DecayEndSeconds - DecayHoldSeconds
 		frac := 1.0 - (t-DecayHoldSeconds)/span
-		return int(float64(baseP) + bonus*frac)
+		// math.Floor, not a bare int() truncation: identical for the
+		// non-negative pools this can be called with (PartialAward clamps
+		// remaining at 0), but the §7 contract specifies floor and the JS
+		// mirror uses Math.floor. Keep the three copies spelled the same way.
+		return int(math.Floor(float64(baseP) + bonus*frac))
 	}
+}
+
+// roundPool returns the round's awardable (ceiling, floor) BEFORE pointFactor:
+// the post-partial pool once a partial has taken its 50, otherwise the row's.
+// gradeCorrect awards from THIS pool and then applies pointFactor itself, so
+// the factor must not be folded in here (that would double-apply it).
+func (e *Engine) roundPool() (maxP, baseP int) {
+	if e.partial.active {
+		// A prior partial shifted the decay pool: the remaining ceiling with
+		// the leftover half of the base as its floor.
+		maxP, baseP = e.partial.remaining, BaseValue-PartialPoints
+	} else {
+		maxP, baseP = MaxPointsForRow(e.curRow), BaseValue
+	}
+	if baseP > maxP {
+		baseP = maxP // defensive: never invert the pool (see livePool)
+	}
+	return maxP, baseP
+}
+
+// livePool is roundPool with pointFactor applied to BOTH ends. It is the single
+// source of truth for every pool we put on the wire (trackStart) or show the
+// admin, so the number the stage projects at 60fps is the number gradeCorrect
+// pays (§5 / BUILD_CONTRACT hard rule 6). Deriving a pool from the row instead
+// is what made the stage show 190 and pay 70.
+//
+// Both ends are floored, and floor(floor(x)/2) == floor(x/2), so for an even
+// bonus the projected value is EXACTLY the awarded one. An odd bonus (rows 2
+// and 4 with no partial: 25 and 75) can project 1 point low, which is the
+// closest an integer wire pool can get; low, never overstated.
+//
+// baseP is clamped to maxP because web/shared/scoring.ts computes
+// bonus = max - base and would decay upward from a negative bonus.
+func (e *Engine) livePool() (maxP, baseP int) {
+	maxP, baseP = e.roundPool()
+	if e.pointFactor > 0 && e.pointFactor < 1 {
+		maxP = int(math.Floor(float64(maxP) * e.pointFactor))
+		baseP = int(math.Floor(float64(baseP) * e.pointFactor))
+	}
+	if baseP > maxP {
+		baseP = maxP
+	}
+	return maxP, baseP
 }
 
 // Engine implements game.InboundHandler and drives the full lifecycle.
@@ -804,9 +858,12 @@ func (e *Engine) trackStartEnvelope() protocol.ServerEnvelope {
 	if e.curTrack != nil {
 		artistLen, songLen = len(e.curTrack.Artist), len(e.curTrack.Song)
 	}
+	// The LIVE pool, not the row's: a mid-round resume/reconnect must not hand
+	// the stage back points a partial or the halve gate already took away.
+	maxP, baseP := e.livePool()
 	return e.envelope(protocol.SMsgTrackStart, protocol.TrackStartData{
-		MaxPoints:  MaxPointsForRow(e.curRow),
-		BasePoints: BaseValue,
+		MaxPoints:  maxP,
+		BasePoints: baseP,
 		StartTime:  e.trackStartMs,
 		ArtistLen:  artistLen,
 		SongLen:    songLen,
@@ -900,7 +957,7 @@ func (e *Engine) addContender(c buzzContender) {
 }
 
 // resolveBuzzWindow closes the collection window and awards the buzz to the
-// contender with the earliest server arrival time (tie-break: playerID). It
+// contender with the earliest server arrival time (ties broken RANDOMLY). It
 // re-validates eligibility, takes the atomic BuzzLock for the
 // winner (preserving the cross-instance single-winner guarantee), runs the
 // winner path, and tells every other contender they lost. roundKey is compared
@@ -910,18 +967,32 @@ func (e *Engine) resolveBuzzWindow(roundKey string) {
 		return // stale / superseded / already resolved
 	}
 
-	// Order contenders by (arrivalMs, playerID) for full determinism — server
-	// arrival time is the sole, unforgeable ordering input (§4B; see onBuzz note
-	// on why §4C RTT compensation is intentionally not applied).
+	// Order contenders by server arrival time — the sole, unforgeable ordering
+	// input (§4B; see onBuzz note on why §4C RTT compensation is intentionally
+	// not applied).
+	//
+	// TIE-BREAK IS RANDOM (QA sweep 4, s4-ws-new-x1). arrivalMs has 1ms
+	// granularity, so at a conference two phones on the same Wi-Fi tie constantly
+	// — this is the common case, not a corner case. The old tie-break was
+	// `a.playerID < b.playerID`, which handed every one of those ties to the
+	// lexicographically smallest player ID for the whole game. Player IDs are
+	// client-influenced, so a player who could steer their ID low would win every
+	// tie in every round: a systematic, farmable advantage from a field that is
+	// not supposed to affect ordering at all.
+	//
+	// Pre-shuffle, then sort STABLY on arrivalMs alone, so the shuffle survives as
+	// the intra-tie order. Stability is what makes e.rng the DEFINED and seedable
+	// source of the tie-break; plain sort.Slice is an unstable pdqsort that would
+	// throw the shuffle away and substitute its own pivot-dependent permutation.
+	// (That permutation is not ID-biased, so swapping it in would not resurrect
+	// the bug this replaced — it would just make fairness an accident of the sort
+	// implementation instead of a property we can seed and test. Do not swap it.)
+	// e.rng is the engine's injectable source (Deps.Rand) and this runs on the
+	// engine's single goroutine, so it needs no lock and tests can seed it.
 	order := make([]buzzContender, len(e.buzzContenders))
 	copy(order, e.buzzContenders)
-	sort.Slice(order, func(i, j int) bool {
-		a, b := order[i], order[j]
-		if a.arrivalMs != b.arrivalMs {
-			return a.arrivalMs < b.arrivalMs
-		}
-		return a.playerID < b.playerID
-	})
+	e.rng.Shuffle(len(order), func(i, j int) { order[i], order[j] = order[j], order[i] })
+	sort.SliceStable(order, func(i, j int) bool { return order[i].arrivalMs < order[j].arrivalMs })
 
 	// Pick the best still-eligible contender. A contender that went offline /
 	// banned / already-guessed since buzzing is skipped in favor of the next.
@@ -1042,19 +1113,11 @@ func (e *Engine) onGrade(connID string, env protocol.ClientEnvelope) {
 // gradeCorrect awards decayed points; winner picks the next cell; buzzer stays
 // disabled; the cell's track is consumed and we head to karaoke (§3.6, §7).
 func (e *Engine) gradeCorrect(winner *Player, elapsed int64) {
-	pts := CurrentPoints(e.curRow, elapsed)
-	if e.partial.active {
-		// A prior partial shifted the decay pool. Compute the decayed value
-		// using the reduced ceiling/floor and elapsed relative to the partial's
-		// re-anchored trackStartMs.
-		maxP := e.partial.remaining
-		baseP := BaseValue - PartialPoints
-		if baseP > maxP {
-			baseP = maxP
-		}
-		pts = currentPointsFromPool(maxP, baseP, elapsed)
-	}
-	// Halve if one field revealed ahead of the other this round.
+	// elapsed is relative to trackStartMs, which a partial re-anchors.
+	maxP, baseP := e.roundPool()
+	pts := currentPointsFromPool(maxP, baseP, elapsed)
+	// Halve if one field revealed ahead of the other this round. Applied here
+	// and NOT inside roundPool, so it is applied exactly once.
 	if e.pointFactor > 0 && e.pointFactor < 1 {
 		pts = int(float64(pts) * e.pointFactor)
 	}
@@ -1105,8 +1168,8 @@ func (e *Engine) gradePartial(winner *Player, elapsed int64, kind string) {
 		return
 	}
 
-	// Resume audio (inline instead of resumeAudio() so we send only one
-	// trackStart with the reduced scoring pool).
+	// Resume audio inline instead of resumeAudio(): we re-anchor the timer 5001ms
+	// in the past (below) rather than at pausedAtMs, and send only one trackStart.
 	_ = e.audio.Resume(context.Background())
 	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{
 		Action: "resume", PositionMs: e.pausedAtMs,
@@ -1114,19 +1177,10 @@ func (e *Engine) gradePartial(winner *Player, elapsed int64, kind string) {
 
 	// Re-anchor timer with the reduced pool. Start 5001ms in the past so the
 	// hold period is already elapsed and decay begins immediately.
-	partialStartMs := nowMs() - 5001
-	e.trackStartMs = partialStartMs
-	newBase := BaseValue - PartialPoints
-	if newBase > remaining {
-		newBase = remaining
-	}
-	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgTrackStart, protocol.TrackStartData{
-		MaxPoints:  remaining,
-		BasePoints: newBase,
-		StartTime:  partialStartMs,
-		ArtistLen:  len(e.curTrack.Artist),
-		SongLen:    len(e.curTrack.Song),
-	}))
+	e.trackStartMs = nowMs() - 5001
+	// e.partial is already set above, so trackStartEnvelope's livePool() carries
+	// the reduced (and, if the halve gate already fired, halved) pool.
+	e.bcast.Broadcast(protocol.RoleStage, e.trackStartEnvelope())
 
 	// Force the graded field fully revealed on BOTH surfaces via the mask
 	// (server-authoritative reveal), and keep the stage-only cosmetic
@@ -1953,17 +2007,9 @@ func (e *Engine) halvePoints() {
 		return // already zeroed by the full lockout; nothing to halve
 	}
 	e.pointFactor = 0.5
-	artistLen, songLen := 0, 0
-	if e.curTrack != nil {
-		artistLen, songLen = len(e.curTrack.Artist), len(e.curTrack.Song)
-	}
-	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgTrackStart, protocol.TrackStartData{
-		MaxPoints:  MaxPointsForRow(e.curRow) / 2,
-		BasePoints: BaseValue / 2,
-		StartTime:  e.trackStartMs,
-		ArtistLen:  artistLen,
-		SongLen:    songLen,
-	}))
+	// Halve the LIVE pool via trackStartEnvelope/livePool, not the row's: after a
+	// partial the row pool is stale and the stage would project more than we pay.
+	e.bcast.Broadcast(protocol.RoleStage, e.trackStartEnvelope())
 }
 
 // scheduleAutoKaraoke waits cfg.AutoKaraokeMs after the reveal fully completes,
@@ -2068,7 +2114,10 @@ func (e *Engine) adminViewEnvelope() protocol.ServerEnvelope {
 	if e.curTrack != nil {
 		av.CorrectArtist = e.curTrack.Artist
 		av.CorrectSong = e.curTrack.Song
-		av.CurrentPoints = CurrentPoints(e.curRow, e.pausedAtMs)
+		// From the live pool, so the grader sees what CORRECT will actually pay
+		// rather than the un-reduced row value.
+		maxP, baseP := e.livePool()
+		av.CurrentPoints = currentPointsFromPool(maxP, baseP, e.pausedAtMs)
 	}
 	if w := e.reg.players[e.buzzWinner]; w != nil {
 		av.BuzzedPlayerID = w.ID

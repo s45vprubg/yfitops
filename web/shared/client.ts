@@ -42,6 +42,14 @@ export class GameClient {
   private lastNonce = 0;
   private opts: ClientOptions;
   private closed = false;
+  // CONTRACT-QUESTION (QA sweep s4-ui-02/s4-ui-new-02): single-fire teardown
+  // latch. A single teardown event used to fire handleClose() TWICE on both
+  // transports — feedWS does ws.close(1009) *and* handleClose() (and the close
+  // re-enters via ws.onclose), readLoopWT does reader.cancel() *and*
+  // handleClose() (and ending the session re-enters via wt.closed). Callers
+  // build a fresh GameClient per connection attempt, so a permanent latch is
+  // safe; if an internal reconnect is ever added, reset `down` in connect().
+  private down = false;
 
   constructor(opts: ClientOptions) {
     this.opts = opts;
@@ -82,17 +90,41 @@ export class GameClient {
       ws.binaryType = "arraybuffer";
       this.ws = ws;
 
+      let opened = false;
+
       ws.onopen = () => {
+        opened = true;
         this.opts.onState?.(true);
         resolve();
       };
       ws.onerror = () => {
+        // CONTRACT-QUESTION (QA sweep s4-ui-02): a failed handshake must report
+        // ONCE. connectWS wires onclose at construction time (connectWT only
+        // chains teardown after wt.ready resolves), so pre-open the caller used
+        // to get BOTH a connect() rejection and an onState(false). Latch the
+        // teardown here so the rejection is the single signal — matching
+        // connectWT. Only pre-open: an error on a live socket must still let
+        // onclose report the disconnect, or the reconnect loop wedges.
+        if (!opened) this.down = true;
         reject(new Error("WebSocket connection failed"));
       };
       ws.onclose = () => this.handleClose();
       ws.onmessage = (ev) => {
-        const data = new Uint8Array(ev.data as ArrayBuffer);
-        this.feedWS(data);
+        // CONTRACT-QUESTION (QA sweep s4-ui-new-03): the framing is binary-only.
+        // An unchecked `as ArrayBuffer` cast made a TEXT frame become a
+        // zero-length Uint8Array — the frame vanished with no throw and no
+        // teardown. Fail loudly instead (hardening: this server only ever
+        // writes binary; a proxy or hand-rolled dev server might not).
+        if (!(ev.data instanceof ArrayBuffer)) {
+          try {
+            ws.close(1003, "binary frames only");
+          } catch {
+            /* ignore */
+          }
+          this.handleClose();
+          return;
+        }
+        this.feedWS(new Uint8Array(ev.data));
       };
     });
   }
@@ -149,7 +181,8 @@ export class GameClient {
   }
 
   private handleClose() {
-    if (this.closed) return;
+    if (this.closed || this.down) return;
+    this.down = true;
     this.opts.onState?.(false);
   }
 
