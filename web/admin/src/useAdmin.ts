@@ -165,16 +165,30 @@ export function useAdmin(): [AdminState, AdminActions] {
 
   const login = useCallback(
     async (secret: string) => {
-      // Replace any prior connection.
-      await clientRef.current?.close().catch(() => {});
+      // Capture+null the ref and patch to "connecting" BEFORE awaiting the
+      // close of any prior connection (s5-ui-02). Login's busy gate is driven
+      // by status === "connecting", so patching it synchronously here — before
+      // anything yields — disables the form within this same click handler.
+      // Previously the close() await came first, so on a re-login (where
+      // close() stalls on a dead link) the button stayed enabled long enough
+      // for an impatient second click to re-enter login() concurrently.
+      const prev = clientRef.current;
+      clientRef.current = null;
       secretRef.current = secret;
       patch({ status: "connecting", error: undefined });
+      await prev?.close().catch(() => {});
 
       const certHashes = await fetchCertHash();
       const client = new GameClient({
         url: WT_URL,
         serverCertHashes: certHashes,
         onState: (connected) => {
+          // Ignore state events from a superseded client (s5-ui-02): a stale
+          // client's late onState must not corrupt the current connected/status
+          // once a newer login() attempt has replaced it. Compares the locally
+          // captured `client` const, not clientRef.current, mirroring the same
+          // guard in mobile's useGame.ts and stage's useGame.ts.
+          if (client !== clientRef.current) return;
           patch({ connected });
           setState((s) =>
             connected || s.status === "error"

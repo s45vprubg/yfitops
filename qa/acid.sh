@@ -58,6 +58,14 @@ GATES=(
   TestQARegression_BuzzTieBreakIsRandomNotPlayerID  # s4-x1: low playerID won every tie
   TestQARegression_BuzzEarliestArrivalStillWinsAfterShuffle # s4-x1: shuffle must not break §4B
   TestDecideWS                                      # s4-x2: /ws opt-in matrix
+  # sweep 5 — modeName/isProd/isDev boot wrappers had zero coverage
+  TestEnvModeWrappers                               # s5-cfg-03: os.Getenv wrappers untested (case/whitespace could silently disarm gates)
+  # sweep 5 — /ws teardown hygiene (sweep 4's own fixes, audited)
+  TestWSHandlerTeardownLogging                      # s5-ws-001: intended teardown logged as a fault; inverse subtest proves real errors still log
+  TestIdleTimerResetVetoesStaleGeneration           # s5-ws-003: Timer.Reset can't retract an in-flight AfterFunc
+  # sweep 5 — buzz fairness beyond n=2 (sweep 4's gates only covered a 2-way tie)
+  TestQARegression_BuzzFairnessHoldsAtFiveWayTie    # s5-eng: a biased shuffle is invisible at n=2
+  TestQARegression_IneligiblePlayersNeverBecomeContendersOrWin # s5-eng: banned/already-guessed must never win a shuffled tie
 )
 echo "==> gate presence (${#GATES[@]} locked regressions)"
 for g in "${GATES[@]}"; do

@@ -1,8 +1,10 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -327,4 +329,152 @@ func TestWSHandlerIdleTimeout(t *testing.T) {
 			t.Fatalf("healthy heartbeating conn was reaped: hub=%d disconnects=%d", hubSize(hub), h.disconnected())
 		}
 	})
+}
+
+// captureLog redirects the shared log.Writer() to a buffer for the duration
+// of a test and restores it on cleanup.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	orig := log.Writer()
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(orig) })
+	return &buf
+}
+
+// TestWSHandlerTeardownLogging is the regression test for s5-ws-001: an
+// intentional local teardown (idle reap, or a hub-side drop via conn.stop())
+// must not log a "read error" — that is expected, deliberate behavior, not a
+// fault. A genuine unexpected disconnect must still log loudly; otherwise this
+// gate would also pass if someone deleted the logging entirely.
+func TestWSHandlerTeardownLogging(t *testing.T) {
+	t.Run("idle reap is silent", func(t *testing.T) {
+		buf := captureLog(t)
+		hub := NewHub()
+		h := &wsStubHandler{}
+		url, ts, wsh := newWSTestServer(t, hub, h, &Server{limiter: newSessionLimiter(0, 0)})
+		wsh.idleTimeout = 100 * time.Millisecond
+
+		c, _, err := wsDial(t, url, ts)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer c.CloseNow()
+		waitFor(t, "hub registration", func() bool { return hubSize(hub) == 1 })
+		waitFor(t, "idle conn to be reaped", func() bool { return hubSize(hub) == 0 && h.disconnected() == 1 })
+
+		if strings.Contains(buf.String(), "read error") {
+			t.Fatalf("idle reap logged a read error, want a silent intentional teardown:\n%s", buf.String())
+		}
+	})
+
+	t.Run("hub drop is silent", func(t *testing.T) {
+		buf := captureLog(t)
+		hub := NewHub()
+		h := &wsStubHandler{}
+		url, ts, _ := newWSTestServer(t, hub, h, &Server{limiter: newSessionLimiter(0, 0)})
+
+		c, _, err := wsDial(t, url, ts)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		defer c.CloseNow()
+		waitFor(t, "hub registration", func() bool { return hubSize(hub) == 1 })
+		victim := anyConn(hub)
+		if victim == nil {
+			t.Fatal("conn vanished from hub")
+		}
+
+		blob, err := json.Marshal(strings.Repeat("x", 64<<10))
+		if err != nil {
+			t.Fatalf("marshal blob: %v", err)
+		}
+		big := protocol.ServerEnvelope{Type: protocol.SMsgState, Data: blob}
+
+		deadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			select {
+			case <-victim.closed:
+			default:
+				hub.BroadcastAll(big)
+				continue
+			}
+			break
+		}
+		select {
+		case <-victim.closed:
+		default:
+			t.Fatal("could not trigger the enqueue overflow drop")
+		}
+		waitFor(t, "OnDisconnect after drop", func() bool { return h.disconnected() == 1 })
+
+		if strings.Contains(buf.String(), "read error") {
+			t.Fatalf("hub drop logged a read error, want a silent intentional teardown:\n%s", buf.String())
+		}
+	})
+
+	t.Run("genuine abrupt disconnect still logs", func(t *testing.T) {
+		buf := captureLog(t)
+		hub := NewHub()
+		h := &wsStubHandler{}
+		url, ts, _ := newWSTestServer(t, hub, h, &Server{limiter: newSessionLimiter(0, 0)})
+
+		c, _, err := wsDial(t, url, ts)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		waitFor(t, "hub registration", func() bool { return hubSize(hub) == 1 })
+
+		// A genuinely abnormal peer-initiated close (protocol error, not the
+		// Normal/GoingAway codes isWSNormalClose treats as expected). The
+		// server never flagged this as its own doing, so it must still log.
+		_ = c.Close(websocket.StatusProtocolError, "boom")
+
+		waitFor(t, "server notices the dirty disconnect", func() bool { return h.disconnected() == 1 })
+
+		if !strings.Contains(buf.String(), "read error") {
+			t.Fatalf("genuine unexpected disconnect did not log a read error — logging was over-suppressed:\n%s", buf.String())
+		}
+	})
+}
+
+// TestIdleTimerResetVetoesStaleGeneration is the regression test for
+// s5-ws-003: time.Timer.Reset cannot retract an AfterFunc callback that has
+// already begun running, so a naive single-Timer idleTimer would fire
+// onExpire even after a reset() logically superseded it. This exercises the
+// generation-guard directly (deterministic — no sleep-based timer race)
+// rather than trying to win a sub-millisecond scheduling race against the
+// real time.AfterFunc, which would be flaky by construction.
+func TestIdleTimerResetVetoesStaleGeneration(t *testing.T) {
+	fired := make(chan struct{}, 1)
+	i := newIdleTimer(time.Hour, func() { fired <- struct{}{} })
+	defer i.stop()
+
+	// Bind a callback to generation 0 — standing in for the real AfterFunc
+	// callback of a timer that already fired but had not yet acquired mu when
+	// a reset() arrived microseconds later and superseded it.
+	stale := i.fireFunc(0)
+
+	// A real reset() bumps the generation and arms a fresh timer, exactly as
+	// it would if traffic arrived right after the stale timer expired.
+	i.reset()
+	i.reset()
+
+	stale()
+	select {
+	case <-fired:
+		t.Fatal("stale generation's callback fired onExpire; reset() failed to veto it")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	i.mu.Lock()
+	gen := i.gen
+	i.mu.Unlock()
+	current := i.fireFunc(gen)
+	current()
+	select {
+	case <-fired:
+	case <-time.After(time.Second):
+		t.Fatal("current generation's callback did not fire onExpire")
+	}
 }

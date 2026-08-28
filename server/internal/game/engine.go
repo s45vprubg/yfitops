@@ -1580,6 +1580,14 @@ func (e *Engine) checkDailyDoubleComplete() {
 	}
 }
 
+// finishDailyDouble deliberately computes its bonus from the raw
+// MaxPointsForRow(e.curRow), NOT through roundPool()/livePool() — this is not a
+// site the sweep-4 accessor refactor missed. The crowd-rating bonus is a
+// separate performance-multiplier mechanic (scoring.go's locked doc comment:
+// DailyDoubleMultiplier "maps an average crowd star rating to the performance
+// bonus multiplier applied to the max track value"), and it is never broadcast
+// as a projected decaying pool, so there is no display-vs-award divergence for
+// livePool to guard against here.
 func (e *Engine) finishDailyDouble() {
 	performer := e.reg.players[e.cellPicker]
 	if performer != nil && len(e.ratings) > 0 {

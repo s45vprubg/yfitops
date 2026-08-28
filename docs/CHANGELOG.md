@@ -493,6 +493,96 @@ are now gitignored and untracked, while staying on disk so `qa/HANDOFF.md`'s
 resume checklist can still read them. `qa/HANDOFF.md` and `qa/smoke.sh` remain
 tracked — the narrative and the tooling are what outlive a sweep.
 
+### Fixed — QA sweep 5: a reconnect fix could close the healthy connection (2026-08-28)
+Full report: `docs/security/qa-sweep-5.md`. Sweep 5 audited **sweep 4's own
+fixes**. 7 findings confirmed, all low/medium, 1 refuted; nothing critical or
+high survived validation. The two highest-severity reports were both downgraded
+with their stated mechanisms refuted — and in both cases the validator then found
+a *different, real* path to the same defect.
+- **`web/mobile/src/useGame.ts`**: sweep 4's connect-failure `close()` operated on
+  the shared `clientRef`, so two concurrent `establish()` calls could close the
+  healthy client and leak the failed one — re-creating the session leak it was
+  written to kill. The reachable path is not a double-tap (the join button is
+  disabled while connecting and `conn:"connecting"` is patched synchronously);
+  it is a pending backoff timer racing a manual retry, both passing the
+  `clientRef.current`-null guard while the manual attempt is parked in
+  `await fetchCertHashes()`. Fixed by closing the instance *this* invocation owns
+  (`if (clientRef.current === client)`) at every ref-clearing site, plus an
+  overlap latch released in a `finally` — the `finally` is load-bearing, since a
+  stranded latch would block every future reconnect and end that player's game.
+- **`web/admin/src/useAdmin.ts`**: `onState` had no stale-client guard (mobile and
+  stage both have one), and `patch({status:"connecting"})` ran *after*
+  `await close()`. On a **re-login** — `useAdmin` has no disconnect handler, so
+  the dead client is still in the ref and the Login form is re-enabled — that
+  await stalls on the broken link with the submit button still live. Patch hoisted
+  above the await so the busy gate is synchronous; guard compares the locally
+  captured `client`, not the ref (a guard against the ref is a tautology).
+  Not extended to `wire()`'s handlers: `welcome` is what admits the operator, and
+  a misapplied guard there could lock them out of the control room mid-event.
+
+### Fixed — QA sweep 5: `/ws` teardown hygiene (2026-08-28)
+- Deliberate teardown (idle reaper, or a hub drop via `conn.stop()`) left the
+  parked read loop returning a `net.ErrClosed`-shaped error that fell through the
+  `io.EOF` / normal-close check and logged `read error`. Normal behavior logging
+  as a fault is how a real fault gets scrolled past at a live event. Fixed with a
+  `localClose` flag set **before** `CloseNow()` in both paths; genuine peer errors
+  still log loudly, and the gate asserts that inverse.
+- `idleTimer.reset()` used `Timer.Reset`, which cannot retract an `AfterFunc`
+  that has already begun running. Real, but a sub-millisecond race against a 30s
+  timer with ~15x heartbeat margin. Fixed with a generation counter: a superseded
+  callback vetoes itself. It decides under `mu` and calls `onExpire()` after
+  releasing it — holding a lock across `CloseNow()` invents a deadlock while
+  fixing a benign race. Tradeoff: a fresh timer allocation per `reset()`, safe
+  only because §5's deterministic-timer contract means there is no per-tick
+  server broadcast. Revisit if one is ever added.
+- **Refuted, with a measurement**: concurrent `CloseNow()` was claimed to
+  serialize on the library's `closeMu` for the winner's full close duration (~15s
+  on the engine's single broadcast goroutine). 8 concurrent `CloseNow()` on one
+  real conn peaked at **81µs**. This re-validates sweep 4's choice of `CloseNow()`
+  over `Close(code, reason)` and `hub.go`'s "must not block" invariant.
+
+### Fixed — QA sweep 5: docs still claimed a protection sweep 4 removed (2026-08-28)
+Sweep 4 decoupled `/ws` from `YFI_ENV`; `web/mobile/.env.example` and a comment in
+`useGame.ts` were missed and still claimed the server refuses `/ws` when
+`YFI_ENV=prod`. Documentation that overstates a protection is worse than none — a
+reader skips the real check. Both now state the actual gate: both `YFI_DEV_WS=1`
+and `YFI_INSECURE_TRANSPORT=1` required, no `YFI_ENV` backstop, prod may opt in
+and only warns. Also documented at `finishDailyDouble` that its bypass of the new
+`roundPool`/`livePool` accessors is **deliberate** (a separate crowd-rating bonus,
+never broadcast as a projected decaying pool), so a future sweep does not re-file
+it as the fifth site that doesn't use the accessor pair.
+
+### Added — QA sweep 5: coverage for the gaps sweep 4 left (2026-08-28)
+`qa/acid.sh` grew from 27 to **32** locked gates. Two lock sweep 5's fixes
+(`TestWSHandlerTeardownLogging`, `TestIdleTimerResetVetoesStaleGeneration`);
+three lock holes sweep 4 left behind:
+- `TestEnvModeWrappers` — sweep 4 tested the pure predicates (`isProdEnv`,
+  `isDevEnv`, `decideWS`) and left `modeName()`/`isProd()`/`isDev()`, the
+  `os.Getenv` wrappers that actually run at boot, with **zero** coverage — and
+  the casing bug lived in precisely that wrapper layer. The `staging` case pins
+  the inverted secret guard failing **closed** on an unrecognized value.
+- `TestQARegression_BuzzFairnessHoldsAtFiveWayTie` — sweep 4's fairness gates
+  only cover n=2, where a biased shuffle is essentially invisible. Asserts every
+  one of 5 tied contenders wins at least once over a fixed seed range;
+  deliberately does not assert distribution tightness, because a flaky ratchet
+  entry is worse than an absent one.
+- `TestQARegression_IneligiblePlayersNeverBecomeContendersOrWin` — sweep 4
+  changed how contenders are *ordered*; nothing verified the reordering could not
+  admit a banned or already-guessed player at all.
+
+The engine surface came back **clean** on a re-hunt, with sweep 4's two
+game-correctness fixes independently re-proven by revert-and-watch-it-fail
+(`fp1 won 40/40`; projected 190 vs awarded 70). A brute force over the whole
+pool domain measured `worst_low=-1, worst_high=0` — the documented 1-point floor
+residual, and nothing projects high.
+
+**Known gap, stated rather than dressed up:** the two UI fixes have **no
+regression gate**, because no frontend has a test runner. They were proven by
+`tsc --noEmit`, a production build, and a line-numbered interleaving trace
+instead; no pseudo-gate was added to any script to make the coverage look
+present. This is the same gap that blocks pinning the TypeScript copy of the §7
+decay curve, and it has now blocked coverage in two consecutive sweeps.
+
 ## [Unreleased] — 2026-06-29
 
 ### Added — Server-authoritative streaming letter reveal (stage + mobile)

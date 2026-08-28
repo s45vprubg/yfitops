@@ -43,6 +43,43 @@ func TestEnvModePredicates(t *testing.T) {
 	}
 }
 
+// isProdEnv/isDevEnv are pure and pinned above, but modeName/isProd/isDev are
+// the os.Getenv-wrapped versions that actually run at boot and produce the
+// first boot-log line. A case-sensitive or untrimmed compare there ("Prod",
+// " prod ") silently disarmed both the default-secret guard and the /ws gate
+// while the pure predicates stayed green — so this pins the wrappers too.
+func TestEnvModeWrappers(t *testing.T) {
+	cases := []struct {
+		env      string
+		wantProd bool
+		wantDev  bool
+		wantMode string
+	}{
+		{"", false, true, "dev"},
+		{"dev", false, true, "dev"},
+		{"prod", true, false, "prod"},
+		{"production", true, false, "prod"},
+		{"Prod", true, false, "prod"},
+		{"PROD", true, false, "prod"},
+		{"  prod  ", true, false, "prod"},
+		{"staging", false, false, "non-dev"},
+	}
+	for _, c := range cases {
+		t.Run(c.env, func(t *testing.T) {
+			t.Setenv("YFI_ENV", c.env)
+			if got := isProd(); got != c.wantProd {
+				t.Errorf("isProd() with YFI_ENV=%q = %v, want %v", c.env, got, c.wantProd)
+			}
+			if got := isDev(); got != c.wantDev {
+				t.Errorf("isDev() with YFI_ENV=%q = %v, want %v", c.env, got, c.wantDev)
+			}
+			if got := modeName(); got != c.wantMode {
+				t.Errorf("modeName() with YFI_ENV=%q = %q, want %q", c.env, got, c.wantMode)
+			}
+		})
+	}
+}
+
 // The /ws decision matrix: YFI_DEV_WS x YFI_INSECURE_TRANSPORT x prod.
 // Registration requires BOTH opt-ins and is independent of YFI_ENV; a declined
 // route must always say why.

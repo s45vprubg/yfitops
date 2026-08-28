@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nhooyr.io/websocket"
@@ -88,6 +89,15 @@ func (ws *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
+	// localClose flags a teardown WE initiated (idle reap or a hub-side drop)
+	// so the read-loop error branch below can tell "the socket died because we
+	// deliberately killed it" from "the socket died and we don't know why" —
+	// the former is expected behavior and must not log as a fault, the latter
+	// is the only thing worth a loud log line. Set it BEFORE calling CloseNow
+	// in both teardown paths so there is no window where the resulting
+	// net.ErrClosed-shaped read error could slip through unflagged.
+	var localClose atomic.Bool
+
 	// Idle reaper: a network-idle peer (phone in a tunnel, laptop lid closed)
 	// never produces a read error, so without this the read loop parks forever.
 	// CloseNow is immediate and unblocks the parked Reader below; the timer is
@@ -95,6 +105,7 @@ func (ws *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// genuine silence trips it.
 	idle := newIdleTimer(ws.idleTimeout, func() {
 		log.Printf("transport/ws: idle timeout (%s) from %s; closing", ws.idleTimeout, ip)
+		localClose.Store(true)
 		_ = c.CloseNow()
 		cancel()
 	})
@@ -113,7 +124,10 @@ func (ws *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// a peer reply the dropped peer will never send — that would freeze the
 	// whole game for the handshake timeout. CloseNow is immediate, idempotent,
 	// and composes with the defer above.
-	ws.hub.add(connID, rw, closerFunc(func() error { return c.CloseNow() }))
+	ws.hub.add(connID, rw, closerFunc(func() error {
+		localClose.Store(true)
+		return c.CloseNow()
+	}))
 	ws.handler.OnConnect(connID, ip)
 	defer func() {
 		ws.handler.OnDisconnect(connID)
@@ -124,7 +138,7 @@ func (ws *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for {
 		body, err := fr.ReadFrame()
 		if err != nil {
-			if !errors.Is(err, io.EOF) && !isWSNormalClose(err) {
+			if !errors.Is(err, io.EOF) && !isWSNormalClose(err) && !localClose.Load() {
 				log.Printf("transport/ws: conn %s read error: %v", connID, err)
 			}
 			return
@@ -190,15 +204,43 @@ func (rw *wsReadWriter) Write(p []byte) (int, error) {
 // called from BOTH the read loop and the hub's writer goroutine, so the
 // underlying time.Timer is mutex-guarded; once stop() has run (handler exit)
 // further resets are no-ops so the timer cannot be re-armed after teardown.
+//
+// time.Timer.Reset does NOT retract an AfterFunc callback that has already
+// begun running — a reset() arriving microseconds after expiry does not save
+// the connection under a naive single-Timer implementation. gen guards
+// against that: each reset() stops the current timer, bumps gen, and arms a
+// FRESH timer whose callback closes over the new generation. A callback for
+// a superseded timer that is already in flight will, once it acquires mu,
+// see i.gen no longer matches the generation it was armed with and veto
+// itself instead of firing onExpire.
 type idleTimer struct {
-	mu      sync.Mutex
-	t       *time.Timer
-	d       time.Duration
-	stopped bool
+	mu       sync.Mutex
+	t        *time.Timer
+	d        time.Duration
+	stopped  bool
+	gen      uint64
+	onExpire func()
 }
 
 func newIdleTimer(d time.Duration, onExpire func()) *idleTimer {
-	return &idleTimer{t: time.AfterFunc(d, onExpire), d: d}
+	i := &idleTimer{d: d, onExpire: onExpire}
+	i.t = time.AfterFunc(d, i.fireFunc(0))
+	return i
+}
+
+// fireFunc returns a callback bound to generation gen. It decides under mu
+// whether this firing is still current, then — critically — calls onExpire
+// AFTER releasing the lock, so onExpire (which may CloseNow/cancel) can never
+// be blocked behind, or itself block, a concurrent reset()/stop() call.
+func (i *idleTimer) fireFunc(gen uint64) func() {
+	return func() {
+		i.mu.Lock()
+		expired := !i.stopped && i.gen == gen
+		i.mu.Unlock()
+		if expired {
+			i.onExpire()
+		}
+	}
 }
 
 func (i *idleTimer) reset() {
@@ -207,9 +249,12 @@ func (i *idleTimer) reset() {
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if !i.stopped {
-		i.t.Reset(i.d)
+	if i.stopped {
+		return
 	}
+	i.gen++
+	i.t.Stop()
+	i.t = time.AfterFunc(i.d, i.fireFunc(i.gen))
 }
 
 func (i *idleTimer) stop() {

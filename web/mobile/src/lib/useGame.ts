@@ -87,6 +87,9 @@ export function useGame() {
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptRef = useRef(0);
   const handleRef = useRef<string>("");
+  // True while an establish() attempt is in flight (s5-ui-01). Set/cleared only
+  // in establish(), via try/finally, never manually.
+  const establishingRef = useRef(false);
   // Holds the latest establish() so scheduleReconnect can call it without a
   // useCallback dependency cycle (establish -> handleDisconnect -> schedule).
   const establishRef = useRef<
@@ -275,85 +278,106 @@ export function useGame() {
 
   const establish = useCallback(
     async (handle: string, isReconnect: boolean) => {
-      if (clientRef.current) return;
-      handleRef.current = handle;
-      patch({ conn: "connecting", error: null });
-      saveHandle(handle);
-
-      let client: GameClient;
+      // Overlap guard (s5-ui-01): the backoff timer's attempt and a manual
+      // retry can both pass a clientRef-only check while the first is parked in
+      // fetchCertHashes(). Released in the finally below on EVERY exit path —
+      // a stranded latch would reject every future reconnect forever. Dropping
+      // an overlapping attempt is safe: the in-flight one either connects or
+      // re-arms the backoff from its own catch.
+      if (clientRef.current || establishingRef.current) return;
+      establishingRef.current = true;
       try {
-        const serverCertHashes = await fetchCertHashes();
-        client = new GameClient({
-          url: WT_URL,
-          // DEV-ONLY WebSocket fallback for phones on a plain-HTTP LAN origin,
-          // where WebTransport is unavailable (non-secure context). Gated on
-          // import.meta.env.DEV so a production bundle has no cleartext ws://
-          // path at all — the server likewise refuses /ws when YFI_ENV=prod.
-          // In prod the fix is TLS + WebTransport, not this.
-          wsUrl: import.meta.env.DEV ? WS_URL : undefined,
-          serverCertHashes,
-          onState: (connected) => {
-            // Ignore state events from a superseded client (s2-ui-02): a stale
-            // client's late onState(false) must not disconnect a healthy newer
-            // one. close() sets client.closed so the intended path stays quiet.
-            if (client !== clientRef.current) return;
-            if (connected) {
-              reconnectAttemptRef.current = 0;
-              patch({ conn: "connected" });
-            } else {
-              handleDisconnect();
-            }
-          },
-        });
-        // establish() early-returns if clientRef.current is set, so the old
-        // client is always torn down (and close()d) by handleDisconnect before
-        // we get here — no previous client to close on this path (s2-ui-02).
-        clientRef.current = client;
-        wireHandlers(client);
-        await client.connect();
-      } catch (e) {
-        patch({
-          conn: "disconnected",
-          error: e instanceof Error ? e.message : "Connection failed",
-        });
-        // Close the half-open client, don't just drop it (s4-ui-new-01):
-        // connectWT awaits wt.ready BEFORE createBidirectionalStream, so if
-        // anything after ready throws, the QUIC session is OPEN and this was its
-        // only reference — every backoff retry would leak another live session
-        // and burn a per-IP limiter slot. Captured before nulling the ref (the
-        // local `client` may be unassigned if fetchCertHashes threw), same
-        // prev/null/close order as handleDisconnect.
-        const dead = clientRef.current;
-        clientRef.current = null;
-        void dead?.close();
-        // Keep trying — a mid-game drop must not permanently wedge the player.
-        scheduleReconnect();
-        return;
-      }
+        handleRef.current = handle;
+        patch({ conn: "connecting", error: null });
+        saveHandle(handle);
 
-      // Re-attach with the SAME deviceFP + saved handle so the server resumes
-      // this device's score (§3.2), then ask for a fresh state snapshot.
-      // Guarded (s2-ui-03): a write-side reject here must not become an
-      // unhandled rejection that strands clientRef non-null with no heartbeat
-      // and no reconnect — mirror the connect() catch.
-      try {
-        await client.send<HelloData>({
-          t: "hello",
-          d: { role: "mobile", handle, deviceFP: getDeviceFP() },
-        });
-        if (isReconnect) {
-          await client.send({ t: "resync" });
+        // The instance THIS invocation owns. Every ref clear below is gated on
+        // identity so an attempt can never close/disown another's client
+        // (s5-ui-01). Left undefined if fetchCertHashes() throws first.
+        let client: GameClient | undefined;
+        try {
+          const serverCertHashes = await fetchCertHashes();
+          client = new GameClient({
+            url: WT_URL,
+            // DEV-ONLY WebSocket fallback for phones on a plain-HTTP LAN origin,
+            // where WebTransport is unavailable (non-secure context). Gated on
+            // import.meta.env.DEV so a production bundle has no cleartext ws://
+            // path at all — the server mounts /ws only with YFI_DEV_WS=1 AND
+            // YFI_INSECURE_TRANSPORT=1 (no YFI_ENV backstop; prod may opt in and
+            // only warns). In prod the fix is TLS + WebTransport, not this.
+            wsUrl: import.meta.env.DEV ? WS_URL : undefined,
+            serverCertHashes,
+            onState: (connected) => {
+              // Ignore state events from a superseded client (s2-ui-02): a stale
+              // client's late onState(false) must not disconnect a healthy newer
+              // one. close() sets client.closed so the intended path stays quiet.
+              if (client !== clientRef.current) return;
+              if (connected) {
+                reconnectAttemptRef.current = 0;
+                patch({ conn: "connected" });
+              } else {
+                handleDisconnect();
+              }
+            },
+          });
+          // establish() early-returns if clientRef.current is set, so the old
+          // client is always torn down (and close()d) by handleDisconnect before
+          // we get here — no previous client to close on this path (s2-ui-02).
+          clientRef.current = client;
+          wireHandlers(client);
+          await client.connect();
+        } catch (e) {
+          patch({
+            conn: "disconnected",
+            error: e instanceof Error ? e.message : "Connection failed",
+          });
+          // Close the half-open client, don't just drop it (s4-ui-new-01):
+          // connectWT awaits wt.ready BEFORE createBidirectionalStream, so if
+          // anything after ready throws, the QUIC session is OPEN and this was
+          // its only reference — every backoff retry would leak another live
+          // session and burn a per-IP limiter slot. Close OUR client, and
+          // surrender the ref only while it is still ours (s5-ui-01); the
+          // optional call covers fetchCertHashes throwing before construction,
+          // where there is nothing to close.
+          if (clientRef.current === client) clientRef.current = null;
+          void client?.close();
+          // Keep trying — a mid-game drop must not permanently wedge the player.
+          scheduleReconnect();
+          return;
         }
-        startHeartbeat();
-      } catch (e) {
-        patch({
-          conn: "disconnected",
-          error: e instanceof Error ? e.message : "Connection failed",
-        });
-        clientRef.current = null;
-        void client.close();
-        scheduleReconnect();
-        return;
+
+        // Unreachable: the block above either assigns `client` or returns from
+        // its catch. Present so the send path below is type-narrowed.
+        if (!client) return;
+
+        // Re-attach with the SAME deviceFP + saved handle so the server resumes
+        // this device's score (§3.2), then ask for a fresh state snapshot.
+        // Guarded (s2-ui-03): a write-side reject here must not become an
+        // unhandled rejection that strands clientRef non-null with no heartbeat
+        // and no reconnect — mirror the connect() catch.
+        try {
+          await client.send<HelloData>({
+            t: "hello",
+            d: { role: "mobile", handle, deviceFP: getDeviceFP() },
+          });
+          if (isReconnect) {
+            await client.send({ t: "resync" });
+          }
+          startHeartbeat();
+        } catch (e) {
+          patch({
+            conn: "disconnected",
+            error: e instanceof Error ? e.message : "Connection failed",
+          });
+          if (clientRef.current === client) clientRef.current = null;
+          void client.close();
+          scheduleReconnect();
+          return;
+        }
+      } finally {
+        // Sole release point. Every return/throw above passes through here, so
+        // the latch can never strand and lock the player out of reconnecting.
+        establishingRef.current = false;
       }
     },
     [handleDisconnect, patch, scheduleReconnect, startHeartbeat, wireHandlers],
