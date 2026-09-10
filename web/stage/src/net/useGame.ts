@@ -18,6 +18,8 @@ import { GameClient } from "@shared/client";
 import type {
   AudioData,
   BoardData,
+  DailyDoublePerformerData,
+  DailyDoubleResultData,
   GameState,
   LyricsData,
   MaskedRevealData,
@@ -67,6 +69,13 @@ export interface GameView {
   audioMode: AudioPlayer["mode"];
   spotifyConnectState: ConnectState;
   audioActivated: boolean;
+  // Sanitized (handle/ID only, no track data) — who's up for a Daily Double
+  // and whether the performance has started. Null when not in one.
+  ddPerformer: DailyDoublePerformerData | null;
+  // The final average rating + points once a Daily Double resolves. Persists
+  // through the transition back to BOARD so the reveal banner is visible;
+  // cleared when the next Daily Double's offer starts or a new track begins.
+  ddResult: DailyDoubleResultData | null;
 }
 
 // Infer the board row for a given selection so the timer uses the right
@@ -99,6 +108,8 @@ export function useGame() {
     audioMode: "demo",
     spotifyConnectState: "idle",
     audioActivated: false,
+    ddPerformer: null,
+    ddResult: null,
   });
 
   const clientRef = useRef<GameClient | null>(null);
@@ -190,6 +201,7 @@ export function useGame() {
             out.roundWinner = null;
             out.trackStart = null;
             out.timer = null;
+            out.ddPerformer = null;
           }
           return { ...v, ...out };
         });
@@ -212,7 +224,7 @@ export function useGame() {
             trackStart: ts,
             timer: { row, maxPoints: ts.maxPoints, basePoints: ts.basePoints, startTime: ts.startTime, frozen: false },
             lockoutHandle: null,
-            ...(isNewTrack ? { animStartTime: ts.startTime, lyrics: null, lyricsStatus: "idle" as const, maskedReveal: null, revealedArtist: false, revealedSong: false, roundWinner: null } : {}),
+            ...(isNewTrack ? { animStartTime: ts.startTime, lyrics: null, lyricsStatus: "idle" as const, maskedReveal: null, revealedArtist: false, revealedSong: false, roundWinner: null, ddResult: null } : {}),
           };
         });
       });
@@ -237,6 +249,18 @@ export function useGame() {
         const handle = (e.d as { byHandle: string }).byHandle;
         setView((v) => ({ ...v, lockoutHandle: handle, timer: v.timer ? { ...v.timer, frozen: true } : v.timer }));
       });
+
+      client.on("dailyDouble.performer", (e: ServerEnvelope) => {
+        const d = e.d as DailyDoublePerformerData;
+        setView((v) => ({
+          ...v,
+          ddPerformer: d,
+          // A fresh (non-performing) broadcast means a NEW Daily Double is
+          // starting — clear the previous one's result banner.
+          ...(d.performing ? {} : { ddResult: null }),
+        }));
+      });
+      client.on("dailyDouble.result", (e: ServerEnvelope) => patch({ ddResult: e.d as DailyDoubleResultData }));
 
       // ---- audio: backend commands -> local player (§9) ----
       client.on("audio", (e: ServerEnvelope) => {

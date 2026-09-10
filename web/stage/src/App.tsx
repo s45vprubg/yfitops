@@ -4,10 +4,13 @@
 import { useGame } from "./net/useGame";
 import CornerJoin from "./components/CornerJoin";
 import ScoreOverlay from "./components/ScoreOverlay";
+import DailyDoubleResultBanner from "./components/DailyDoubleResultBanner";
 import Lobby from "./views/Lobby";
 import Board from "./views/Board";
 import ActiveRound from "./views/ActiveRound";
 import Karaoke from "./views/Karaoke";
+import DailyDoublePerformance from "./views/DailyDoublePerformance";
+import DailyDoubleWaiting from "./views/DailyDoubleWaiting";
 
 // States where the persistent corner scoreboard is shown. Excludes LOBBY
 // (its own big view), KARAOKE and GAME_OVER (which show scores prominently).
@@ -38,6 +41,10 @@ export default function App() {
 
       {renderView()}
 
+      {view.ddResult && (
+        <DailyDoubleResultBanner avgStars={view.ddResult.avgStars} points={view.ddResult.points} />
+      )}
+
       {/* Persistent corner QR on every view except the lobby (which already has
           a giant one). */}
       {view.state !== "LOBBY" && <CornerJoin />}
@@ -58,7 +65,6 @@ export default function App() {
 
       case "ROUND_ACTIVE":
       case "LOCKED_OUT":
-      case "DAILY_DOUBLE":
       case "ADJUDICATE":
         if (view.trackStart && view.timer) {
           return (
@@ -71,6 +77,23 @@ export default function App() {
           );
         }
         return <Board board={view.board} />;
+
+      case "DAILY_DOUBLE": {
+        const performer = view.ddPerformer;
+        if (!performer) return <Board board={view.board} />;
+        if (performer.performing) {
+          return (
+            <DailyDoublePerformance
+              reveal={view.reveal}
+              lyrics={view.lyrics}
+              lyricsStatus={view.lyricsStatus}
+              performerHandle={performer.handle}
+              audio={audio}
+            />
+          );
+        }
+        return <DailyDoubleWaiting handle={performer.handle} />;
+      }
 
       case "KARAOKE":
         return (

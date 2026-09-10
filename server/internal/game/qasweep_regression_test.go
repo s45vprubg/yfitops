@@ -67,7 +67,7 @@ func TestQARegression_StageMessagesRequireStageRole(t *testing.T) {
 
 // engine-3: once the daily double is entered, a rater disconnecting must not
 // deadlock the phase. With a two-person rating pool, one rating + the other
-// rater disconnecting should complete the daily double (advance to KARAOKE),
+// rater disconnecting should complete the daily double (advance to BOARD),
 // not hang in DAILY_DOUBLE forever.
 func TestQARegression_DailyDoubleCompletesWhenRaterLeaves(t *testing.T) {
 	h := newHarness(t)
@@ -79,8 +79,8 @@ func TestQARegression_DailyDoubleCompletesWhenRaterLeaves(t *testing.T) {
 	h.join("r2", "fpr2", "rater2")
 	_ = performer
 
-	// Select the daily-double cell (1,2 in testBoard), performer buzzes and is
-	// graded correct -> enterDailyDouble(performer). Pool = {r1, r2}.
+	// 1st pick on the daily-double cell (1,2 in testBoard) is a normal round;
+	// the performer buzzes/graded correct so they become lastScorer.
 	h.selectCell("admin", 1, 2)
 	if h.state() != protocol.StateRoundActive {
 		t.Fatalf("state = %s, want ROUND_ACTIVE", h.state())
@@ -89,9 +89,26 @@ func TestQARegression_DailyDoubleCompletesWhenRaterLeaves(t *testing.T) {
 		protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: h.gate.Current()}, nowMs())
 	h.sync(func() {})
 	h.grade("admin", protocol.VerdictCorrect)
+	h.sync(func() {
+		h.e.curTrack = nil
+		h.e.curCell = nil
+		h.e.state = protocol.StateBoard
+	})
 
+	// 2nd pick triggers the offer; accept + choose starts the performance so
+	// the rating pool ({r1, r2}) actually exists.
+	h.selectCell("admin", 1, 2)
 	if h.state() != protocol.StateDailyDouble {
-		t.Fatalf("state = %s, want DAILY_DOUBLE after correct grade on DD cell", h.state())
+		t.Fatalf("state = %s, want DAILY_DOUBLE after 2nd pick", h.state())
+	}
+	h.ddDecide("perf", true)
+	choices := h.lastDailyDoubleOfferTrackIDs("perf")
+	if len(choices) == 0 {
+		t.Fatalf("performer received no song choices after accepting")
+	}
+	h.ddChoose("perf", choices[0])
+	if h.state() != protocol.StateDailyDouble {
+		t.Fatalf("state = %s, want DAILY_DOUBLE once performing", h.state())
 	}
 
 	// One rater rates; the other disconnects. Completion must fire.

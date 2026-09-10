@@ -64,6 +64,11 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	// AI board builder: propose category buckets + placements from the library.
 	mux.Handle("POST /api/boards/{id}/ai-build", wrap(h.aiBuild))
 
+	// Daily Double bucket (standalone song pool, independent of the grid).
+	mux.Handle("GET /api/boards/{id}/daily-double-tracks", wrap(h.listDailyDoubleTracks))
+	mux.Handle("POST /api/boards/{id}/daily-double-tracks", wrap(h.addDailyDoubleTrack))
+	mux.Handle("DELETE /api/boards/{id}/daily-double-tracks/{trackId}", wrap(h.deleteDailyDoubleTrack))
+
 	// Layout
 	mux.Handle("GET /api/boards/{id}/layout", wrap(h.getLayout))
 	mux.Handle("POST /api/boards/{id}/columns", wrap(h.addColumn))

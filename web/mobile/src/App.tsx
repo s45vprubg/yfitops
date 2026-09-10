@@ -6,12 +6,16 @@ import { IdleScreen } from "./screens/IdleScreen";
 import { BuzzScreen } from "./screens/BuzzScreen";
 import { VoteScreen } from "./screens/VoteScreen";
 import { DailyDoubleScreen } from "./screens/DailyDoubleScreen";
+import { DailyDoubleContestantScreen } from "./screens/DailyDoubleContestantScreen";
+import { DailyDoubleWaitingScreen } from "./screens/DailyDoubleWaitingScreen";
 import { getSavedHandle } from "./lib/fingerprint";
 
 // Pure state-flag router (§4A): every branch below keys off the server's
-// GameState + sanitized payloads. No track metadata ever enters this tree.
+// GameState + sanitized payloads. No track metadata ever enters this tree —
+// EXCEPT view.ddOffer, which is the deliberate, narrowly-scoped §4A exception
+// for the Daily Double contestant's own device only (see protocol.ts).
 export default function App() {
-  const { view, connect, buzz, vote, rate } = useGame();
+  const { view, connect, buzz, vote, rate, ddDecide, ddChoose } = useGame();
 
   if (!view.joined) {
     return (
@@ -67,12 +71,40 @@ export default function App() {
           </div>
         );
 
-      case "DAILY_DOUBLE":
-        return <DailyDoubleScreen onRate={rate} />;
+      case "DAILY_DOUBLE": {
+        const performer = view.ddPerformer;
+        if (!performer) {
+          // No status yet (resync in flight) — same idle fallback as below.
+          return <IdleScreen state={view.state} scoreboard={view.scoreboard} me={getSavedHandle()} />;
+        }
+        const iAmContestant = performer.playerID === view.myPlayerID;
+        if (iAmContestant) {
+          return performer.performing ? (
+            <DailyDoubleWaitingScreen title="You're up!" sub="Sing along on the big screen." />
+          ) : (
+            <DailyDoubleContestantScreen offer={view.ddOffer} onDecide={ddDecide} onChoose={ddChoose} />
+          );
+        }
+        return performer.performing ? (
+          <DailyDoubleScreen onRate={rate} performerHandle={performer.handle} />
+        ) : (
+          <DailyDoubleWaitingScreen
+            title={`${performer.handle} hit a Daily Double!`}
+            sub="Waiting for them to decide…"
+          />
+        );
+      }
 
       // LOBBY, BOARD, TRANSITION, ADJUDICATE, GAME_OVER
       default:
-        return <IdleScreen state={view.state} scoreboard={view.scoreboard} me={getSavedHandle()} />;
+        return (
+          <IdleScreen
+            state={view.state}
+            scoreboard={view.scoreboard}
+            me={getSavedHandle()}
+            ddResult={view.ddResult}
+          />
+        );
     }
   };
 

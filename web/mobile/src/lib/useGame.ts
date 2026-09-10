@@ -13,6 +13,11 @@ import type {
   VoteStateData,
   WelcomeData,
   ErrorData,
+  DailyDoublePerformerData,
+  DailyDoubleSongChoice,
+  DailyDoubleResultData,
+  DailyDoubleDecisionData,
+  DailyDoubleChooseData,
 } from "@shared/protocol";
 import { WT_URL, WS_URL } from "./env";
 import { fetchCertHashes } from "./cert";
@@ -50,6 +55,20 @@ export interface GameView {
   // Most recent server error message (e.g. bad nonce, kicked).
   error: string | null;
   rttMs: number | null;
+  // This device's own player ID (from welcome), used to tell whether WE are
+  // the Daily Double contestant.
+  myPlayerID: string | null;
+  // Who's up for a Daily Double (sanitized: handle/ID only, no track data),
+  // and whether the performance has started. Null when not in a Daily Double.
+  ddPerformer: DailyDoublePerformerData | null;
+  // The 5 song choices — populated ONLY on the contestant's own device, and
+  // ONLY after accepting. Held here in memory only; never persisted to
+  // localStorage/sessionStorage (see the ClientMsgType "dailyDouble.offer" doc
+  // comment in protocol.ts). Cleared the instant the phase changes.
+  ddOffer: DailyDoubleSongChoice[] | null;
+  // The final average rating + points once a Daily Double resolves. Transient
+  // — cleared on the next state change.
+  ddResult: DailyDoubleResultData | null;
 }
 
 const HEARTBEAT_MS = 2000;
@@ -71,6 +90,10 @@ const INITIAL: GameView = {
   scoreboard: null,
   error: null,
   rttMs: null,
+  myPlayerID: null,
+  ddPerformer: null,
+  ddOffer: null,
+  ddResult: null,
 };
 
 export function useGame() {
@@ -130,7 +153,7 @@ export function useGame() {
     (c: GameClient) => {
       c.on("welcome", (env: ServerEnvelope) => {
         const d = env.d as WelcomeData | undefined;
-        if (d) patch({ joined: true, error: null });
+        if (d) patch({ joined: true, error: null, myPlayerID: d.playerID });
       });
 
       c.on("state", (env: ServerEnvelope) => {
@@ -173,6 +196,18 @@ export function useGame() {
             next.lockedBy = d.state === "ROUND_ACTIVE" ? (next.lockedBy ?? null) : v.lockedBy;
           }
           if (d.state !== "KARAOKE") next.vote = null;
+          // ddResult is intentionally NOT cleared here: the server broadcasts
+          // dailyDouble.result just before the state flips to BOARD, so
+          // clearing it on "state !== DAILY_DOUBLE" would erase it before it's
+          // ever rendered. It persists until the next Daily Double starts or a
+          // fresh round begins (below).
+          if (d.state !== "DAILY_DOUBLE") {
+            next.ddPerformer = null;
+            next.ddOffer = null;
+          }
+          if (d.state === "ROUND_ACTIVE" && v.state !== "ADJUDICATE") {
+            next.ddResult = null;
+          }
           return { ...v, ...next };
         });
       });
@@ -214,6 +249,31 @@ export function useGame() {
       c.on("scoreboard", (env: ServerEnvelope) => {
         const d = env.d as ScoreboardData | undefined;
         if (d) patch({ scoreboard: d });
+      });
+
+      c.on("dailyDouble.performer", (env: ServerEnvelope) => {
+        const d = env.d as DailyDoublePerformerData | undefined;
+        if (!d) return;
+        setView((v) => ({
+          ...v,
+          ddPerformer: d,
+          // A fresh (non-performing) broadcast means a NEW Daily Double is
+          // starting — clear any stale offer/result left from a prior one.
+          ...(d.performing ? {} : { ddResult: null, ddOffer: null }),
+        }));
+      });
+
+      // CONTESTANT'S OWN CONNECTION ONLY — see the doc comment on
+      // ClientMsgType "dailyDouble.offer" in protocol.ts. Held only in this
+      // in-memory view; never written to storage.
+      c.on("dailyDouble.offer", (env: ServerEnvelope) => {
+        const d = env.d as { songs: DailyDoubleSongChoice[] } | undefined;
+        if (d) patch({ ddOffer: d.songs });
+      });
+
+      c.on("dailyDouble.result", (env: ServerEnvelope) => {
+        const d = env.d as DailyDoubleResultData | undefined;
+        if (d) patch({ ddResult: d });
       });
 
       c.on("heartbeat", () => {
@@ -379,6 +439,18 @@ export function useGame() {
     void c.send<RateData>({ t: "rate", d: { stars } });
   }, []);
 
+  const ddDecide = useCallback((accept: boolean) => {
+    const c = clientRef.current;
+    if (!c) return;
+    void c.send<DailyDoubleDecisionData>({ t: "dailyDouble.decision", d: { accept } });
+  }, []);
+
+  const ddChoose = useCallback((trackID: string) => {
+    const c = clientRef.current;
+    if (!c) return;
+    void c.send<DailyDoubleChooseData>({ t: "dailyDouble.choose", d: { trackID } });
+  }, []);
+
   useEffect(() => {
     return () => {
       unmountedRef.current = true;
@@ -388,5 +460,5 @@ export function useGame() {
     };
   }, []);
 
-  return { view, connect, buzz, vote, rate };
+  return { view, connect, buzz, vote, rate, ddDecide, ddChoose };
 }

@@ -13,10 +13,11 @@ import (
 
 // mockStore is a minimal AdminStore for handler tests.
 type mockStore struct {
-	boards  []Board
-	tracks  []Track
-	layout  *Layout
-	created []string
+	boards   []Board
+	tracks   []Track
+	ddTracks []DailyDoubleTrack
+	layout   *Layout
+	created  []string
 }
 
 func (m *mockStore) CreateBoard(_ context.Context, id, name string) error {
@@ -36,6 +37,15 @@ func (m *mockStore) GetBoard(_ context.Context, id string) (*Board, error) {
 func (m *mockStore) RenameBoard(_ context.Context, _, _ string) error  { return nil }
 func (m *mockStore) DeleteBoard(_ context.Context, _ string) error     { return nil }
 func (m *mockStore) UpdateBoardCols(_ context.Context, _ string, _ int) error { return nil }
+func (m *mockStore) SetDailyDoubleCount(_ context.Context, _ string, _ int) error { return nil }
+func (m *mockStore) AddDailyDoubleTrack(_ context.Context, t *DailyDoubleTrack) error {
+	m.ddTracks = append(m.ddTracks, *t)
+	return nil
+}
+func (m *mockStore) ListDailyDoubleTracks(_ context.Context, _ string) ([]DailyDoubleTrack, error) {
+	return m.ddTracks, nil
+}
+func (m *mockStore) RemoveDailyDoubleTrack(_ context.Context, _ string) error { return nil }
 func (m *mockStore) AddTrack(_ context.Context, t *Track) error {
 	m.tracks = append(m.tracks, *t)
 	return nil

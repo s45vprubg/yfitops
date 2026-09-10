@@ -10,6 +10,24 @@ type Board struct {
 	Cols      int    `json:"cols"`
 	CreatedAt int64  `json:"createdAt"`
 	UpdatedAt int64  `json:"updatedAt"`
+	// DailyDoubleCount is the number of Daily Double cells to randomly assign
+	// (balanced across categories) each time this board's game is started.
+	// Default 2; cell assignment itself is never persisted, only this count.
+	DailyDoubleCount int `json:"dailyDoubleCount"`
+}
+
+// DailyDoubleTrack is a song in a board's standalone Daily Double bucket —
+// independent of the grid's category-scoped Track library. A Daily Double
+// draws up to 5 of these as choices for the contestant.
+type DailyDoubleTrack struct {
+	ID         string `json:"id"`
+	BoardID    string `json:"boardId"`
+	SpotifyURI string `json:"spotifyUri"`
+	Artist     string `json:"artist"`
+	Song       string `json:"song"`
+	AlbumArt   string `json:"albumArt"`
+	DurationMs int64  `json:"durationMs"`
+	CreatedAt  int64  `json:"createdAt"`
 }
 
 // Track is a board-scoped track in the library.

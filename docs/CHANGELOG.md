@@ -11,6 +11,9 @@ starting the new server: `make up` does not apply migrations, and `PlaceTrack` /
 own. 0006 dedups existing rows, so a board that currently has one track in two
 cells will lose the duplicate cell. Pre-built frontend `dist/` bundles must be
 rebuilt for the breaking `GET /api/spotify/token` change; `npm run dev` is fine.
+Migration 0007 (2026-08-27) adds `boards.daily_double_count` (default 2) and
+`board_dd_bucket_tracks` for the redesigned Daily Double — no data migration,
+purely additive.
 
 ## [Unreleased] — 2026-07-01
 
@@ -266,6 +269,78 @@ had not been completed.
   distinguish them. The server still logs the real error. No consumer branched
   on `409`, so nothing breaks today — but surfacing a stale-token state in the
   admin UI would need a distinct signal added back.
+
+### Added — Admin can manually adjust a player's score from the scoreboard (2026-08-27)
+- A ⋮ menu on each row of the admin scoreboard (`ScorePanel.tsx`) opens "Edit
+  points", prompting for a signed point delta (e.g. `50` or `-25`) and sending
+  the existing `admin.award` message for that player.
+- No server changes: `admin.award`/`AdminAwardData` already existed
+  (`protocol.go`, `engine.go` `onAdminAward`), already clamps the delta to
+  ±1000, floors the resulting score at 0, persists it, and broadcasts the
+  scoreboard to stage/admin/mobile.
+- Removed the free-standing "Award Points" form (player dropdown + delta input)
+  from `EvaluationPanel.tsx` now that the same action is available per-row on
+  the scoreboard, avoiding two UIs for one action.
+
+### Added — Daily Double redesigned end-to-end (2026-08-27)
+Replaces the old, never-triggered "flag a cell + grade correct" design with
+the mechanic from the feature spec: admin-configurable Daily Double cells,
+randomly balanced across categories, that activate on a cell's **second**
+selection and hand the contestant a real song choice instead of a buzz round.
+
+- **Assignment**: `boards.daily_double_count` (default 2, admin-editable in
+  the builder next to the board picker) is randomly assigned across eligible
+  (≥2-track) cells each Start Game — `Engine.assignDailyDoubles`, balanced
+  round-robin across categories, degrading gracefully if too few cells
+  qualify. Never persisted per-cell; `board_layout_cells.daily_double`
+  (migration 0002) is now dead — left in place, not dropped.
+- **Trigger**: `selectCell` tracks per-cell visit counts; a flagged cell's 1st
+  pick plays a normal round, its 2nd pick (`Cell.DDTriggerVisit`) skips
+  straight to the offer instead of a track — no buzzing, no guessing. Nothing
+  is consumed from the cell's own pool.
+- **Contestant**: the last player to earn *gameplay* points (`Engine.award`'s
+  new `lastScorer`, distinct from the per-round `roundWinner`) — falls back to
+  a random connected player if nobody has scored yet.
+- **Flow**: accept/decline → (if accepted) up to 5 songs drawn without
+  replacement from a new standalone per-board bucket
+  (`board_dd_bucket_tracks`, admin-curated via a drag-and-drop "Daily Double
+  Bucket" panel in the builder — same `@hello-pangea/dnd` context as the grid;
+  dropping a track there is a MOVE, deleting it from `board_tracks` so it can
+  never reappear on the Jeopardy board) → contestant picks one → full
+  metadata + synced lyrics on stage (no masking — it's a performance, not a
+  guess) → every other online player rates 1-5★ → payout =
+  `MaxPointsForRow(row) × DailyDoubleMultiplier(avg)` (floored at the 1★
+  multiplier if nobody rates) → straight back to `BOARD` (no karaoke
+  afterward). The performance always plays out fully (to a natural song-end or
+  an admin Force End Round) even with zero raters online — an empty rating
+  pool no longer short-circuits straight to a pause the instant the song
+  starts.
+- **Decline / stalls**: declining (or an admin `admin.skipDailyDouble` during
+  the offer/pick sub-phase) permanently clears the original cell's flag and
+  arms a new random cell with ≥1 unplayed track to fire on its very next
+  pick; cancels outright if none exists. The existing "Force End Round" button
+  now also finishes an in-progress performance (same as a natural song-end).
+- **`// CONTRACT-QUESTION` §4A exception (owner-approved)**: the 5 song
+  choices (title/artist) are sent to the contestant's own phone only, as a
+  single just-in-time push at the moment they accept — never prefetched, never
+  broadcast, held only in transient component state on the client (never
+  localStorage/sessionStorage). No other mobile client ever receives track
+  metadata for a Daily Double. See the `smsgDailyDoubleOffer` comment in
+  `engine.go`.
+- New local (non-fixed-contract) message types in `engine.go`/`protocol.ts`:
+  `dailyDouble.decision`, `dailyDouble.choose`, `admin.skipDailyDouble`,
+  `dailyDouble.performer` (sanitized status, all roles), `dailyDouble.result`
+  (sanitized payout, all roles), `dailyDouble.offer` (contestant only).
+- New UI: mobile gets `DailyDoubleContestantScreen`/`DailyDoubleWaitingScreen`
+  and a re-labeled `DailyDoubleScreen` (rating, not a confidence wager); stage
+  gets `DailyDoublePerformance` (reuses `Karaoke`'s lyric-sync engine) and
+  `DailyDoubleWaiting`; admin gets a `DailyDoubleOfferCard` with the Force Skip
+  button and the drag-and-drop Daily Double Bucket panel in the board builder.
+- Known limitation: no reconnect-resync mid-offer/song-pick for the
+  contestant specifically (the sanitized "who's up" status does resync; the
+  actual 5 choices do not) — an admin Force Skip is the recovery path if a
+  contestant's phone drops mid-decision (their disconnect already
+  auto-declines, so this is mostly moot).
 
 ## [Unreleased] — 2026-06-29
 

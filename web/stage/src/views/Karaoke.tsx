@@ -20,9 +20,13 @@ interface Props {
   roundWinner: string | null;
   gameState: GameState;
   audio: React.RefObject<AudioPlayer | null>;
+  // Overrides the default "now guessing"/"winner" banner label — used by the
+  // Daily Double performance view, which reuses this component's lyric-sync
+  // engine wholesale.
+  label?: string;
 }
 
-export default function Karaoke({ reveal, lyrics, lyricsStatus, lockoutHandle, roundWinner, gameState, audio }: Props) {
+export default function Karaoke({ reveal, lyrics, lyricsStatus, lockoutHandle, roundWinner, gameState, audio, label }: Props) {
   const [activeIdx, setActiveIdx] = useState(-1);
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -84,7 +88,7 @@ export default function Karaoke({ reveal, lyrics, lyricsStatus, lockoutHandle, r
       {(bannerName || nobodyWon) && (
         <div className="flex flex-col items-center pt-8">
           <div className="text-sm uppercase tracking-[0.5em] text-neon-amber/70">
-            {isAdjudicating ? "now guessing" : "winner"}
+            {label ?? (isAdjudicating ? "now guessing" : "winner")}
           </div>
           {nobodyWon ? (
             <div className="text-5xl font-extrabold text-neon-magenta/80">nobody :(</div>

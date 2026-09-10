@@ -12,6 +12,8 @@ import type {
   AdminViewData,
   BoardData,
   ClientMsgType,
+  DailyDoublePerformerData,
+  DailyDoubleResultData,
   ErrorData,
   GameState,
   ScoreboardData,
@@ -52,6 +54,12 @@ export interface AdminState {
   scoreboard?: ScoreboardData;
   revealCfg?: AdminRevealCfgData; // current letter-reveal timing knobs
   cheat?: CheatReport; // anti-cheat signals (IP, shared-ip / multi-conn flags)
+  // Daily Double status (sanitized: handle/ID only, no track data). Undefined
+  // when not in one; performing=false means the contestant is still deciding
+  // or picking a song (Force Skip applies), true means a track is playing
+  // (the existing Force End Round finishes it).
+  ddPerformer?: DailyDoublePerformerData;
+  ddResult?: DailyDoubleResultData; // transient — last resolved payout
   nonce: number;
 }
 
@@ -66,6 +74,7 @@ export interface AdminActions {
   kick: (d: AdminKickData) => void;
   reveal: () => void;
   endRound: () => void;
+  skipDailyDouble: () => void;
   setThresh: (percent: number) => void;
   setRevealCfg: (cfg: AdminSetRevealCfgData) => void;
   endGame: () => void;
@@ -117,7 +126,8 @@ export function useAdmin(): [AdminState, AdminActions] {
         }
       });
       client.on("state", (env: ServerEnvelope) => {
-        patch({ gameState: (env.d as { state: GameState }).state });
+        const state = (env.d as { state: GameState }).state;
+        patch({ gameState: state, ...(state === "DAILY_DOUBLE" ? {} : { ddPerformer: undefined }) });
       });
       client.on("board", (env: ServerEnvelope) => {
         patch({ board: env.d as BoardData });
@@ -133,6 +143,15 @@ export function useAdmin(): [AdminState, AdminActions] {
       });
       client.on("scoreboard", (env: ServerEnvelope) => {
         patch({ scoreboard: env.d as ScoreboardData });
+      });
+      client.on("dailyDouble.performer", (env: ServerEnvelope) => {
+        const d = env.d as DailyDoublePerformerData;
+        // A fresh (non-performing) broadcast means a NEW Daily Double is
+        // starting — clear the previous one's result.
+        patch({ ddPerformer: d, ...(d.performing ? {} : { ddResult: undefined }) });
+      });
+      client.on("dailyDouble.result", (env: ServerEnvelope) => {
+        patch({ ddResult: env.d as DailyDoubleResultData });
       });
       client.on("adminRevealCfg", (env: ServerEnvelope) => {
         patch({ revealCfg: env.d as AdminRevealCfgData });
@@ -233,6 +252,7 @@ export function useAdmin(): [AdminState, AdminActions] {
     kick: (d) => sendAction<AdminKickData>("admin.kick", d),
     reveal: () => sendAction("admin.reveal"),
     endRound: () => sendAction("admin.endRound"),
+    skipDailyDouble: () => sendAction("admin.skipDailyDouble"),
     setThresh: (percent) =>
       sendAction<AdminSetThreshData>("admin.setThresh", { percent }),
     setRevealCfg: (cfg) =>

@@ -1,8 +1,8 @@
 import { useState } from "react";
 import type {
   AdminViewData,
+  DailyDoublePerformerData,
   GameState,
-  ScoreEntry,
 } from "@shared/protocol";
 import type { AdminActions, ConnStatus } from "../useAdmin";
 import GameControls from "./GameControls";
@@ -10,7 +10,7 @@ import GameControls from "./GameControls";
 interface Props {
   gameState?: GameState;
   adminView?: AdminViewData;
-  players: ScoreEntry[];
+  ddPerformer?: DailyDoublePerformerData;
   actions: AdminActions;
   // Game-control-bar props (this panel's header IS the control bar now).
   status: ConnStatus;
@@ -48,10 +48,11 @@ function isRoundActive(s?: GameState): boolean {
 }
 
 export default function EvaluationPanel({
-  gameState, adminView, players, actions,
+  gameState, adminView, ddPerformer, actions,
   status, connected, nonce, adminSecret, spotifyConnected,
 }: Props) {
   const phase = derivePhase(gameState, adminView);
+  const ddAwaitingResponse = gameState === "DAILY_DOUBLE" && !!ddPerformer && !ddPerformer.performing;
 
   return (
     <section className="flex h-full flex-col bg-panel">
@@ -70,7 +71,10 @@ export default function EvaluationPanel({
         <PhaseBanner phase={phase} />
         <BuzzCard view={adminView} />
         <GradeButtons actions={actions} active={phase === "buzzed"} />
-        <Overrides actions={actions} players={players} roundActive={isRoundActive(gameState)} />
+        {ddAwaitingResponse && ddPerformer && (
+          <DailyDoubleOfferCard actions={actions} performer={ddPerformer} />
+        )}
+        <Overrides actions={actions} roundActive={isRoundActive(gameState)} />
       </div>
     </section>
   );
@@ -185,15 +189,32 @@ function GradeButtons({ actions, active }: { actions: AdminActions; active: bool
   );
 }
 
-function Overrides({ actions, players, roundActive }: { actions: AdminActions; players: ScoreEntry[]; roundActive: boolean }) {
-  const [playerID, setPlayerID] = useState("");
-  const [delta, setDelta] = useState(0);
+// DailyDoubleOfferCard shows while the contestant is deciding/picking (no
+// track playing yet). "Force Skip" abandons a stalled offer exactly like a
+// decline (rerolls to a new cell) — there's no auto-timeout, so this is the
+// admin's manual out. Once a track starts playing, use the ordinary "Force
+// End Round" below instead (it finishes the Daily Double, not this).
+function DailyDoubleOfferCard({ actions, performer }: { actions: AdminActions; performer: DailyDoublePerformerData }) {
+  return (
+    <div className="rounded-lg border border-amber-600 bg-amber-950/30 p-3">
+      <div className="mb-2 text-[10px] uppercase tracking-wide text-amber-400">Daily Double — awaiting response</div>
+      <div className="mb-3 text-lg font-bold text-white">{performer.handle}</div>
+      <button
+        onClick={() => actions.skipDailyDouble()}
+        className="w-full rounded border border-amber-500 bg-panel py-2 text-xs font-semibold uppercase text-amber-300 hover:bg-amber-900/40"
+      >
+        Force Skip Daily Double
+      </button>
+    </div>
+  );
+}
 
+function Overrides({ actions, roundActive }: { actions: AdminActions; roundActive: boolean }) {
   return (
     <div className="rounded-lg border border-edge bg-panel2 p-3">
       <div className="mb-2 text-[10px] uppercase tracking-wide text-slate-500">Manual Overrides</div>
 
-      <div className="mb-3 grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-2 gap-2">
         <button
           disabled={!roundActive}
           onClick={() => actions.endRound()}
@@ -208,42 +229,6 @@ function Overrides({ actions, players, roundActive }: { actions: AdminActions; p
         >
           Reveal
         </button>
-      </div>
-
-      {/* Award Points: player picker + delta. */}
-      <div className="rounded border border-edge bg-panel p-2">
-        <div className="mb-2 text-[10px] uppercase tracking-wide text-slate-500">Award Points</div>
-        <div className="flex items-center gap-2">
-          <select
-            value={playerID}
-            onChange={(e) => setPlayerID(e.target.value)}
-            className="min-w-0 flex-1 rounded border border-edge bg-panel2 px-2 py-1.5 text-xs text-white outline-none focus:border-accent"
-          >
-            <option value="">Select player…</option>
-            {players.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.handle} ({p.score})
-              </option>
-            ))}
-          </select>
-          <input
-            type="number"
-            value={delta}
-            onChange={(e) => setDelta(Number(e.target.value))}
-            className="w-20 rounded border border-edge bg-panel2 px-2 py-1.5 text-right font-mono text-xs text-white outline-none focus:border-accent"
-            placeholder="±pts"
-          />
-          <button
-            disabled={!playerID || !delta}
-            onClick={() => {
-              actions.award({ playerID, delta });
-              setDelta(0);
-            }}
-            className="rounded bg-accent px-3 py-1.5 text-xs font-bold uppercase text-black hover:brightness-110 disabled:opacity-40"
-          >
-            Award
-          </button>
-        </div>
       </div>
     </div>
   );

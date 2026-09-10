@@ -6,6 +6,20 @@ export interface BoardSummary {
   cols: number;
   createdAt: number;
   updatedAt: number;
+  dailyDoubleCount: number;
+}
+
+// A song in a board's standalone Daily Double bucket — independent of the
+// grid's category Track library.
+export interface DailyDoubleTrackData {
+  id: string;
+  boardId: string;
+  spotifyUri: string;
+  artist: string;
+  song: string;
+  albumArt: string;
+  durationMs: number;
+  createdAt: number;
 }
 
 export interface TrackData {
@@ -75,6 +89,8 @@ function api(secret: string) {
     createBoard: (name: string) => req<BoardSummary>("POST", "/api/boards", { name }),
     getBoard: (id: string) => req<BoardSummary>("GET", `/api/boards/${id}`),
     renameBoard: (id: string, name: string) => req<void>("PATCH", `/api/boards/${id}`, { name }),
+    setDailyDoubleCount: (id: string, dailyDoubleCount: number) =>
+      req<void>("PATCH", `/api/boards/${id}`, { dailyDoubleCount }),
     deleteBoard: (id: string) => req<void>("DELETE", `/api/boards/${id}`),
 
     // Tracks
@@ -89,6 +105,13 @@ function api(secret: string) {
       req<{ checked: number; withLyrics: number }>("POST", `/api/boards/${boardId}/rescan-lyrics`),
     aiBuild: (boardId: string) =>
       req<{ categories: number; placed: number; total: number }>("POST", `/api/boards/${boardId}/ai-build`),
+
+    // Daily Double bucket (standalone song pool, independent of the grid)
+    listDailyDoubleTracks: (boardId: string) => req<DailyDoubleTrackData[]>("GET", `/api/boards/${boardId}/daily-double-tracks`),
+    addDailyDoubleTrack: (boardId: string, track: { spotifyUri: string; artist: string; song: string; albumArt: string; durationMs: number }) =>
+      req<DailyDoubleTrackData>("POST", `/api/boards/${boardId}/daily-double-tracks`, track),
+    deleteDailyDoubleTrack: (boardId: string, trackId: string) =>
+      req<void>("DELETE", `/api/boards/${boardId}/daily-double-tracks/${trackId}`),
 
     // Layout
     getLayout: (boardId: string) => req<Layout>("GET", `/api/boards/${boardId}/layout`),

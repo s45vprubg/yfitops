@@ -15,6 +15,12 @@ type AdminStore interface {
 	RenameBoard(ctx context.Context, id, name string) error
 	DeleteBoard(ctx context.Context, id string) error
 	UpdateBoardCols(ctx context.Context, id string, cols int) error
+	SetDailyDoubleCount(ctx context.Context, id string, count int) error
+
+	// Daily Double bucket (board-scoped, independent of the grid's Track library)
+	AddDailyDoubleTrack(ctx context.Context, t *DailyDoubleTrack) error
+	ListDailyDoubleTracks(ctx context.Context, boardID string) ([]DailyDoubleTrack, error)
+	RemoveDailyDoubleTrack(ctx context.Context, trackID string) error
 
 	// Tracks (board-scoped library)
 	AddTrack(ctx context.Context, t *Track) error

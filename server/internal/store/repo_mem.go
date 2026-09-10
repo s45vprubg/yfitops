@@ -196,13 +196,27 @@ func SampleBoard() *game.Board {
 				}
 			}
 			grid[ri][ci] = &game.Cell{
-				Row:         row,
-				Col:         col,
-				Category:    categories[ci],
-				Tracks:      tracks,
-				DailyDouble: row == 3 && col == 4, // one hidden daily double (§7)
+				Row:      row,
+				Col:      col,
+				Category: categories[ci],
+				Tracks:   tracks,
+				// DailyDouble/DDTriggerVisit are NOT set here — real assignment
+				// happens fresh every Start Game via Engine.assignDailyDoubles,
+				// which needs DailyDoubleCount + a bucket to demonstrate (below).
 			}
 		}
 	}
-	return &game.Board{Rows: rows, Cols: cols, Cells: grid}
+	b := &game.Board{Rows: rows, Cols: cols, Cells: grid, DailyDoubleCount: 2}
+	for i := 0; i < 5; i++ {
+		id := fmt.Sprintf("dd-bucket-%d", i)
+		b.DDBucket = append(b.DDBucket, &game.Track{
+			ID:         id,
+			SpotifyURI: "spotify:track:" + id,
+			Artist:     fmt.Sprintf("Daily Double Artist %d", i),
+			Song:       fmt.Sprintf("Daily Double Song %d", i),
+			DurationMs: 180_000,
+			Playable:   true,
+		})
+	}
+	return b
 }

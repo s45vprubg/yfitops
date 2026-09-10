@@ -34,7 +34,13 @@ type Cell struct {
 	Col         int
 	Category    string
 	Tracks      []*Track
-	DailyDouble bool // hidden daily-double flag (§7)
+	DailyDouble bool // hidden daily-double flag (§7), assigned fresh each Start Game
+	// DDTriggerVisit is the 1-indexed selection count at which this cell's Daily
+	// Double activates instead of playing a track (0 = not armed). The initial
+	// balanced assignment always uses 2 (first pick plays normally, second pick
+	// triggers); a decline-reroll target uses its current visit count + 1, so it
+	// fires on its very next selection regardless of which visit number that is.
+	DDTriggerVisit int
 }
 
 // Exhausted reports whether every track in the pool has been played.
@@ -61,6 +67,15 @@ type Board struct {
 	Rows  int
 	Cols  int
 	Cells [][]*Cell // [row][col]
+	// DailyDoubleCount is the admin-configured number of Daily Double cells to
+	// assign at Start Game (default 2, board-persisted). Cell assignment itself
+	// is re-randomized every Start Game, never persisted per-cell.
+	DailyDoubleCount int
+	// DDBucket is the curated pool of songs a Daily Double draws its 5 choices
+	// from (§7 sidenote) — independent of the grid's category tracks. Drawn
+	// tracks are removed from this slice (sampling without replacement across
+	// the whole game), whether or not the contestant picked them.
+	DDBucket []*Track
 }
 
 // Player is an ephemeral attendee session (§3.2). Keyed by device fingerprint

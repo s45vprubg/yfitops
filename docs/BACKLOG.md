@@ -70,18 +70,11 @@ when, whether players see only their own score vs. everyone's, whether it can be
 hidden/revealed for dramatic effect, and whether that is an admin toggle or a
 fixed rule.
 
-## 5. Admin-editable play points
+## 5. Admin-editable play points — DONE (2026-08-27), see `docs/CHANGELOG.md`
 
-**Status:** design needed — **touches a fixed contract.**
-
-Let the admin edit a cell's point value from the admin screen.
-
-The blocker to resolve first: point values are not stored anywhere: they are
-*derived* from the grid row by `RowMultiplier` / `MaxPointsForRow` in
-`server/internal/game/scoring.go`, which is a **locked contract file** (Row1=100
-… Row5=200, plus the time-decay curve). The stage reimplements the same formula
-in JS and must stay bit-identical at the floor. So this needs either a per-cell
-point override persisted alongside the layout and threaded through both the
-server and the stage's mirrored formula, or a contract version bump. Per
-`CLAUDE.md`, raise it as a `// CONTRACT-QUESTION:` in the calling code and get
-owner sign-off before touching `scoring.go`.
+Resolved as a manual score adjustment, not a cell-point-value edit: a ⋮ menu on
+the admin scoreboard opens "Edit points" and applies a signed delta to a
+player's running score via the existing `admin.award` message. This did **not**
+collide with the locked `scoring.go` contract as originally feared — the
+row-derived decay formula for *in-round* scoring is untouched; this only edits
+a player's stored score total.

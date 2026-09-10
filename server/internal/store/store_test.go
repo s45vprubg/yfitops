@@ -164,7 +164,8 @@ func TestMemRepoSeedSampleBoard(t *testing.T) {
 		t.Fatalf("LoadBoard: %v", err)
 	}
 
-	dailyDoubles := 0
+	// No cell is pre-flagged: Daily Double cell assignment happens fresh every
+	// Start Game via Engine.assignDailyDoubles, never persisted/seeded per-cell.
 	for r := 0; r < b.Rows; r++ {
 		for c := 0; c < b.Cols; c++ {
 			cell := b.Cells[r][c]
@@ -182,12 +183,15 @@ func TestMemRepoSeedSampleBoard(t *testing.T) {
 				t.Fatalf("cell %d,%d TracksLeft=%d, want %d", cell.Row, cell.Col, cell.TracksLeft(), n)
 			}
 			if cell.DailyDouble {
-				dailyDoubles++
+				t.Fatalf("cell %d,%d pre-flagged DailyDouble; assignment should be Start-Game-only", cell.Row, cell.Col)
 			}
 		}
 	}
-	if dailyDoubles != 1 {
-		t.Fatalf("expected exactly 1 daily double, got %d", dailyDoubles)
+	if b.DailyDoubleCount != 2 {
+		t.Fatalf("DailyDoubleCount = %d, want 2 (default)", b.DailyDoubleCount)
+	}
+	if len(b.DDBucket) != 5 {
+		t.Fatalf("DDBucket has %d tracks, want 5", len(b.DDBucket))
 	}
 
 	// Exercise Exhausted once a cell's pool is fully played.

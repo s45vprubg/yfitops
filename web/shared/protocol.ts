@@ -37,6 +37,15 @@ export type ClientMsgType =
   // admin.setRevealCfg: tune the letter-reveal timing knobs live (applies next
   // round). Mirrors cmsgAdminSetRevealCfg in server reveal.go (CONTRACT-QUESTION).
   | "admin.setRevealCfg"
+  // dailyDouble.decision / dailyDouble.choose: the Daily Double contestant's
+  // accept/decline and song pick. Mirrors cmsgDailyDoubleDecision /
+  // cmsgDailyDoubleChoose in engine.go (CONTRACT-QUESTION — not in the fixed
+  // protocol.go; see docs/CHANGELOG.md).
+  | "dailyDouble.decision"
+  | "dailyDouble.choose"
+  // admin.skipDailyDouble: abandon a stalled offer/song-pick sub-phase.
+  // Mirrors cmsgAdminSkipDailyDouble (CONTRACT-QUESTION).
+  | "admin.skipDailyDouble"
   | "stage.playerState"
   | "stage.deviceReady";
 
@@ -82,7 +91,20 @@ export type ServerMsgType =
   | "cheatReport"
   // roundWinner: stage-only — who won the current round ({handle}; empty =
   // nobody). Mirrors smsgRoundWinner in engine reveal.go.
-  | "roundWinner";
+  | "roundWinner"
+  // dailyDouble.performer: sanitized (handle/ID only, no track data) status
+  // broadcast to ALL roles — who's up for a Daily Double and whether the
+  // performance has started. Mirrors smsgDailyDoublePerformer (CONTRACT-QUESTION).
+  | "dailyDouble.performer"
+  // dailyDouble.offer: the 5 song choices (title/artist) — CONTESTANT'S OWN
+  // CONNECTION ONLY. This is the deliberate, narrowly-scoped §4A exception;
+  // see the CONTRACT-QUESTION comment on smsgDailyDoubleOffer in engine.go.
+  // Hold this only in transient component state — never localStorage/
+  // sessionStorage — and discard it the instant the phase changes.
+  | "dailyDouble.offer"
+  // dailyDouble.result: sanitized (avgStars + points, no track data) final
+  // outcome, broadcast to ALL roles. Mirrors smsgDailyDoubleResult.
+  | "dailyDouble.result";
 
 export interface ClientEnvelope<D = unknown> {
   t: ClientMsgType;
@@ -126,6 +148,8 @@ export interface AdminSetRevealCfgData {
   alternate?: boolean;
 }
 export interface RateData { stars: number; }
+export interface DailyDoubleDecisionData { accept: boolean; }
+export interface DailyDoubleChooseData { trackID: string; }
 export interface StagePlayerStateData { positionMs: number; paused: boolean; trackEnded: boolean; }
 export interface StageDeviceReadyData { spotifyDeviceID: string; }
 
@@ -195,3 +219,13 @@ export interface AdminViewData {
   correctSong?: string;
   currentPoints: number;
 }
+export interface DailyDoublePerformerData {
+  playerID: string;
+  handle: string;
+  performing: boolean; // false = still deciding/picking; true = track playing
+}
+export interface DailyDoubleSongChoice { id: string; title: string; artist: string; }
+// CONTESTANT'S OWN CONNECTION ONLY — see the ClientMsgType "dailyDouble.offer"
+// doc comment above.
+export interface DailyDoubleOfferData { songs: DailyDoubleSongChoice[]; }
+export interface DailyDoubleResultData { avgStars: number; points: number; }

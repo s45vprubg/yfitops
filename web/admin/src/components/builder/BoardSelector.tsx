@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AdminApi, BoardSummary } from "../../useAdminApi";
 import { useModal } from "../Modal";
 
@@ -16,6 +16,21 @@ export default function BoardSelector({ api, boards, selectedId, onSelect, onRef
 
   const [error, setError] = useState<string | null>(null);
   const { confirm } = useModal();
+
+  const selectedBoard = boards.find((b) => b.id === selectedId);
+  const [ddCount, setDdCount] = useState(0);
+  const ddCountTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Re-sync the input whenever the selected board (or its stored count) changes.
+  useEffect(() => { setDdCount(selectedBoard?.dailyDoubleCount ?? 0); }, [selectedBoard?.id, selectedBoard?.dailyDoubleCount]);
+
+  const handleDailyDoubleCountChange = (n: number) => {
+    if (!selectedId) return;
+    setDdCount(n);
+    if (ddCountTimeout.current !== null) clearTimeout(ddCountTimeout.current);
+    ddCountTimeout.current = setTimeout(() => {
+      api.setDailyDoubleCount(selectedId, n).then(onRefresh).catch(() => {});
+    }, 500);
+  };
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
@@ -86,10 +101,25 @@ export default function BoardSelector({ api, boards, selectedId, onSelect, onRef
         </button>
       </div>
 
+      {selectedId && selectedBoard && (
+        <label className="ml-auto flex items-center gap-1.5 text-xs text-slate-400">
+          Daily doubles
+          <input
+            type="number"
+            min={0}
+            max={5 * Math.max(selectedBoard.cols, 1)}
+            value={ddCount}
+            onChange={(e) => handleDailyDoubleCountChange(Math.max(0, Number(e.target.value)))}
+            className="w-14 rounded border border-edge bg-panel2 px-1.5 py-1 text-right text-sm text-slate-200 outline-none focus:border-accent"
+            title="Number of Daily Double cells randomly assigned each Start Game"
+          />
+        </label>
+      )}
+
       {selectedId && (
         <button
           onClick={handleDelete}
-          className="ml-auto rounded bg-red-900/40 px-2 py-1 text-sm text-red-400 hover:bg-red-900/60"
+          className={`rounded bg-red-900/40 px-2 py-1 text-sm text-red-400 hover:bg-red-900/60 ${selectedBoard ? "" : "ml-auto"}`}
         >
           Delete Board
         </button>

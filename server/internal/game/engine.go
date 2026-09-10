@@ -154,6 +154,17 @@ type Engine struct {
 	// daily double (§7)
 	ratingPool map[string]bool
 	ratings    map[string]int // playerID -> stars
+	// lastScorer is the playerID who most recently earned GAMEPLAY points (buzz
+	// win, partial, or a prior Daily Double payout) — unlike roundWinner, never
+	// reset per-round. Drives Daily Double contestant selection. Manual
+	// admin.award adjustments do NOT update this (see award()).
+	lastScorer string
+	// cellVisits counts admin selections per cell ("row:col" key), so a cell's
+	// DDTriggerVisit can fire on an exact later visit rather than every pick.
+	cellVisits map[string]int
+	// ddOffer is non-nil only during a Daily Double's offer/song-pick sub-phase
+	// (before a track starts playing); nil once the performance begins.
+	ddOffer *dailyDoubleOffer
 
 	// spotifyAuthed records that the admin completed Spotify OAuth, so a stage
 	// that connects AFTER the OAuth dance still learns to initialize the Web
@@ -248,6 +259,7 @@ func NewEngine(repo GameRepo, lock BuzzLock, audio AudioDevice, lyrics LyricsPro
 		pointFactor:  1.0,
 		lyricCache:   map[string]*lyricEntry{},
 		buzzWindowMs: buzzWindowMs,
+		cellVisits:   map[string]int{},
 	}
 }
 
@@ -331,6 +343,7 @@ func (e *Engine) StartGame() error {
 			ch <- result{fmt.Errorf("game already started (state: %s)", e.state)}
 			return
 		}
+		e.assignDailyDoubles()
 		e.transitionTo(protocol.StateBoard)
 		e.broadcastBoard()
 		ch <- result{}
@@ -365,6 +378,9 @@ func (e *Engine) ResetToLobby() error {
 		e.votes = nil
 		e.ratingPool = nil
 		e.ratings = nil
+		e.lastScorer = ""
+		e.cellVisits = map[string]int{}
+		e.ddOffer = nil
 		// Reset all player scores
 		for _, p := range e.reg.players {
 			p.Score = 0
@@ -436,6 +452,80 @@ const smsgPartialReveal protocol.ServerMsgType = "partialReveal"
 // CONTRACT-QUESTION: gradeResult tells the buzz winner their verdict after
 // adjudication so the mobile can show an appropriate message.
 const smsgGradeResult protocol.ServerMsgType = "gradeResult"
+
+// CONTRACT-QUESTION: the redesigned Daily Double (§7 sidenote) needs a
+// contestant accept/decline + song-pick round trip that protocol.go has no
+// equivalent for (its only Daily Double message, CMsgRate, is the crowd
+// rating — unrelated). Defined locally per the fixed-contract process; not in
+// protocol.go. Discuss with the project owner for promotion on a version bump;
+// documented in docs/CHANGELOG.md.
+const (
+	// cmsgDailyDoubleDecision: {accept bool} — the contestant's own connection only.
+	cmsgDailyDoubleDecision protocol.ClientMsgType = "dailyDouble.decision"
+	// cmsgDailyDoubleChoose: {trackID string} — the contestant's own connection only.
+	cmsgDailyDoubleChoose protocol.ClientMsgType = "dailyDouble.choose"
+	// cmsgAdminSkipDailyDouble: abandon a stalled offer/song-pick (no track
+	// playing yet); mirrors CMsgAdminEndRound's dispatch shape.
+	cmsgAdminSkipDailyDouble protocol.ClientMsgType = "admin.skipDailyDouble"
+
+	// smsgDailyDoublePerformer: {playerID, handle, performing} — sanitized (no
+	// track data), broadcast to ALL roles so stage/mobile can show "X is doing
+	// a Daily Double" during the offer/pick sub-phase and "X is performing"
+	// once a song starts.
+	smsgDailyDoublePerformer protocol.ServerMsgType = "dailyDouble.performer"
+	// smsgDailyDoubleResult: {avgStars, points} — sanitized, broadcast to ALL
+	// roles once the average rating + payout are final.
+	smsgDailyDoubleResult protocol.ServerMsgType = "dailyDouble.result"
+)
+
+// CONTRACT-QUESTION (§4A exception, owner-approved — see docs/CHANGELOG.md):
+// smsgDailyDoubleOffer sends track title/artist to a MOBILE client, which the
+// locked sanitization rule normally forbids outright. This is a deliberate,
+// narrowly-scoped exception: the payload goes ONLY to the Daily Double
+// contestant's own connection(s), ONLY at the instant they accept, for songs
+// they are seconds from hearing regardless of which they choose. It is a
+// single just-in-time push — never prefetched, never broadcast, and the
+// mobile client holds it only in transient component state (never
+// localStorage/sessionStorage), cleared the instant the phase changes. No
+// other mobile client ever receives this message.
+const smsgDailyDoubleOffer protocol.ServerMsgType = "dailyDouble.offer"
+
+type dailyDoubleDecisionData struct {
+	Accept bool `json:"accept"`
+}
+
+type dailyDoubleChooseData struct {
+	TrackID string `json:"trackID"`
+}
+
+type dailyDoublePerformerData struct {
+	PlayerID   string `json:"playerID"`
+	Handle     string `json:"handle"`
+	Performing bool   `json:"performing"`
+}
+
+type dailyDoubleSongChoice struct {
+	ID     string `json:"id"`
+	Title  string `json:"title"`
+	Artist string `json:"artist"`
+}
+
+type dailyDoubleOfferData struct {
+	Songs []dailyDoubleSongChoice `json:"songs"`
+}
+
+type dailyDoubleResultData struct {
+	AvgStars float64 `json:"avgStars"`
+	Points   int     `json:"points"`
+}
+
+// dailyDoubleOffer tracks a pending Daily Double before a track starts
+// playing (offer + song-pick sub-phases). Non-nil only during that window.
+type dailyDoubleOffer struct {
+	cellRow, cellCol int
+	contestantID     string
+	candidates       []*Track
+}
 
 // PushSpotifyToken sends the access token to all connected Stage clients so
 // they can initialize the Web Playback SDK without being in the OAuth loop.
@@ -509,7 +599,16 @@ func (e *Engine) OnDisconnect(connID string) {
 				e.evaluateSkipVotes()
 			}
 			if e.state == protocol.StateDailyDouble {
-				e.checkDailyDoubleComplete()
+				if e.ddOffer != nil && e.ddOffer.contestantID == playerID {
+					// The contestant dropped mid-decision: don't stall the game
+					// waiting for a phone that's gone. Full disconnect is a
+					// stronger signal than "took too long to decide", so this is
+					// distinct from the deliberate no-auto-timeout choice for a
+					// merely-slow response.
+					e.declineDailyDouble()
+				} else {
+					e.checkDailyDoubleComplete()
+				}
 			}
 			e.broadcastTelemetry()
 		}
@@ -531,6 +630,10 @@ func (e *Engine) dispatch(connID string, role protocol.Role, env protocol.Client
 		e.onVote(connID, env)
 	case protocol.CMsgRate:
 		e.onRate(connID, env)
+	case cmsgDailyDoubleDecision:
+		e.onDailyDoubleDecision(connID, env)
+	case cmsgDailyDoubleChoose:
+		e.onDailyDoubleChoose(connID, env)
 
 	// Admin actions — every one validates the admin role on the connection.
 	case protocol.CMsgAdminGrade,
@@ -542,7 +645,8 @@ func (e *Engine) dispatch(connID string, role protocol.Role, env protocol.Client
 		protocol.CMsgAdminEndRound,
 		protocol.CMsgAdminSetThresh,
 		protocol.CMsgAdminEndGame,
-		cmsgAdminSetRevealCfg:
+		cmsgAdminSetRevealCfg,
+		cmsgAdminSkipDailyDouble:
 		if role != protocol.RoleAdmin {
 			e.sendError(connID, "forbidden", "admin role required")
 			return
@@ -586,6 +690,8 @@ func (e *Engine) dispatchAdmin(connID string, env protocol.ClientEnvelope) {
 		e.onAdminSetThresh(connID, env)
 	case cmsgAdminSetRevealCfg:
 		e.onAdminSetRevealCfg(connID, env)
+	case cmsgAdminSkipDailyDouble:
+		e.declineDailyDouble()
 	case protocol.CMsgAdminEndGame:
 		e.transitionTo(protocol.StateGameOver)
 		e.persistScores()
@@ -685,6 +791,18 @@ func (e *Engine) sendFullSync(connID string, role protocol.Role) {
 	// Scoreboard goes to everyone (handles + scores only, §4A-safe) so mobile
 	// players see standings on connect too.
 	e.bcast.SendTo(connID, e.envelope(protocol.SMsgScoreboard, e.scoreboardData()))
+	// Daily Double performer status is sanitized (handle/ID only) — safe for a
+	// reconnecting client of ANY role so its UI resyncs to "who's up" rather
+	// than missing the original broadcast entirely.
+	if e.state == protocol.StateDailyDouble {
+		if pid, performing := e.dailyDoubleStatus(); pid != "" {
+			if p := e.reg.players[pid]; p != nil {
+				e.bcast.SendTo(connID, e.envelope(smsgDailyDoublePerformer, dailyDoublePerformerData{
+					PlayerID: p.ID, Handle: p.Handle, Performing: performing,
+				}))
+			}
+		}
+	}
 	if protocol.TrustedReveal(role) {
 		e.bcast.SendTo(connID, e.envelope(protocol.SMsgBoard, boardData(e.board)))
 		if e.curTrack != nil {
@@ -719,11 +837,16 @@ func (e *Engine) onAdminSelect(connID string, env protocol.ClientEnvelope) {
 }
 
 // selectCell picks a random unplayed track from the cell pool and starts the
-// round (§7). The cell stays live until its pool is exhausted (§7 persistent
-// cells). Only valid from BOARD/KARAOKE/TRANSITION/etc. (not mid-round).
+// round (§7), UNLESS this selection is the cell's armed Daily Double visit —
+// in which case no track plays at all; the Daily Double offer flow begins
+// instead and the cell's pool is left untouched for a possible future pick.
+// The cell stays live until its pool is exhausted (§7 persistent cells). Only
+// valid from BOARD/KARAOKE/TRANSITION/etc. (not mid-round).
 func (e *Engine) selectCell(row, col int) {
-	if e.state == protocol.StateRoundActive || e.state == protocol.StateLocked || e.state == protocol.StateAdjudicate {
-		// A round is live; selection is queued by the admin only between rounds.
+	if e.state == protocol.StateRoundActive || e.state == protocol.StateLocked ||
+		e.state == protocol.StateAdjudicate || e.state == protocol.StateDailyDouble {
+		// A round (or a Daily Double offer/pick/performance) is live; selection
+		// is queued by the admin only between rounds.
 		e.sendErrorAll("busy", "round in progress")
 		return
 	}
@@ -736,12 +859,86 @@ func (e *Engine) selectCell(row, col int) {
 		e.sendErrorAll("exhausted", "cell pool exhausted")
 		return
 	}
+	key := cellKey(row, col)
+	e.cellVisits[key]++
+	if cell.DailyDouble && cell.DDTriggerVisit > 0 && e.cellVisits[key] == cell.DDTriggerVisit {
+		e.beginDailyDoubleOffer(cell)
+		return
+	}
 	track := pickTrack(cell, e.rng)
 	if track == nil {
 		e.sendErrorAll("exhausted", "cell pool exhausted")
 		return
 	}
 	e.startTrack(cell, track)
+}
+
+// cellKey is the cellVisits map key for a 1-indexed (row, col) coordinate.
+func cellKey(row, col int) string {
+	return fmt.Sprintf("%d:%d", row, col)
+}
+
+// assignDailyDoubles clears every cell's Daily Double flag and randomly
+// re-assigns e.board.DailyDoubleCount of them (§7 sidenote), balanced across
+// categories: shuffle categories, give one Daily Double per category per
+// pass, reshuffling each pass, until the configured count is placed or no
+// eligible cell (≥2 tracks) remains anywhere. Degrades gracefully to fewer
+// than requested rather than relaxing the ≥2-tracks/different-category rule.
+// Called once per Start Game — never persisted per-cell.
+func (e *Engine) assignDailyDoubles() {
+	e.cellVisits = map[string]int{}
+	if e.board == nil {
+		return
+	}
+	catCells := map[string][]*Cell{}
+	for _, row := range e.board.Cells {
+		for _, c := range row {
+			if c == nil {
+				continue
+			}
+			c.DailyDouble = false
+			c.DDTriggerVisit = 0
+			if c.TracksLeft() >= 2 {
+				catCells[c.Category] = append(catCells[c.Category], c)
+			}
+		}
+	}
+	n := e.board.DailyDoubleCount
+	if n <= 0 || len(catCells) == 0 {
+		return
+	}
+	categories := make([]string, 0, len(catCells))
+	for cat := range catCells {
+		categories = append(categories, cat)
+	}
+
+	placed := 0
+	for placed < n {
+		e.rng.Shuffle(len(categories), func(i, j int) { categories[i], categories[j] = categories[j], categories[i] })
+		progressed := false
+		for _, cat := range categories {
+			if placed >= n {
+				break
+			}
+			var elig []*Cell
+			for _, c := range catCells[cat] {
+				if !c.DailyDouble {
+					elig = append(elig, c)
+				}
+			}
+			if len(elig) == 0 {
+				continue
+			}
+			pick := elig[e.rng.Intn(len(elig))]
+			pick.DailyDouble = true
+			pick.DDTriggerVisit = 2
+			placed++
+			progressed = true
+		}
+		if !progressed {
+			break // no eligible cell left anywhere; degrade to fewer than requested
+		}
+	}
 }
 
 // startTrack arms a new buzz round: resets per-track player flags, bumps the
@@ -1067,10 +1264,9 @@ func (e *Engine) gradeCorrect(winner *Player, elapsed int64) {
 
 	e.consumeTrack() // consume this track from the pool (§7)
 
-	if e.curCell.DailyDouble {
-		e.enterDailyDouble(winner)
-		return
-	}
+	// Note: a flagged cell's normal (non-trigger) picks still buzz/grade like
+	// any other cell — Daily Double activation is decided entirely in
+	// selectCell (on the exact armed visit), never here.
 	e.enterKaraoke()
 }
 
@@ -1186,8 +1382,15 @@ func (e *Engine) resumeAudio() {
 }
 
 // award credits points and broadcasts the updated scoreboard (trusted only).
+// Also updates lastScorer for GAMEPLAY points (buzz win, partial, Daily Double
+// payout) — the Daily Double contestant pointer. Manual admin.award
+// adjustments bypass this helper entirely (see onAdminAward), so they never
+// affect who gets picked for the next Daily Double.
 func (e *Engine) award(p *Player, pts int) {
 	p.Score += pts
+	if pts > 0 {
+		e.lastScorer = p.ID
+	}
 	_ = e.repo.SaveScore(context.Background(), e.cfg.SessionID, p.ID, p.Handle, p.Score)
 	e.broadcastScoreboard()
 	e.broadcastTelemetry()
@@ -1458,19 +1661,173 @@ func (e *Engine) beginTransition() {
 }
 
 // ---------------------------------------------------------------------------
-// Daily Double (§7)
+// Daily Double (§7). Lifecycle: selectCell's armed visit -> beginDailyDoubleOffer
+// (contestant asked accept/decline) -> onDailyDoubleDecision (decline reroll via
+// declineDailyDouble, or accept draws candidates + pushes the contestant-only
+// offer) -> onDailyDoubleChoose -> startDailyDoublePerformance (track plays,
+// crowd rates) -> finishDailyDouble (average -> payout -> straight back to
+// BOARD; no karaoke afterward — the sing-along already happened live).
 // ---------------------------------------------------------------------------
 
-func (e *Engine) enterDailyDouble(performer *Player) {
-	e.transitionTo(protocol.StateDailyDouble)
-	e.resumeAudio()
-	// The answer is already earned; complete the streamed reveal to both
-	// surfaces, plus the trusted full reveal to the stage.
-	e.finalizeReveal()
-	e.revealTo(protocol.RoleStage)
-	e.cellPicker = performer.ID
+// beginDailyDoubleOffer resolves the contestant (lastScorer, falling back to a
+// random connected mobile player if nobody has scored yet) and asks them to
+// accept/decline. If nobody is eligible at all, the Daily Double is cancelled
+// outright for this cell (reverts to normal) rather than stalling the game.
+func (e *Engine) beginDailyDoubleOffer(cell *Cell) {
+	contestantID := e.lastScorer
+	if contestantID == "" || !e.reg.online(contestantID) {
+		var online []*Player
+		for _, p := range e.reg.mobilePlayers() {
+			if !p.Banned && e.reg.online(p.ID) {
+				online = append(online, p)
+			}
+		}
+		if len(online) == 0 {
+			cell.DailyDouble = false
+			cell.DDTriggerVisit = 0
+			e.sendErrorAll("noDailyDoubleContestant", "no eligible player online; skipping this Daily Double")
+			return
+		}
+		contestantID = online[e.rng.Intn(len(online))].ID
+	}
 
-	// Active users rate; the performer does not rate themselves.
+	e.curCell = cell
+	e.ddOffer = &dailyDoubleOffer{cellRow: cell.Row, cellCol: cell.Col, contestantID: contestantID}
+	e.transitionTo(protocol.StateDailyDouble)
+	e.broadcastDailyDoublePerformer()
+}
+
+// dailyDoubleStatus reports the current Daily Double contestant (offer/pick
+// sub-phase) or performer (a track is playing), and whether the performance
+// has started. Returns pid == "" when there is nothing to report.
+func (e *Engine) dailyDoubleStatus() (pid string, performing bool) {
+	switch {
+	case e.ddOffer != nil:
+		return e.ddOffer.contestantID, false
+	case e.curTrack != nil && e.cellPicker != "":
+		return e.cellPicker, true
+	default:
+		return "", false
+	}
+}
+
+// broadcastDailyDoublePerformer sends the sanitized (handle/ID only, no track
+// data) Daily Double status to every role — safe for mobile (§4A) since it
+// carries nothing but who's up and whether the performance has started.
+func (e *Engine) broadcastDailyDoublePerformer() {
+	pid, performing := e.dailyDoubleStatus()
+	if pid == "" {
+		return
+	}
+	p := e.reg.players[pid]
+	if p == nil {
+		return
+	}
+	e.bcast.BroadcastAll(e.envelope(smsgDailyDoublePerformer, dailyDoublePerformerData{
+		PlayerID: p.ID, Handle: p.Handle, Performing: performing,
+	}))
+}
+
+// onDailyDoubleDecision handles the contestant's accept/decline. Only the
+// connection bound to the offered contestant may respond (§4D nonce-gated).
+func (e *Engine) onDailyDoubleDecision(connID string, env protocol.ClientEnvelope) {
+	if e.state != protocol.StateDailyDouble || e.ddOffer == nil {
+		return
+	}
+	if !e.gate.Validate(env.Nonce) {
+		return
+	}
+	p := e.reg.playerForConn(connID)
+	if p == nil || p.ID != e.ddOffer.contestantID {
+		return
+	}
+	var d dailyDoubleDecisionData
+	if err := json.Unmarshal(env.Data, &d); err != nil {
+		return
+	}
+	if !d.Accept {
+		e.declineDailyDouble()
+		return
+	}
+
+	n := 5
+	if len(e.board.DDBucket) < n {
+		n = len(e.board.DDBucket)
+	}
+	if n == 0 {
+		// Nothing in the bucket to offer; don't stall the game on an empty pool.
+		e.declineDailyDouble()
+		return
+	}
+	e.rng.Shuffle(len(e.board.DDBucket), func(i, j int) {
+		e.board.DDBucket[i], e.board.DDBucket[j] = e.board.DDBucket[j], e.board.DDBucket[i]
+	})
+	picked := e.board.DDBucket[:n]
+	e.board.DDBucket = e.board.DDBucket[n:] // no-replacement draw across the whole game
+	e.ddOffer.candidates = picked
+
+	choices := make([]dailyDoubleSongChoice, len(picked))
+	for i, t := range picked {
+		choices[i] = dailyDoubleSongChoice{ID: t.ID, Title: t.Song, Artist: t.Artist}
+	}
+	// CONTRACT-QUESTION §4A exception (see const block above): contestant's own
+	// connection(s) only, just-in-time, never persisted client-side.
+	for _, cid := range e.reg.connIDs(p.ID) {
+		e.bcast.SendTo(cid, e.envelope(smsgDailyDoubleOffer, dailyDoubleOfferData{Songs: choices}))
+	}
+}
+
+// onDailyDoubleChoose handles the contestant picking one of their offered songs.
+func (e *Engine) onDailyDoubleChoose(connID string, env protocol.ClientEnvelope) {
+	if e.state != protocol.StateDailyDouble || e.ddOffer == nil {
+		return
+	}
+	if !e.gate.Validate(env.Nonce) {
+		return
+	}
+	p := e.reg.playerForConn(connID)
+	if p == nil || p.ID != e.ddOffer.contestantID {
+		return
+	}
+	var d dailyDoubleChooseData
+	if err := json.Unmarshal(env.Data, &d); err != nil {
+		return
+	}
+	var chosen *Track
+	for _, t := range e.ddOffer.candidates {
+		if t.ID == d.TrackID {
+			chosen = t
+			break
+		}
+	}
+	if chosen == nil {
+		return
+	}
+	e.startDailyDoublePerformance(p, chosen)
+}
+
+// startDailyDoublePerformance begins playback of the chosen song. Unlike a
+// normal round, nothing is masked: full metadata + lyrics go straight to
+// stage/admin (trusted roles), and there is no buzz/guess mechanic at all —
+// the crowd rates 1-5 stars instead (§7 sidenote).
+func (e *Engine) startDailyDoublePerformance(performer *Player, track *Track) {
+	cell := cellAt(e.board, e.ddOffer.cellRow, e.ddOffer.cellCol)
+	e.clearReveal() // defensive: no masked-reveal clock is used for a performance
+	e.curCell = cell
+	e.curTrack = track
+	if cell != nil {
+		e.curRow = cell.Row
+	}
+	e.trackStartMs = nowMs()
+	e.cellPicker = performer.ID
+	e.ddOffer = nil
+
+	e.revealTo(protocol.RoleStage)
+	e.revealTo(protocol.RoleAdmin)
+	e.bcast.Broadcast(protocol.RoleStage, e.trackStartEnvelope())
+	e.fetchAndSendLyrics()
+	e.broadcastDailyDoublePerformer()
+
 	e.ratingPool = map[string]bool{}
 	e.ratings = map[string]int{}
 	for _, p := range e.reg.mobilePlayers() {
@@ -1479,10 +1836,60 @@ func (e *Engine) enterDailyDouble(performer *Player) {
 		}
 		e.ratingPool[p.ID] = true
 	}
-	// If nobody can rate, skip straight to karaoke.
-	if len(e.ratingPool) == 0 {
-		e.enterKaraoke()
+
+	if err := e.audio.Play(context.Background(), track.SpotifyURI, 0); err != nil {
+		log.Printf("[engine] audio.Play failed: %v", err)
 	}
+	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{
+		Action: "play", TrackURI: track.SpotifyURI, PositionMs: 0,
+	}))
+
+	// Deliberately NOT short-circuiting to finishDailyDouble when ratingPool is
+	// empty: the performance should still play out (naturally ending via
+	// onStagePlayerState, or an admin Force End Round) rather than the song
+	// getting paused a moment after it starts. finishDailyDouble already
+	// floors at 1★ if literally nobody ends up rating.
+}
+
+// declineDailyDouble handles a decline (contestant or admin force-skip): the
+// original cell permanently reverts to normal, and a new random cell with ≥1
+// unplayed track (looser than the initial ≥2/different-category rule, which
+// only governs the initial balanced assignment) is armed to fire on its very
+// next selection. Cancels outright (no replacement) if none exists.
+func (e *Engine) declineDailyDouble() {
+	if e.state != protocol.StateDailyDouble || e.ddOffer == nil {
+		return
+	}
+	declined := cellAt(e.board, e.ddOffer.cellRow, e.ddOffer.cellCol)
+	if declined != nil {
+		declined.DailyDouble = false
+		declined.DDTriggerVisit = 0
+	}
+	e.ddOffer = nil
+
+	var candidates []*Cell
+	if e.board != nil {
+		for _, row := range e.board.Cells {
+			for _, c := range row {
+				if c == nil || c == declined || c.DailyDouble {
+					continue
+				}
+				if c.TracksLeft() >= 1 {
+					candidates = append(candidates, c)
+				}
+			}
+		}
+	}
+	if len(candidates) > 0 {
+		next := candidates[e.rng.Intn(len(candidates))]
+		next.DailyDouble = true
+		next.DDTriggerVisit = e.cellVisits[cellKey(next.Row, next.Col)] + 1
+	}
+	// else: no eligible cell anywhere — cancel this Daily Double for the game.
+
+	e.curCell = nil
+	e.transitionTo(protocol.StateBoard)
+	e.broadcastBoard()
 }
 
 func (e *Engine) onRate(connID string, env protocol.ClientEnvelope) {
@@ -1505,43 +1912,60 @@ func (e *Engine) onRate(connID string, env protocol.ClientEnvelope) {
 	}
 	e.ratings[p.ID] = d.Stars
 
-	// Once every eligible rater has voted, average + apply the bonus (§7).
+	// Once every eligible rater has voted, average + apply the payout (§7).
 	e.checkDailyDoubleComplete()
 }
 
-// checkDailyDoubleComplete finishes the daily double once every eligible rater
-// has voted. Called on each rating AND whenever the rating pool shrinks (a rater
-// disconnected/kicked), so a departing rater can't deadlock the phase. If the
-// pool is empty it skips straight to karaoke (mirrors enterDailyDouble).
+// checkDailyDoubleComplete finishes the daily double EARLY once every
+// eligible rater has voted (§7) — it never cuts a performance short just
+// because the pool is/became empty; an empty pool means the song plays to its
+// natural end (or an admin Force End Round) with a graceful 1★-floor payout
+// (see finishDailyDouble), not an instant pause the moment it starts.
+// Guarded on curTrack != nil so a disconnect/kick during the offer/song-pick
+// sub-phase (state already DAILY_DOUBLE, but no performance started yet and
+// ratingPool not yet built) is a safe no-op rather than a premature finish.
 func (e *Engine) checkDailyDoubleComplete() {
-	if e.state != protocol.StateDailyDouble {
+	if e.state != protocol.StateDailyDouble || e.curTrack == nil {
 		return
 	}
-	if len(e.ratingPool) == 0 {
-		e.enterKaraoke()
-		return
-	}
-	if len(e.ratings) >= len(e.ratingPool) {
+	if len(e.ratingPool) > 0 && len(e.ratings) >= len(e.ratingPool) {
 		e.finishDailyDouble()
 	}
 }
 
+// finishDailyDouble averages whatever ratings exist (floored at 1★/mult 1.0 if
+// nobody rated — the performer still performed), applies DailyDoubleMultiplier
+// to the FULL row value (there is no antecedent correct-guess score to bonus
+// on top of in this design), awards it, broadcasts the sanitized result, and
+// returns straight to BOARD — no karaoke phase follows.
 func (e *Engine) finishDailyDouble() {
 	performer := e.reg.players[e.cellPicker]
-	if performer != nil && len(e.ratings) > 0 {
-		sum := 0
-		for _, s := range e.ratings {
-			sum += s
+	if performer != nil {
+		avg := 1.0
+		if len(e.ratings) > 0 {
+			sum := 0
+			for _, s := range e.ratings {
+				sum += s
+			}
+			avg = float64(sum) / float64(len(e.ratings))
 		}
-		avg := float64(sum) / float64(len(e.ratings))
 		mult := DailyDoubleMultiplier(avg)
-		bonus := int(float64(MaxPointsForRow(e.curRow)) * (mult - 1.0))
-		e.award(performer, bonus)
+		pts := int(float64(MaxPointsForRow(e.curRow)) * mult)
+		e.award(performer, pts)
 		_ = e.repo.LogEvent(context.Background(), e.cfg.SessionID, "dailyDouble", map[string]any{
-			"playerID": performer.ID, "avgStars": avg, "bonus": bonus,
+			"playerID": performer.ID, "avgStars": avg, "points": pts,
 		})
+		e.bcast.BroadcastAll(e.envelope(smsgDailyDoubleResult, dailyDoubleResultData{AvgStars: avg, Points: pts}))
 	}
-	e.enterKaraoke()
+	_ = e.audio.Pause(context.Background())
+	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{Action: "pause"}))
+	e.clearReveal()
+	e.curTrack = nil
+	e.curCell = nil
+	e.ratingPool = nil
+	e.ratings = nil
+	e.transitionTo(protocol.StateBoard)
+	e.broadcastBoard()
 }
 
 // ---------------------------------------------------------------------------
@@ -1615,7 +2039,11 @@ func (e *Engine) onAdminKick(connID string, env protocol.ClientEnvelope) {
 		e.evaluateSkipVotes()
 	}
 	if e.state == protocol.StateDailyDouble {
-		e.checkDailyDoubleComplete()
+		if e.ddOffer != nil && e.ddOffer.contestantID == p.ID {
+			e.declineDailyDouble()
+		} else {
+			e.checkDailyDoubleComplete()
+		}
 	}
 }
 
@@ -1696,8 +2124,22 @@ func (e *Engine) onAdminSetRevealCfg(connID string, env protocol.ClientEnvelope)
 	e.bcast.Broadcast(protocol.RoleAdmin, e.envelope(smsgAdminRevealCfg, e.revealCfgData()))
 }
 
-// endRound force-ends the current round and returns to the board (§3.10).
+// endRound force-ends the current round and returns to the board (§3.10). The
+// SAME button also finishes/abandons a Daily Double: if a performance is
+// playing it finishes exactly like a natural song-end (average whatever
+// ratings are in); if the contestant is still deciding/picking, it's treated
+// as a decline (reroll to a new cell) via declineDailyDouble — the dedicated
+// admin.skipDailyDouble action does the same thing with a more specific label.
 func (e *Engine) endRound() {
+	if e.state == protocol.StateDailyDouble {
+		switch {
+		case e.curTrack != nil:
+			e.finishDailyDouble()
+		case e.ddOffer != nil:
+			e.declineDailyDouble()
+		}
+		return
+	}
 	e.consumeTrack()
 	e.lock.Release(context.Background(), e.roundKey)
 	_ = e.audio.Pause(context.Background())
@@ -1738,6 +2180,10 @@ func (e *Engine) onStagePlayerState(connID string, env protocol.ClientEnvelope) 
 		e.beginTransition()
 	case protocol.StateRoundActive:
 		e.endRound()
+	case protocol.StateDailyDouble:
+		if e.curTrack != nil {
+			e.finishDailyDouble()
+		}
 	}
 }
 

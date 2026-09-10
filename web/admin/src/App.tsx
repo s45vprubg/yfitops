@@ -104,7 +104,7 @@ export default function App() {
             <EvaluationPanel
               gameState={state.gameState}
               adminView={state.adminView}
-              players={players}
+              ddPerformer={state.ddPerformer}
               actions={actions}
               status={state.status}
               connected={state.connected}
@@ -115,7 +115,7 @@ export default function App() {
             {/* Right column split: live telemetry on top, ranked scoreboard below. */}
             <div className="grid min-h-0 grid-rows-[1.4fr_1fr]">
               <TelemetryPanel telemetry={state.telemetry} cheat={state.cheat} actions={actions} />
-              <ScorePanel players={players} />
+              <ScorePanel players={players} actions={actions} />
             </div>
           </main>
 

@@ -2,9 +2,11 @@ import { useState } from "react";
 
 interface Props {
   onRate: (stars: number) => void;
+  // The performer's handle, for "Rate Alice's performance" framing.
+  performerHandle?: string;
 }
 
-export function DailyDoubleScreen({ onRate }: Props) {
+export function DailyDoubleScreen({ onRate, performerHandle }: Props) {
   const [picked, setPicked] = useState<number | null>(null);
   const [hover, setHover] = useState(0);
 
@@ -21,7 +23,11 @@ export function DailyDoubleScreen({ onRate }: Props) {
           daily double
         </div>
         <div className="mt-2 text-2xl font-semibold text-neutral-200">
-          {picked == null ? "Rate your confidence" : "Locked in!"}
+          {picked == null
+            ? performerHandle
+              ? `Rate ${performerHandle}'s performance`
+              : "Rate the performance"
+            : "Locked in!"}
         </div>
       </div>
 
@@ -51,7 +57,7 @@ export function DailyDoubleScreen({ onRate }: Props) {
 
       {picked != null && (
         <div className="text-sm text-neutral-400">
-          {picked} star{picked > 1 ? "s" : ""} wagered
+          {picked} star{picked > 1 ? "s" : ""} submitted
         </div>
       )}
     </div>

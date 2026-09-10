@@ -29,7 +29,7 @@ func (r *PostgresRepo) CreateBoard(ctx context.Context, id, name string) error {
 
 func (r *PostgresRepo) ListBoards(ctx context.Context) ([]admin.Board, error) {
 	rows, err := r.pool.Query(ctx,
-		`SELECT id, name, cols, created_at, updated_at FROM boards ORDER BY updated_at DESC`)
+		`SELECT id, name, cols, created_at, updated_at, daily_double_count FROM boards ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list boards: %w", err)
 	}
@@ -38,7 +38,7 @@ func (r *PostgresRepo) ListBoards(ctx context.Context) ([]admin.Board, error) {
 	var boards []admin.Board
 	for rows.Next() {
 		var b admin.Board
-		if err := rows.Scan(&b.ID, &b.Name, &b.Cols, &b.CreatedAt, &b.UpdatedAt); err != nil {
+		if err := rows.Scan(&b.ID, &b.Name, &b.Cols, &b.CreatedAt, &b.UpdatedAt, &b.DailyDoubleCount); err != nil {
 			return nil, fmt.Errorf("store: scan board: %w", err)
 		}
 		boards = append(boards, b)
@@ -49,8 +49,8 @@ func (r *PostgresRepo) ListBoards(ctx context.Context) ([]admin.Board, error) {
 func (r *PostgresRepo) GetBoard(ctx context.Context, id string) (*admin.Board, error) {
 	var b admin.Board
 	err := r.pool.QueryRow(ctx,
-		`SELECT id, name, cols, created_at, updated_at FROM boards WHERE id = $1`, id).
-		Scan(&b.ID, &b.Name, &b.Cols, &b.CreatedAt, &b.UpdatedAt)
+		`SELECT id, name, cols, created_at, updated_at, daily_double_count FROM boards WHERE id = $1`, id).
+		Scan(&b.ID, &b.Name, &b.Cols, &b.CreatedAt, &b.UpdatedAt, &b.DailyDoubleCount)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -84,6 +84,59 @@ func (r *PostgresRepo) UpdateBoardCols(ctx context.Context, id string, cols int)
 		cols, time.Now().UnixMilli(), id)
 	if err != nil {
 		return fmt.Errorf("store: update board cols: %w", err)
+	}
+	return nil
+}
+
+// SetDailyDoubleCount sets how many Daily Double cells to randomly assign each
+// Start Game (§7 sidenote). Cell assignment itself is never persisted.
+func (r *PostgresRepo) SetDailyDoubleCount(ctx context.Context, id string, count int) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE boards SET daily_double_count = $1, updated_at = $2 WHERE id = $3`,
+		count, time.Now().UnixMilli(), id)
+	if err != nil {
+		return fmt.Errorf("store: set daily double count: %w", err)
+	}
+	return nil
+}
+
+// AddDailyDoubleTrack adds a song to a board's standalone Daily Double bucket.
+func (r *PostgresRepo) AddDailyDoubleTrack(ctx context.Context, t *admin.DailyDoubleTrack) error {
+	_, err := r.pool.Exec(ctx,
+		`INSERT INTO board_dd_bucket_tracks (id, board_id, spotify_uri, artist, song, album_art, duration_ms, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		 ON CONFLICT (board_id, spotify_uri) DO NOTHING`,
+		t.ID, t.BoardID, t.SpotifyURI, t.Artist, t.Song, t.AlbumArt, t.DurationMs, t.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("store: add daily double track: %w", err)
+	}
+	return nil
+}
+
+func (r *PostgresRepo) ListDailyDoubleTracks(ctx context.Context, boardID string) ([]admin.DailyDoubleTrack, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, board_id, spotify_uri, artist, song, album_art, duration_ms, created_at
+		   FROM board_dd_bucket_tracks WHERE board_id = $1 ORDER BY created_at ASC`, boardID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list daily double tracks: %w", err)
+	}
+	defer rows.Close()
+
+	var tracks []admin.DailyDoubleTrack
+	for rows.Next() {
+		var t admin.DailyDoubleTrack
+		if err := rows.Scan(&t.ID, &t.BoardID, &t.SpotifyURI, &t.Artist, &t.Song, &t.AlbumArt, &t.DurationMs, &t.CreatedAt); err != nil {
+			return nil, fmt.Errorf("store: scan daily double track: %w", err)
+		}
+		tracks = append(tracks, t)
+	}
+	return tracks, rows.Err()
+}
+
+func (r *PostgresRepo) RemoveDailyDoubleTrack(ctx context.Context, trackID string) error {
+	_, err := r.pool.Exec(ctx, `DELETE FROM board_dd_bucket_tracks WHERE id = $1`, trackID)
+	if err != nil {
+		return fmt.Errorf("store: remove daily double track: %w", err)
 	}
 	return nil
 }
@@ -465,7 +518,34 @@ func (r *PostgresRepo) LoadBoardByID(ctx context.Context, boardID string) (*game
 		return nil, fmt.Errorf("store: no layout for board %s", boardID)
 	}
 
-	return newGridFromCells(cells, maxRow, maxCol), nil
+	b := newGridFromCells(cells, maxRow, maxCol)
+
+	if err := r.pool.QueryRow(ctx,
+		`SELECT daily_double_count FROM boards WHERE id = $1`, boardID).
+		Scan(&b.DailyDoubleCount); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("store: load board-by-id daily double count: %w", err)
+	}
+
+	ddRows, err := r.pool.Query(ctx,
+		`SELECT id, spotify_uri, artist, song, album_art, duration_ms
+		   FROM board_dd_bucket_tracks WHERE board_id = $1 ORDER BY created_at ASC`, boardID)
+	if err != nil {
+		return nil, fmt.Errorf("store: load board-by-id dd bucket: %w", err)
+	}
+	defer ddRows.Close()
+	for ddRows.Next() {
+		var t game.Track
+		if err := ddRows.Scan(&t.ID, &t.SpotifyURI, &t.Artist, &t.Song, &t.AlbumArt, &t.DurationMs); err != nil {
+			return nil, fmt.Errorf("store: scan dd bucket track: %w", err)
+		}
+		t.Playable = true
+		b.DDBucket = append(b.DDBucket, &t)
+	}
+	if err := ddRows.Err(); err != nil {
+		return nil, fmt.Errorf("store: iterate dd bucket rows: %w", err)
+	}
+
+	return b, nil
 }
 
 func (r *PostgresRepo) AttachBoard(ctx context.Context, sessionID, boardID string) error {

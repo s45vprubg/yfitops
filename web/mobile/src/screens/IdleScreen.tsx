@@ -1,4 +1,4 @@
-import type { GameState, ScoreboardData } from "@shared/protocol";
+import type { DailyDoubleResultData, GameState, ScoreboardData } from "@shared/protocol";
 import { Scoreboard } from "../components/Scoreboard";
 
 const COPY: Partial<Record<GameState, { title: string; sub: string }>> = {
@@ -13,10 +13,12 @@ export function IdleScreen({
   state,
   scoreboard,
   me,
+  ddResult,
 }: {
   state: GameState;
   scoreboard?: ScoreboardData | null;
   me?: string | null;
+  ddResult?: DailyDoubleResultData | null;
 }) {
   const copy = COPY[state] ?? {
     title: "Waiting for the next track…",
@@ -24,6 +26,11 @@ export function IdleScreen({
   };
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center animate-fadeIn">
+      {ddResult && (
+        <div className="rounded-xl border border-yellow-800 bg-yellow-950/30 px-4 py-2 text-sm text-yellow-300">
+          Daily Double: {ddResult.avgStars.toFixed(1)}★ avg · +{ddResult.points} pts
+        </div>
+      )}
       <div className="text-2xl font-semibold text-neutral-200">
         {copy.title}
       </div>

@@ -64,17 +64,21 @@ func (h *Handler) getBoard(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, board)
 }
 
+// renameBoard also doubles as the general board-settings PATCH: name is only
+// applied when present (non-empty), so a caller can set JUST
+// dailyDoubleCount without knowing/resending the current name.
 func (h *Handler) renameBoard(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var body struct {
-		Name string `json:"name"`
+		Name             string `json:"name"`
+		DailyDoubleCount *int   `json:"dailyDoubleCount,omitempty"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if body.Name == "" {
-		http.Error(w, "name is required", http.StatusBadRequest)
+	if body.Name == "" && body.DailyDoubleCount == nil {
+		http.Error(w, "name or dailyDoubleCount is required", http.StatusBadRequest)
 		return
 	}
 	if len(body.Name) > 200 {
@@ -82,9 +86,21 @@ func (h *Handler) renameBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.RenameBoard(r.Context(), id, body.Name); err != nil {
-		serverError(w, err)
-		return
+	if body.Name != "" {
+		if err := h.store.RenameBoard(r.Context(), id, body.Name); err != nil {
+			serverError(w, err)
+			return
+		}
+	}
+	if body.DailyDoubleCount != nil {
+		if *body.DailyDoubleCount < 0 {
+			http.Error(w, "dailyDoubleCount must be >= 0", http.StatusBadRequest)
+			return
+		}
+		if err := h.store.SetDailyDoubleCount(r.Context(), id, *body.DailyDoubleCount); err != nil {
+			serverError(w, err)
+			return
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

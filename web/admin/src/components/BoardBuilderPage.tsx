@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { DragDropContext, type DropResult } from "@hello-pangea/dnd";
-import { createAdminApi, type BoardSummary, type TrackData, type LayoutCell } from "../useAdminApi";
+import { createAdminApi, type BoardSummary, type TrackData, type LayoutCell, type DailyDoubleTrackData } from "../useAdminApi";
 import BoardSelector from "./builder/BoardSelector";
 import HoldingArea from "./builder/HoldingArea";
 import BuilderGrid from "./builder/BuilderGrid";
+import DailyDoubleBucket from "./builder/DailyDoubleBucket";
 import { useModal } from "./Modal";
 
 interface Props {
@@ -19,6 +20,7 @@ export default function BoardBuilderPage({ secret }: Props) {
   const [unplaced, setUnplaced] = useState<TrackData[]>([]);
   const [cells, setCells] = useState<LayoutCell[]>([]);
   const [cols, setCols] = useState(0);
+  const [ddBucket, setDdBucket] = useState<DailyDoubleTrackData[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -34,17 +36,20 @@ export default function BoardBuilderPage({ secret }: Props) {
 
   const loadBoardData = useCallback(async (boardId: string) => {
     try {
-      const [up, layout] = await Promise.all([
+      const [up, layout, ddTracks] = await Promise.all([
         api.unplacedTracks(boardId),
         api.getLayout(boardId),
+        api.listDailyDoubleTracks(boardId),
       ]);
       setUnplaced(up ?? []);
       setCells(layout?.cells ?? []);
       setCols(layout?.cols ?? 0);
+      setDdBucket(ddTracks ?? []);
     } catch {
       setUnplaced([]);
       setCells([]);
       setCols(0);
+      setDdBucket([]);
     }
   }, [api]);
 
@@ -52,7 +57,7 @@ export default function BoardBuilderPage({ secret }: Props) {
 
   useEffect(() => {
     if (selectedId) loadBoardData(selectedId);
-    else { setUnplaced([]); setCells([]); setCols(0); }
+    else { setUnplaced([]); setCells([]); setCols(0); setDdBucket([]); }
   }, [selectedId, loadBoardData]);
 
   const refresh = () => { if (selectedId) loadBoardData(selectedId); };
@@ -128,6 +133,19 @@ export default function BoardBuilderPage({ secret }: Props) {
     }, 500);
   };
 
+  // Finds a track's full data by ID across the unplaced library and every
+  // cell, for the drag-to-Daily-Double-bucket handler (which needs the
+  // source track's fields to re-create it in the bucket's own table).
+  const findTrack = (trackId: string): TrackData | undefined => {
+    const inHolding = unplaced.find((t) => t.id === trackId);
+    if (inHolding) return inHolding;
+    for (const c of cells) {
+      const inCell = c.tracks.find((t) => t.id === trackId);
+      if (inCell) return inCell;
+    }
+    return undefined;
+  };
+
   const handleDragEnd = async (result: DropResult) => {
     if (!selectedId || !result.destination) return;
 
@@ -145,7 +163,23 @@ export default function BoardBuilderPage({ secret }: Props) {
 
     try {
       setError(null);
-      if (src.droppableId === "holding" && dstCell) {
+      if (dst.droppableId === "dailyDouble") {
+        // MOVE: the track leaves the grid system entirely (deleting the
+        // board_tracks row cascades out of any cell placement) and is
+        // re-created in the bucket's own table — a Daily Double track can
+        // never appear back on the Jeopardy board.
+        const track = findTrack(trackId);
+        if (track) {
+          await api.addDailyDoubleTrack(selectedId, {
+            spotifyUri: track.spotifyUri,
+            artist: track.artist,
+            song: track.song,
+            albumArt: track.albumArt,
+            durationMs: track.durationMs,
+          });
+          await api.deleteTrack(selectedId, trackId);
+        }
+      } else if (src.droppableId === "holding" && dstCell) {
         await api.placeTrack(selectedId, dstCell.row, dstCell.col, trackId, dst.index);
       } else if (srcCell && dst.droppableId === "holding") {
         await api.unplaceTrack(selectedId, srcCell.row, srcCell.col, trackId);
@@ -214,7 +248,7 @@ export default function BoardBuilderPage({ secret }: Props) {
             </button>
           </div>
         )}
-        <div className="grid min-h-0 flex-1 grid-cols-[320px_1fr]">
+        <div className="grid min-h-0 flex-1 grid-cols-[320px_1fr_280px]">
           <HoldingArea
             api={api}
             boardId={selectedId}
@@ -231,6 +265,7 @@ export default function BoardBuilderPage({ secret }: Props) {
             onAddColumn={handleAddColumn}
             onToggleOverride={handleToggleOverride}
           />
+          <DailyDoubleBucket api={api} boardId={selectedId} tracks={ddBucket} onRefresh={refresh} />
         </div>
       </div>
     </DragDropContext>

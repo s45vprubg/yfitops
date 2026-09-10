@@ -3,6 +3,7 @@ package game
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/rand"
 	"strings"
 	"sync"
@@ -217,6 +218,11 @@ func newHarness(t *testing.T) *harness {
 func testBoard() *Board {
 	cell := func(row, col int, dd bool, n int) *Cell {
 		c := &Cell{Row: row, Col: col, Category: "Nu Metal", DailyDouble: dd}
+		if dd {
+			// Manually-flagged test cells bypass assignDailyDoubles(), which is
+			// what normally sets this; the trigger fires on the cell's 2nd visit.
+			c.DDTriggerVisit = 2
+		}
 		for i := 0; i < n; i++ {
 			c.Tracks = append(c.Tracks, &Track{
 				ID:         strings.Join([]string{"t", string(rune('0' + row)), string(rune('0' + col)), string(rune('a' + i))}, ""),
@@ -233,8 +239,14 @@ func testBoard() *Board {
 	return &Board{
 		Rows: 2, Cols: 2,
 		Cells: [][]*Cell{
-			{cell(1, 1, false, 2), cell(1, 2, true, 1)},
+			// (1,2) is the daily-double cell: 2 tracks so its 1st pick plays a
+			// normal round and its 2nd pick triggers the Daily Double offer.
+			{cell(1, 1, false, 2), cell(1, 2, true, 2)},
 			{cell(5, 1, false, 3), cell(5, 2, false, 1)},
+		},
+		DailyDoubleCount: 1,
+		DDBucket: []*Track{
+			{ID: "dd-bucket-1", SpotifyURI: "spotify:track:ddsecret1", Artist: "Daily Double Artist", Song: "Daily Double Song", DurationMs: 180000, Playable: true},
 		},
 	}
 }
@@ -294,6 +306,38 @@ func (h *harness) grade(adminConn string, v protocol.GradeVerdict) {
 	d, _ := json.Marshal(protocol.AdminGradeData{Verdict: v})
 	h.e.OnMessage(adminConn, protocol.RoleAdmin, protocol.ClientEnvelope{Type: protocol.CMsgAdminGrade, Data: d, Nonce: h.gate.Current()}, nowMs())
 	h.sync(func() {})
+}
+
+func (h *harness) ddDecide(connID string, accept bool) {
+	d, _ := json.Marshal(dailyDoubleDecisionData{Accept: accept})
+	h.e.OnMessage(connID, protocol.RoleMobile, protocol.ClientEnvelope{Type: cmsgDailyDoubleDecision, Data: d, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+}
+
+func (h *harness) ddChoose(connID, trackID string) {
+	d, _ := json.Marshal(dailyDoubleChooseData{TrackID: trackID})
+	h.e.OnMessage(connID, protocol.RoleMobile, protocol.ClientEnvelope{Type: cmsgDailyDoubleChoose, Data: d, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+}
+
+// lastDailyDoubleOfferTrackIDs returns the track IDs from the most recent
+// smsgDailyDoubleOffer frame sent to connID (test helper for driving choose).
+func (h *harness) lastDailyDoubleOfferTrackIDs(connID string) []string {
+	h.bcast.mu.Lock()
+	defer h.bcast.mu.Unlock()
+	var out []string
+	for i := len(h.bcast.frames) - 1; i >= 0; i-- {
+		f := h.bcast.frames[i]
+		if f.connID == connID && f.env.Type == smsgDailyDoubleOffer {
+			var d dailyDoubleOfferData
+			_ = json.Unmarshal(f.env.Data, &d)
+			for _, s := range d.Songs {
+				out = append(out, s.ID)
+			}
+			return out
+		}
+	}
+	return out
 }
 
 func (h *harness) state() protocol.GameState {
@@ -751,6 +795,11 @@ func TestGrade_SecondConcurrentGradeIgnored(t *testing.T) {
 
 // TestDailyDouble_BonusApplied: a correct guess on a daily-double cell enters
 // DAILY_DOUBLE, collects ratings, and applies the multiplier bonus (§7).
+// TestDailyDouble_BonusApplied drives the full redesigned lifecycle: a normal
+// round on the Daily Double cell's 1st pick (which also makes the winner
+// lastScorer / the contestant), the 2nd pick triggering the offer instead of a
+// track, accept, song choice, crowd rating, and the row-value x multiplier
+// payout — then straight back to BOARD (no karaoke).
 func TestDailyDouble_BonusApplied(t *testing.T) {
 	h := newHarness(t)
 	defer h.run()()
@@ -759,30 +808,56 @@ func TestDailyDouble_BonusApplied(t *testing.T) {
 	rater := h.join("c2", "fp2", "rater")
 	_ = rater
 
-	h.selectCell("admin", 1, 2) // the daily-double cell, row 1 max 100
+	// 1st pick: a normal round on the DD cell so the winner becomes lastScorer.
+	h.selectCell("admin", 1, 2)
+	if h.state() != protocol.StateRoundActive {
+		t.Fatalf("state after 1st pick = %s, want ROUND_ACTIVE", h.state())
+	}
 	h.sync(func() { h.e.trackStartMs = nowMs() })
 	n := h.gate.Current()
 	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: n}, nowMs())
 	h.sync(func() {})
 	h.grade("admin", protocol.VerdictCorrect)
-	if h.state() != protocol.StateDailyDouble {
-		t.Fatalf("state = %s, want DAILY_DOUBLE", h.state())
+	if h.state() != protocol.StateKaraoke {
+		t.Fatalf("state after 1st-pick grade = %s, want KARAOKE", h.state())
 	}
-	// Base correct points = 100 (row1 within hold).
 	if got := h.score(performer); got != 100 {
-		t.Fatalf("performer base = %d, want 100", got)
+		t.Fatalf("performer after 1st pick = %d, want 100 (row1 max within hold)", got)
+	}
+	// Return to board directly (test-only shortcut for the real skip-vote ->
+	// transition-countdown -> board flow, which isn't what's under test here).
+	h.sync(func() {
+		h.e.curTrack = nil
+		h.e.curCell = nil
+		h.e.state = protocol.StateBoard
+	})
+
+	// 2nd pick: no track plays; the offer goes to the contestant (lastScorer).
+	h.selectCell("admin", 1, 2)
+	if h.state() != protocol.StateDailyDouble {
+		t.Fatalf("state after 2nd pick = %s, want DAILY_DOUBLE", h.state())
+	}
+	if got := h.score(performer); got != 100 {
+		t.Fatalf("score changed just from the offer starting: %d, want still 100", got)
 	}
 
-	// The single rater gives 5 stars -> 2.0x -> +100 bonus on max(100).
+	h.ddDecide("c1", true)
+	choices := h.lastDailyDoubleOfferTrackIDs("c1")
+	if len(choices) == 0 {
+		t.Fatalf("contestant received no song choices after accepting")
+	}
+	h.ddChoose("c1", choices[0])
+
+	// The single rater gives 5 stars -> 2.0x multiplier on the full row1 max(100).
 	rd, _ := json.Marshal(protocol.RateData{Stars: 5})
 	h.e.OnMessage("c2", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgRate, Data: rd, Nonce: h.gate.Current()}, nowMs())
 	h.sync(func() {})
 
-	if got := h.score(performer); got != 200 {
-		t.Errorf("performer after DD bonus = %d, want 200 (100 base + 100 bonus)", got)
+	if got := h.score(performer); got != 300 {
+		t.Errorf("performer after DD payout = %d, want 300 (100 from round 1 + 200 DD payout)", got)
 	}
-	if h.state() != protocol.StateKaraoke {
-		t.Errorf("state = %s, want KARAOKE after DD resolves", h.state())
+	if h.state() != protocol.StateBoard {
+		t.Errorf("state = %s, want BOARD after DD resolves (no karaoke)", h.state())
 	}
 }
 
@@ -872,5 +947,323 @@ func TestAdminRoleRequired(t *testing.T) {
 	h.sync(func() {})
 	if got := h.score("fp1"); got != 0 {
 		t.Errorf("mobile-issued admin award applied: score=%d", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Daily Double: assignment, decline reroll, admin skip, sanitization.
+// ---------------------------------------------------------------------------
+
+// ddCell builds a Cell with n playable tracks in the given category, for
+// assignDailyDoubles/decline test boards (not testBoard()'s shared shape).
+func ddCell(row, col int, category string, n int) *Cell {
+	c := &Cell{Row: row, Col: col, Category: category}
+	for i := 0; i < n; i++ {
+		c.Tracks = append(c.Tracks, &Track{
+			ID:       fmt.Sprintf("t-%d-%d-%d", row, col, i),
+			Playable: true,
+		})
+	}
+	return c
+}
+
+// TestAssignDailyDoubles_BalancedAcrossCategories: requesting more Daily
+// Doubles than categories must not let any category end up more than 1 ahead
+// of any other (the balanced round-robin invariant).
+func TestAssignDailyDoubles_BalancedAcrossCategories(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+
+	board := &Board{
+		Rows: 3, Cols: 3,
+		Cells: [][]*Cell{
+			{ddCell(1, 1, "A", 2), ddCell(1, 2, "B", 2), ddCell(1, 3, "C", 2)},
+			{ddCell(2, 1, "A", 2), ddCell(2, 2, "B", 2), ddCell(2, 3, "C", 2)},
+			{ddCell(3, 1, "A", 2), ddCell(3, 2, "B", 2), ddCell(3, 3, "C", 2)},
+		},
+		DailyDoubleCount: 5, // 5 over 3 categories: at least one gets a 2nd
+	}
+	h.sync(func() {
+		h.e.board = board
+		h.e.assignDailyDoubles()
+	})
+
+	counts := map[string]int{}
+	total := 0
+	for _, row := range board.Cells {
+		for _, c := range row {
+			if c.DailyDouble {
+				if c.DDTriggerVisit != 2 {
+					t.Errorf("cell (%d,%d) flagged but DDTriggerVisit = %d, want 2", c.Row, c.Col, c.DDTriggerVisit)
+				}
+				counts[c.Category]++
+				total++
+			}
+		}
+	}
+	if total != 5 {
+		t.Fatalf("placed %d daily doubles, want 5", total)
+	}
+	min, max := -1, -1
+	for _, n := range counts {
+		if min == -1 || n < min {
+			min = n
+		}
+		if max == -1 || n > max {
+			max = n
+		}
+	}
+	if max-min > 1 {
+		t.Errorf("category counts %v span more than 1 (min=%d max=%d)", counts, min, max)
+	}
+}
+
+// TestAssignDailyDoubles_DegradesGracefully: fewer eligible cells than
+// requested must place as many as possible, not crash or hang.
+func TestAssignDailyDoubles_DegradesGracefully(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+
+	board := &Board{
+		Rows: 1, Cols: 2,
+		Cells: [][]*Cell{
+			{ddCell(1, 1, "A", 2), ddCell(1, 2, "B", 1)}, // (1,2) has only 1 track: ineligible
+		},
+		DailyDoubleCount: 5,
+	}
+	h.sync(func() {
+		h.e.board = board
+		h.e.assignDailyDoubles()
+	})
+
+	total := 0
+	for _, row := range board.Cells {
+		for _, c := range row {
+			if c.DailyDouble {
+				total++
+			}
+		}
+	}
+	if total != 1 {
+		t.Fatalf("placed %d daily doubles, want 1 (only one eligible cell exists)", total)
+	}
+}
+
+// TestSelectCell_DailyDoubleTriggersOnSecondVisitOnly: the 1st pick of a
+// flagged cell plays a normal round; only the 2nd pick triggers the offer.
+func TestSelectCell_DailyDoubleTriggersOnSecondVisitOnly(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.join("c1", "fp1", "alice")
+
+	h.selectCell("admin", 1, 2)
+	if h.state() != protocol.StateRoundActive {
+		t.Fatalf("1st pick state = %s, want ROUND_ACTIVE (normal round)", h.state())
+	}
+	h.sync(func() {
+		h.e.curTrack = nil
+		h.e.curCell = nil
+		h.e.state = protocol.StateBoard
+	})
+
+	h.selectCell("admin", 1, 2)
+	if h.state() != protocol.StateDailyDouble {
+		t.Fatalf("2nd pick state = %s, want DAILY_DOUBLE", h.state())
+	}
+}
+
+// TestDailyDouble_DeclineRerollsToNewCell: declining clears the original
+// cell's flag permanently and arms a different eligible cell to fire on its
+// very next selection.
+func TestDailyDouble_DeclineRerollsToNewCell(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.join("c1", "fp1", "alice")
+
+	board := &Board{
+		Rows: 1, Cols: 2,
+		Cells: [][]*Cell{
+			{ddCell(1, 1, "A", 2), ddCell(1, 2, "B", 2)},
+		},
+	}
+	board.Cells[0][1].DailyDouble = true
+	board.Cells[0][1].DDTriggerVisit = 2
+	h.sync(func() { h.e.board = board })
+
+	// Arm it: 1st normal pick, then the 2nd pick triggers the offer.
+	h.selectCell("admin", 1, 2)
+	h.sync(func() {
+		h.e.curTrack = nil
+		h.e.curCell = nil
+		h.e.state = protocol.StateBoard
+	})
+	h.selectCell("admin", 1, 2)
+	if h.state() != protocol.StateDailyDouble {
+		t.Fatalf("state = %s, want DAILY_DOUBLE", h.state())
+	}
+
+	h.ddDecide("c1", false) // decline
+	if h.state() != protocol.StateBoard {
+		t.Fatalf("state after decline = %s, want BOARD", h.state())
+	}
+	if board.Cells[0][1].DailyDouble {
+		t.Errorf("declined cell (1,2) still flagged DailyDouble")
+	}
+	other := board.Cells[0][0]
+	if !other.DailyDouble || other.DDTriggerVisit != 1 {
+		t.Errorf("reroll target (1,1): DailyDouble=%v DDTriggerVisit=%d, want true/1 (fires on its very next pick)",
+			other.DailyDouble, other.DDTriggerVisit)
+	}
+
+	// Confirm it actually fires on the very next (1st) pick of the reroll cell.
+	h.selectCell("admin", 1, 1)
+	if h.state() != protocol.StateDailyDouble {
+		t.Errorf("reroll cell's next pick state = %s, want DAILY_DOUBLE", h.state())
+	}
+}
+
+// TestDailyDouble_DeclineCancelsWhenNoEligibleCell: with no other eligible
+// cell anywhere, a decline cancels outright rather than stalling.
+func TestDailyDouble_DeclineCancelsWhenNoEligibleCell(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.join("c1", "fp1", "alice")
+
+	board := &Board{
+		Rows: 1, Cols: 1,
+		Cells: [][]*Cell{{ddCell(1, 1, "A", 2)}},
+	}
+	board.Cells[0][0].DailyDouble = true
+	board.Cells[0][0].DDTriggerVisit = 2
+	h.sync(func() { h.e.board = board })
+
+	h.selectCell("admin", 1, 1)
+	h.sync(func() {
+		h.e.curTrack = nil
+		h.e.curCell = nil
+		h.e.state = protocol.StateBoard
+	})
+	h.selectCell("admin", 1, 1)
+	if h.state() != protocol.StateDailyDouble {
+		t.Fatalf("state = %s, want DAILY_DOUBLE", h.state())
+	}
+
+	h.ddDecide("c1", false)
+	if h.state() != protocol.StateBoard {
+		t.Fatalf("state after decline = %s, want BOARD", h.state())
+	}
+	if board.Cells[0][0].DailyDouble {
+		t.Errorf("cell still flagged after cancel-with-no-replacement")
+	}
+}
+
+// TestAdminSkipDailyDouble_TreatedAsDecline: the dedicated admin action during
+// the offer/pick sub-phase behaves exactly like a contestant decline.
+func TestAdminSkipDailyDouble_TreatedAsDecline(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.join("c1", "fp1", "alice")
+	h.selectCell("admin", 1, 2)
+	h.sync(func() {
+		h.e.curTrack = nil
+		h.e.curCell = nil
+		h.e.state = protocol.StateBoard
+	})
+	h.selectCell("admin", 1, 2)
+	if h.state() != protocol.StateDailyDouble {
+		t.Fatalf("state = %s, want DAILY_DOUBLE", h.state())
+	}
+
+	h.e.OnMessage("admin", protocol.RoleAdmin, protocol.ClientEnvelope{Type: cmsgAdminSkipDailyDouble, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+	if h.state() != protocol.StateBoard {
+		t.Fatalf("state after admin skip = %s, want BOARD", h.state())
+	}
+	var dd bool
+	h.sync(func() { dd = h.e.board.Cells[0][1].DailyDouble })
+	if dd {
+		t.Errorf("cell still flagged DailyDouble after admin skip")
+	}
+}
+
+// TestSanitization_DailyDoubleOfferNeverReachesOtherMobile: the §4A-exception
+// offer (title/artist) must go ONLY to the contestant's own connection, never
+// broadcast and never to any other mobile connection.
+func TestSanitization_DailyDoubleOfferNeverReachesOtherMobile(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	performer := h.join("c1", "fp1", "perf")
+	h.join("c2", "fp2", "bystander")
+	_ = performer
+
+	h.selectCell("admin", 1, 2)
+	h.sync(func() {
+		h.e.curTrack = nil
+		h.e.curCell = nil
+		h.e.state = protocol.StateBoard
+	})
+	h.selectCell("admin", 1, 2)
+	h.ddDecide("c1", true)
+
+	h.bcast.mu.Lock()
+	defer h.bcast.mu.Unlock()
+	for _, f := range h.bcast.frames {
+		if f.env.Type != smsgDailyDoubleOffer {
+			continue
+		}
+		if f.role != "" || f.all {
+			t.Fatalf("smsgDailyDoubleOffer was broadcast (role=%q all=%v), must be SendTo only", f.role, f.all)
+		}
+		if f.connID != "c1" {
+			t.Errorf("smsgDailyDoubleOffer sent to connID %q, want only the contestant's c1", f.connID)
+		}
+	}
+}
+
+// TestDailyDouble_PerformancePlaysWithNoOtherRatersOnline pins a real bug: with
+// nobody else online to rate, the performance used to call audio.Play and then
+// IMMEDIATELY call audio.Pause (finishDailyDouble short-circuiting on an empty
+// ratingPool) — the song visibly never started. An empty pool must let the
+// song play out normally; only "everyone who could rate already did" may
+// finish early.
+func TestDailyDouble_PerformancePlaysWithNoOtherRatersOnline(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.joinStage("stage")
+	h.join("c1", "fp1", "perf") // the ONLY mobile player — also the contestant
+
+	h.selectCell("admin", 1, 2)
+	h.sync(func() {
+		h.e.curTrack = nil
+		h.e.curCell = nil
+		h.e.state = protocol.StateBoard
+	})
+	h.selectCell("admin", 1, 2)
+	h.ddDecide("c1", true)
+	choices := h.lastDailyDoubleOfferTrackIDs("c1")
+	if len(choices) == 0 {
+		t.Fatalf("no choices offered")
+	}
+	h.ddChoose("c1", choices[0])
+
+	last, ok := h.audio.last()
+	if !ok || last.method != "play" {
+		t.Fatalf("last audio call = %+v (ok=%v), want a play call that STICKS (no immediate pause)", last, ok)
+	}
+	if h.state() != protocol.StateDailyDouble {
+		t.Fatalf("state = %s, want still DAILY_DOUBLE (performance must not be cut short)", h.state())
+	}
+
+	// The admin's Force End Round still works to finish it (1★ floor, nobody rated).
+	h.e.OnMessage("admin", protocol.RoleAdmin, protocol.ClientEnvelope{Type: protocol.CMsgAdminEndRound, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+	if h.state() != protocol.StateBoard {
+		t.Errorf("state after Force End Round = %s, want BOARD", h.state())
 	}
 }
