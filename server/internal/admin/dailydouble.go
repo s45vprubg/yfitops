@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"errors"
 	"net/http"
 	"time"
 )
@@ -62,6 +63,14 @@ func (h *Handler) addDailyDoubleTrack(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:  time.Now().UnixMilli(),
 	}
 	if err := h.store.AddDailyDoubleTrack(r.Context(), track); err != nil {
+		// dd-api-1: ON CONFLICT DO NOTHING means the store call succeeds
+		// (err == nil) even when nothing was written. The store surfaces that
+		// as ErrDailyDoubleTrackExists so we don't respond 201 with an id/
+		// artist/song that never made it into the database.
+		if errors.Is(err, ErrDailyDoubleTrackExists) {
+			http.Error(w, "a daily double track with this spotifyUri already exists on this board", http.StatusConflict)
+			return
+		}
 		serverError(w, err)
 		return
 	}
@@ -69,8 +78,15 @@ func (h *Handler) addDailyDoubleTrack(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) deleteDailyDoubleTrack(w http.ResponseWriter, r *http.Request) {
+	// dd-api-2: scope the delete by boardID as well as trackID so a track id
+	// from board A can't be deleted through board B's URL.
+	boardID := r.PathValue("id")
 	trackID := r.PathValue("trackId")
-	if err := h.store.RemoveDailyDoubleTrack(r.Context(), trackID); err != nil {
+	if err := h.store.RemoveDailyDoubleTrack(r.Context(), boardID, trackID); err != nil {
+		if errors.Is(err, ErrDailyDoubleTrackNotFound) {
+			http.Error(w, "daily double track not found on this board", http.StatusNotFound)
+			return
+		}
 		serverError(w, err)
 		return
 	}

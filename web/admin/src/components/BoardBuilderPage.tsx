@@ -60,7 +60,7 @@ export default function BoardBuilderPage({ secret }: Props) {
     else { setUnplaced([]); setCells([]); setCols(0); setDdBucket([]); }
   }, [selectedId, loadBoardData]);
 
-  const refresh = () => { if (selectedId) loadBoardData(selectedId); };
+  const refresh = () => (selectedId ? loadBoardData(selectedId) : Promise.resolve());
 
   const handleDeleteTrack = async (trackId: string) => {
     if (!selectedId) return;
@@ -170,14 +170,34 @@ export default function BoardBuilderPage({ secret }: Props) {
         // never appear back on the Jeopardy board.
         const track = findTrack(trackId);
         if (track) {
-          await api.addDailyDoubleTrack(selectedId, {
+          const created = await api.addDailyDoubleTrack(selectedId, {
             spotifyUri: track.spotifyUri,
             artist: track.artist,
             song: track.song,
             albumArt: track.albumArt,
             durationMs: track.durationMs,
           });
-          await api.deleteTrack(selectedId, trackId);
+          // The add succeeded; the delete is a separate, non-atomic call. If
+          // it throws, try to compensate by removing the bucket row we just
+          // created so we don't leave the track duplicated. If THAT also
+          // fails, say so precisely rather than falling through to the
+          // generic "Move failed" message below (nothing here is a normal
+          // "move failed, nothing happened" case once addDailyDoubleTrack
+          // has already committed).
+          try {
+            await api.deleteTrack(selectedId, trackId);
+          } catch (deleteErr) {
+            try {
+              await api.deleteDailyDoubleTrack(selectedId, created.id);
+              setError(
+                `Move to Daily Double failed, nothing changed: ${errMsg(deleteErr)}`,
+              );
+            } catch (compensateErr) {
+              setError(
+                `Move to Daily Double partially failed: "${track.song}" now exists in BOTH the Daily Double bucket and its original position (${errMsg(deleteErr)}; cleanup also failed: ${errMsg(compensateErr)}). Remove the duplicate from the bucket using its own remove button.`,
+              );
+            }
+          }
         }
       } else if (src.droppableId === "holding" && dstCell) {
         await api.placeTrack(selectedId, dstCell.row, dstCell.col, trackId, dst.index);
@@ -203,7 +223,11 @@ export default function BoardBuilderPage({ secret }: Props) {
     } catch (e) {
       setError(`Move failed: ${errMsg(e)}`);
     } finally {
-      refresh();
+      // Awaited so local state (unplaced/cells/ddBucket) is reconciled with
+      // the server before this handler resolves — otherwise dnd could accept
+      // a second drag against stale membership while this refetch is still
+      // in flight (dd-ui-admin-2).
+      await refresh();
     }
   };
 

@@ -7,6 +7,7 @@ const COPY: Partial<Record<GameState, { title: string; sub: string }>> = {
   TRANSITION: { title: "Next track…", sub: "Get ready to buzz." },
   ADJUDICATE: { title: "Hold up…", sub: "A guess is being judged." },
   GAME_OVER: { title: "Game over.", sub: "Final scores below." },
+  DAILY_DOUBLE: { title: "Daily Double!", sub: "Waiting for the contestant…" },
 };
 
 export function IdleScreen({

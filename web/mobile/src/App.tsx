@@ -75,7 +75,14 @@ export default function App() {
         const performer = view.ddPerformer;
         if (!performer) {
           // No status yet (resync in flight) — same idle fallback as below.
-          return <IdleScreen state={view.state} scoreboard={view.scoreboard} me={getSavedHandle()} />;
+          return (
+            <IdleScreen
+              state={view.state}
+              scoreboard={view.scoreboard}
+              me={getSavedHandle()}
+              ddResult={view.ddResult}
+            />
+          );
         }
         const iAmContestant = performer.playerID === view.myPlayerID;
         if (iAmContestant) {

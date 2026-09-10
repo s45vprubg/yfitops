@@ -219,6 +219,13 @@ type Engine struct {
 	// ddOffer is non-nil only during a Daily Double's offer/song-pick sub-phase
 	// (before a track starts playing); nil once the performance begins.
 	ddOffer *dailyDoubleOffer
+	// ddBucketOriginal snapshots e.board.DDBucket exactly as it was when the
+	// board was last attached (SetBoard / ReloadBoard / Run's initial
+	// LoadBoard) — i.e. the curated Postgres bucket, before any Daily Double
+	// accept drains it with a no-replacement draw. ResetToLobby restores
+	// DDBucket from this snapshot, so a "New Game, same board" cycle doesn't
+	// permanently shrink the bucket game over game (dd-eng-6, QA sweep 6).
+	ddBucketOriginal []*Track
 
 	// spotifyAuthed records that the admin completed Spotify OAuth, so a stage
 	// that connects AFTER the OAuth dance still learns to initialize the Web
@@ -324,6 +331,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	if e.board == nil {
 		if b, err := e.repo.LoadBoard(ctx, e.cfg.SessionID); err == nil && b != nil {
 			e.board = b
+			e.snapshotDDBucket()
 		}
 	}
 	_ = e.repo.CreateSession(ctx, e.session)
@@ -371,7 +379,21 @@ func (e *Engine) runCommand(c command) {
 }
 
 // SetBoard injects a board directly (test/admin bootstrap). Safe before Run.
-func (e *Engine) SetBoard(b *Board) { e.board = b }
+func (e *Engine) SetBoard(b *Board) {
+	e.board = b
+	e.snapshotDDBucket()
+}
+
+// snapshotDDBucket records the freshly-attached board's DDBucket contents as
+// the "pristine" copy ResetToLobby restores from (dd-eng-6, QA sweep 6). Call
+// this every time e.board is (re)assigned to a new *Board.
+func (e *Engine) snapshotDDBucket() {
+	if e.board == nil {
+		e.ddBucketOriginal = nil
+		return
+	}
+	e.ddBucketOriginal = append([]*Track{}, e.board.DDBucket...)
+}
 
 // ReloadBoard atomically replaces the active board via the Run loop's command
 // channel. Safe to call from any goroutine (e.g., the admin REST handler).
@@ -379,6 +401,7 @@ func (e *Engine) SetBoard(b *Board) { e.board = b }
 func (e *Engine) ReloadBoard(b *Board) {
 	e.submit(func() {
 		e.board = b
+		e.snapshotDDBucket()
 		e.broadcastBoard()
 	})
 }
@@ -455,6 +478,14 @@ func (e *Engine) ResetToLobby() error {
 					}
 				}
 			}
+			// dd-eng-6 (QA sweep 6): restore DDBucket to its board-load-time
+			// snapshot. It's board-level state separate from the per-cell Played
+			// flags reset above, and it drains via a no-replacement draw in
+			// onDailyDoubleDecision's accept path with nothing else ever
+			// refilling it — without this, several "New Game, same board"
+			// cycles in a row would permanently exhaust it even though the
+			// admin believes each New Game gave them a clean slate.
+			e.board.DDBucket = append([]*Track{}, e.ddBucketOriginal...)
 		}
 		// Persist the cleared state so a restart after New Game doesn't
 		// resurrect the previous game's consumed tracks (best-effort).
@@ -518,8 +549,11 @@ const (
 	cmsgDailyDoubleDecision protocol.ClientMsgType = "dailyDouble.decision"
 	// cmsgDailyDoubleChoose: {trackID string} — the contestant's own connection only.
 	cmsgDailyDoubleChoose protocol.ClientMsgType = "dailyDouble.choose"
-	// cmsgAdminSkipDailyDouble: abandon a stalled offer/song-pick (no track
-	// playing yet); mirrors CMsgAdminEndRound's dispatch shape.
+	// cmsgAdminSkipDailyDouble: abandon/abort the current Daily Double,
+	// whichever sub-phase it's in — an offer/song-pick still deciding (treated
+	// as a decline) OR a performance already live (finishes it exactly like a
+	// natural song-end). Shares its logic with CMsgAdminEndRound's own
+	// Daily-Double branch via skipDailyDouble() (dd-eng-5, QA sweep 6).
 	cmsgAdminSkipDailyDouble protocol.ClientMsgType = "admin.skipDailyDouble"
 
 	// smsgDailyDoublePerformer: {playerID, handle, performing} — sanitized (no
@@ -745,7 +779,7 @@ func (e *Engine) dispatchAdmin(connID string, env protocol.ClientEnvelope) {
 	case cmsgAdminSetRevealCfg:
 		e.onAdminSetRevealCfg(connID, env)
 	case cmsgAdminSkipDailyDouble:
-		e.declineDailyDouble()
+		e.skipDailyDouble()
 	case protocol.CMsgAdminEndGame:
 		e.transitionTo(protocol.StateGameOver)
 		e.persistScores()
@@ -1729,7 +1763,15 @@ func (e *Engine) beginTransition() {
 // outright for this cell (reverts to normal) rather than stalling the game.
 func (e *Engine) beginDailyDoubleOffer(cell *Cell) {
 	contestantID := e.lastScorer
-	if contestantID == "" || !e.reg.online(contestantID) {
+	// dd-eng-3 (QA sweep 6): mirror the fallback path's !p.Banned filter here.
+	// registry.online() is purely connection-count based (player.go) and has
+	// nothing to do with Banned — onAdminKick sets p.Banned=true but never
+	// force-disconnects the transport (it just sends an error frame the
+	// client is trusted to honor), so a banned player who ignores it stays
+	// online() == true. Without this check, a recently-banned lastScorer would
+	// skip straight past the fallback and be offered the Daily Double anyway.
+	lastScorer := e.reg.players[contestantID]
+	if contestantID == "" || lastScorer == nil || lastScorer.Banned || !e.reg.online(contestantID) {
 		var online []*Player
 		for _, p := range e.reg.mobilePlayers() {
 			if !p.Banned && e.reg.online(p.ID) {
@@ -1804,6 +1846,26 @@ func (e *Engine) onDailyDoubleDecision(connID string, env protocol.ClientEnvelop
 		return
 	}
 
+	// dd-eng-2 (QA sweep 6): make accept idempotent. Accepting does NOT call
+	// transitionTo (state stays DAILY_DOUBLE), so the nonce gate is never
+	// bumped between accept and the eventual choose — the client's nonce stays
+	// Validate()-true for a repeat send. A double-tap, a client-side retry
+	// after a dropped ack, or a hostile replay of the identical
+	// {accept:true} envelope must not draw ANOTHER batch from the
+	// no-replacement DDBucket and silently discard the first, already-sent
+	// batch. If candidates were already drawn for this offer, just resend
+	// them instead of drawing again.
+	if len(e.ddOffer.candidates) > 0 {
+		choices := make([]dailyDoubleSongChoice, len(e.ddOffer.candidates))
+		for i, t := range e.ddOffer.candidates {
+			choices[i] = dailyDoubleSongChoice{ID: t.ID, Title: t.Song, Artist: t.Artist}
+		}
+		for _, cid := range e.reg.connIDs(p.ID) {
+			e.bcast.SendTo(cid, e.envelope(smsgDailyDoubleOffer, dailyDoubleOfferData{Songs: choices}))
+		}
+		return
+	}
+
 	n := 5
 	if len(e.board.DDBucket) < n {
 		n = len(e.board.DDBucket)
@@ -1866,14 +1928,33 @@ func (e *Engine) onDailyDoubleChoose(connID string, env protocol.ClientEnvelope)
 // the crowd rates 1-5 stars instead (§7 sidenote).
 func (e *Engine) startDailyDoublePerformance(performer *Player, track *Track) {
 	cell := cellAt(e.board, e.ddOffer.cellRow, e.ddOffer.cellCol)
+	if cell == nil {
+		// dd-eng-4 (QA sweep 6): the offer's cellRow/cellCol no longer resolve on
+		// the CURRENT board — the only way this happens is an admin swapping the
+		// board (ReloadBoard, which has no state check at all) while this offer
+		// was still outstanding. Proceeding here used to leave e.curRow at
+		// whatever a PRIOR round set it to, so finishDailyDouble() would price
+		// the payout off the WRONG row's point ceiling. Treat a vanished cell as
+		// a hard cancel — abort exactly like a contestant decline — rather than
+		// perform against a phantom cell.
+		log.Printf("[engine] startDailyDoublePerformance: cell (%d,%d) no longer resolves on the current board; aborting Daily Double", e.ddOffer.cellRow, e.ddOffer.cellCol)
+		e.declineDailyDouble()
+		return
+	}
 	e.clearReveal() // defensive: no masked-reveal clock is used for a performance
 	e.curCell = cell
 	e.curTrack = track
-	if cell != nil {
-		e.curRow = cell.Row
-	}
+	e.curRow = cell.Row
 	e.trackStartMs = nowMs()
 	e.cellPicker = performer.ID
+	// dd-eng-1 (QA sweep 6): mint a FRESH roundKey, mirroring startTrack's own
+	// pattern, before e.ddOffer is cleared below (it still holds cellRow/
+	// cellCol here). Without this, e.roundKey stays pinned at whatever the
+	// PRIOR normal round's startTrack() set, so a still-in-flight
+	// fetchAndSendLyrics closure from that round (which captured `rk :=
+	// e.roundKey`) evaluates its staleness guard as false during this live
+	// Daily Double and can broadcast the wrong track's lyrics over it.
+	e.roundKey = fmt.Sprintf("%s:dd:r%dc%d:%s:%d", e.cfg.SessionID, e.ddOffer.cellRow, e.ddOffer.cellCol, track.ID, e.trackStartMs)
 	e.ddOffer = nil
 	// trackStartEnvelope now derives its pool from livePool() (roundPool() +
 	// pointFactor), same as startTrack — reset both here for the same reason
@@ -2193,20 +2274,35 @@ func (e *Engine) onAdminSetRevealCfg(connID string, env protocol.ClientEnvelope)
 	e.bcast.Broadcast(protocol.RoleAdmin, e.envelope(smsgAdminRevealCfg, e.revealCfgData()))
 }
 
+// skipDailyDouble abandons/aborts whatever Daily Double sub-phase is
+// currently live: if a performance is playing it finishes exactly like a
+// natural song-end (average whatever ratings are in); if the contestant is
+// still deciding/picking, it's treated as a decline (reroll to a new cell).
+// No-op outside StateDailyDouble. Shared by endRound (force-end) and the
+// dedicated admin.skipDailyDouble action (dd-eng-5, QA sweep 6) — before this
+// helper existed, skipDailyDouble called declineDailyDouble() UNCONDITIONALLY,
+// which no-ops once e.ddOffer is nil (i.e. once a performance has actually
+// started: startDailyDoublePerformance clears it), so the dedicated Skip
+// button silently did nothing during a live performance despite this
+// function's own doc comment claiming parity with endRound.
+func (e *Engine) skipDailyDouble() {
+	if e.state != protocol.StateDailyDouble {
+		return
+	}
+	switch {
+	case e.curTrack != nil:
+		e.finishDailyDouble()
+	case e.ddOffer != nil:
+		e.declineDailyDouble()
+	}
+}
+
 // endRound force-ends the current round and returns to the board (§3.10). The
-// SAME button also finishes/abandons a Daily Double: if a performance is
-// playing it finishes exactly like a natural song-end (average whatever
-// ratings are in); if the contestant is still deciding/picking, it's treated
-// as a decline (reroll to a new cell) via declineDailyDouble — the dedicated
-// admin.skipDailyDouble action does the same thing with a more specific label.
+// SAME button also finishes/abandons a Daily Double via skipDailyDouble — the
+// dedicated admin.skipDailyDouble action shares that exact logic.
 func (e *Engine) endRound() {
 	if e.state == protocol.StateDailyDouble {
-		switch {
-		case e.curTrack != nil:
-			e.finishDailyDouble()
-		case e.ddOffer != nil:
-			e.declineDailyDouble()
-		}
+		e.skipDailyDouble()
 		return
 	}
 	e.consumeTrack()

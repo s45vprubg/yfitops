@@ -101,14 +101,24 @@ func (r *PostgresRepo) SetDailyDoubleCount(ctx context.Context, id string, count
 }
 
 // AddDailyDoubleTrack adds a song to a board's standalone Daily Double bucket.
+//
+// The INSERT is ON CONFLICT (board_id, spotify_uri) DO NOTHING, which returns
+// err == nil even when the row already existed and nothing was written
+// (dd-api-1). CommandTag.RowsAffected() is the only way pgx exposes whether
+// the INSERT actually happened, so a 0-rows result is turned into
+// admin.ErrDailyDoubleTrackExists — the handler must not report success (and
+// must not echo back the caller's unsaved payload) when this fires.
 func (r *PostgresRepo) AddDailyDoubleTrack(ctx context.Context, t *admin.DailyDoubleTrack) error {
-	_, err := r.pool.Exec(ctx,
+	tag, err := r.pool.Exec(ctx,
 		`INSERT INTO board_dd_bucket_tracks (id, board_id, spotify_uri, artist, song, album_art, duration_ms, created_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 ON CONFLICT (board_id, spotify_uri) DO NOTHING`,
 		t.ID, t.BoardID, t.SpotifyURI, t.Artist, t.Song, t.AlbumArt, t.DurationMs, t.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("store: add daily double track: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return admin.ErrDailyDoubleTrackExists
 	}
 	return nil
 }
@@ -133,10 +143,21 @@ func (r *PostgresRepo) ListDailyDoubleTracks(ctx context.Context, boardID string
 	return tracks, rows.Err()
 }
 
-func (r *PostgresRepo) RemoveDailyDoubleTrack(ctx context.Context, trackID string) error {
-	_, err := r.pool.Exec(ctx, `DELETE FROM board_dd_bucket_tracks WHERE id = $1`, trackID)
+// RemoveDailyDoubleTrack deletes a track scoped to boardID, mirroring the
+// other board-scoped store methods (e.g. UnplaceTrack). Previously the DELETE
+// filtered only by id, so a trackID could be deleted through ANY board's URL
+// regardless of which board it actually belonged to (dd-api-2). Zero rows
+// affected (wrong board, or the id never existed) now surfaces as
+// admin.ErrDailyDoubleTrackNotFound so the handler can answer 404 instead of
+// a false 204.
+func (r *PostgresRepo) RemoveDailyDoubleTrack(ctx context.Context, boardID, trackID string) error {
+	tag, err := r.pool.Exec(ctx,
+		`DELETE FROM board_dd_bucket_tracks WHERE id = $1 AND board_id = $2`, trackID, boardID)
 	if err != nil {
 		return fmt.Errorf("store: remove daily double track: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return admin.ErrDailyDoubleTrackNotFound
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ import { useState } from "react";
 import type {
   AdminViewData,
   DailyDoublePerformerData,
+  DailyDoubleResultData,
   GameState,
 } from "@shared/protocol";
 import type { AdminActions, ConnStatus } from "../useAdmin";
@@ -11,6 +12,7 @@ interface Props {
   gameState?: GameState;
   adminView?: AdminViewData;
   ddPerformer?: DailyDoublePerformerData;
+  ddResult?: DailyDoubleResultData;
   actions: AdminActions;
   // Game-control-bar props (this panel's header IS the control bar now).
   status: ConnStatus;
@@ -48,7 +50,7 @@ function isRoundActive(s?: GameState): boolean {
 }
 
 export default function EvaluationPanel({
-  gameState, adminView, ddPerformer, actions,
+  gameState, adminView, ddPerformer, ddResult, actions,
   status, connected, nonce, adminSecret, spotifyConnected,
 }: Props) {
   const phase = derivePhase(gameState, adminView);
@@ -74,6 +76,7 @@ export default function EvaluationPanel({
         {ddAwaitingResponse && ddPerformer && (
           <DailyDoubleOfferCard actions={actions} performer={ddPerformer} />
         )}
+        {ddResult && <DailyDoubleResultBanner result={ddResult} />}
         <Overrides actions={actions} roundActive={isRoundActive(gameState)} />
       </div>
     </section>
@@ -205,6 +208,25 @@ function DailyDoubleOfferCard({ actions, performer }: { actions: AdminActions; p
       >
         Force Skip Daily Double
       </button>
+    </div>
+  );
+}
+
+// Shows the payout of the most recently resolved Daily Double (avgStars +
+// points). ddResult is cleared by useAdmin.ts as soon as the NEXT Daily
+// Double offer starts, so this naturally stays visible in the interim
+// (dd-ui-admin-6 — previously captured but never rendered anywhere).
+function DailyDoubleResultBanner({ result }: { result: DailyDoubleResultData }) {
+  return (
+    <div className="rounded-lg border border-amber-600 bg-amber-950/30 p-3">
+      <div className="mb-2 text-[10px] uppercase tracking-wide text-amber-400">Daily Double — result</div>
+      <div className="flex items-center gap-4 text-lg font-bold text-white">
+        <span>{result.avgStars.toFixed(1)}★ avg</span>
+        <span className="text-accent">
+          {result.points > 0 ? "+" : ""}
+          {result.points} pts
+        </span>
+      </div>
     </div>
   );
 }

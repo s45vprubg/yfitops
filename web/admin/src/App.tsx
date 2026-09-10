@@ -105,6 +105,7 @@ export default function App() {
               gameState={state.gameState}
               adminView={state.adminView}
               ddPerformer={state.ddPerformer}
+              ddResult={state.ddResult}
               actions={actions}
               status={state.status}
               connected={state.connected}

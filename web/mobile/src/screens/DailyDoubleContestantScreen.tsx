@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { DailyDoubleSongChoice } from "@shared/protocol";
 
 interface Props {
@@ -10,9 +10,32 @@ interface Props {
   onChoose: (trackID: string) => void;
 }
 
+// dd-ui-ms-1 safety net. useGame.ts's dailyDouble.performer handler now
+// preserves an ALREADY-RECEIVED offer across a resync, which fixes the main
+// soft-lock (contestant already has the 5 songs, a reconnect used to wipe
+// them). But there's a narrower race that fix cannot cover: if the resync
+// happens in the sliver of time between tapping "I'm in!" (decided=true) and
+// the server's dailyDouble.offer actually arriving, the client has no offer
+// to preserve — offer is still legitimately null. From here we cannot tell
+// "the accept is still in flight, offer is coming" apart from "the accept
+// never landed and never will." Rather than leave the contestant stuck with
+// both buttons disabled forever on that ambiguity, we resolve it in favor of
+// availability: if no offer shows up within a generous window, re-enable the
+// decision buttons so the player can just try again. The worst case if the
+// original accept actually did land is a re-drawn set of 5 songs (a minor
+// Daily Double bucket cost) — strictly better than a permanent stall that
+// needs a page reload or an admin Force Skip to clear.
+const DECISION_TIMEOUT_MS = 8000;
+
 export function DailyDoubleContestantScreen({ offer, onDecide, onChoose }: Props) {
   const [decided, setDecided] = useState(false);
   const [chosen, setChosen] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!decided || offer) return;
+    const timer = setTimeout(() => setDecided(false), DECISION_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [decided, offer]);
 
   const decide = (accept: boolean) => {
     if (decided) return;

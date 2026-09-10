@@ -224,7 +224,19 @@ export function useGame() {
             trackStart: ts,
             timer: { row, maxPoints: ts.maxPoints, basePoints: ts.basePoints, startTime: ts.startTime, frozen: false },
             lockoutHandle: null,
-            ...(isNewTrack ? { animStartTime: ts.startTime, lyrics: null, lyricsStatus: "idle" as const, maskedReveal: null, revealedArtist: false, revealedSong: false, roundWinner: null, ddResult: null } : {}),
+            // dd-ui-ms-3: cleared unconditionally on every trackStart, NOT
+            // gated on isNewTrack's artistLen/songLen-equality heuristic. That
+            // heuristic can rarely false-negative (two consecutive tracks
+            // with identical artist+song string lengths), which would leave
+            // a stale Daily Double result banner rendered over an unrelated
+            // track. Any trackStart firing at all is a strong enough signal
+            // that a prior Daily Double's result is stale, and pulling just
+            // this field out of the isNewTrack gate doesn't touch the other
+            // fields below (lyrics/maskedReveal/reveal flags/roundWinner),
+            // which legitimately need to survive a mid-track re-anchor (e.g.
+            // after a partial grade) and are left exactly as they were.
+            ddResult: null,
+            ...(isNewTrack ? { animStartTime: ts.startTime, lyrics: null, lyricsStatus: "idle" as const, maskedReveal: null, revealedArtist: false, revealedSong: false, roundWinner: null } : {}),
           };
         });
       });

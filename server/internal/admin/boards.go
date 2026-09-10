@@ -3,8 +3,15 @@ package admin
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 )
+
+// boardRows is the game's fixed row count (5 rows per column — see
+// server/internal/game/scoring.go's row-based multiplier switch and
+// admin/aibuild.go's own local `rows = 5`; there is no shared exported
+// constant for it yet). Used only to bound dailyDoubleCount (dd-api-3).
+const boardRows = 5
 
 func (h *Handler) listBoards(w http.ResponseWriter, r *http.Request) {
 	boards, err := h.store.ListBoards(r.Context())
@@ -95,6 +102,24 @@ func (h *Handler) renameBoard(w http.ResponseWriter, r *http.Request) {
 	if body.DailyDoubleCount != nil {
 		if *body.DailyDoubleCount < 0 {
 			http.Error(w, "dailyDoubleCount must be >= 0", http.StatusBadRequest)
+			return
+		}
+		// dd-api-3: bound dailyDoubleCount by the board's actual cell count
+		// (5 rows x its current Cols) instead of accepting any non-negative
+		// value. The engine already degrades gracefully for an oversized
+		// count, but a persisted value that can never be honored is a
+		// data-integrity/UX gap worth rejecting up front.
+		board, err := h.store.GetBoard(r.Context(), id)
+		if err != nil {
+			serverError(w, err)
+			return
+		}
+		if board == nil {
+			http.Error(w, "board not found", http.StatusNotFound)
+			return
+		}
+		if maxDD := boardRows * board.Cols; *body.DailyDoubleCount > maxDD {
+			http.Error(w, fmt.Sprintf("dailyDoubleCount must be <= %d (%d rows x %d cols)", maxDD, boardRows, board.Cols), http.StatusBadRequest)
 			return
 		}
 		if err := h.store.SetDailyDoubleCount(r.Context(), id, *body.DailyDoubleCount); err != nil {

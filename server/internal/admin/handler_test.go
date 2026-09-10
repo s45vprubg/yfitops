@@ -38,14 +38,43 @@ func (m *mockStore) RenameBoard(_ context.Context, _, _ string) error  { return 
 func (m *mockStore) DeleteBoard(_ context.Context, _ string) error     { return nil }
 func (m *mockStore) UpdateBoardCols(_ context.Context, _ string, _ int) error { return nil }
 func (m *mockStore) SetDailyDoubleCount(_ context.Context, _ string, _ int) error { return nil }
+// AddDailyDoubleTrack mirrors the fixed Postgres behavior: a duplicate
+// (boardID, spotifyUri) pair is a no-op that reports ErrDailyDoubleTrackExists
+// instead of silently appending a second, unpersisted-looking row (dd-api-1).
 func (m *mockStore) AddDailyDoubleTrack(_ context.Context, t *DailyDoubleTrack) error {
+	for _, existing := range m.ddTracks {
+		if existing.BoardID == t.BoardID && existing.SpotifyURI == t.SpotifyURI {
+			return ErrDailyDoubleTrackExists
+		}
+	}
 	m.ddTracks = append(m.ddTracks, *t)
 	return nil
 }
-func (m *mockStore) ListDailyDoubleTracks(_ context.Context, _ string) ([]DailyDoubleTrack, error) {
-	return m.ddTracks, nil
+func (m *mockStore) ListDailyDoubleTracks(_ context.Context, boardID string) ([]DailyDoubleTrack, error) {
+	var out []DailyDoubleTrack
+	for _, t := range m.ddTracks {
+		if t.BoardID == boardID {
+			out = append(out, t)
+		}
+	}
+	return out, nil
 }
-func (m *mockStore) RemoveDailyDoubleTrack(_ context.Context, _ string) error { return nil }
+
+// RemoveDailyDoubleTrack mirrors the fixed Postgres behavior: the delete is
+// scoped to boardID, returning ErrDailyDoubleTrackNotFound (not a silent
+// success) if trackID doesn't exist or belongs to a different board (dd-api-2).
+func (m *mockStore) RemoveDailyDoubleTrack(_ context.Context, boardID, trackID string) error {
+	for i, t := range m.ddTracks {
+		if t.ID == trackID {
+			if t.BoardID != boardID {
+				return ErrDailyDoubleTrackNotFound
+			}
+			m.ddTracks = append(m.ddTracks[:i], m.ddTracks[i+1:]...)
+			return nil
+		}
+	}
+	return ErrDailyDoubleTrackNotFound
+}
 func (m *mockStore) AddTrack(_ context.Context, t *Track) error {
 	m.tracks = append(m.tracks, *t)
 	return nil
@@ -340,5 +369,126 @@ func TestSpotifyToken_RefreshFailed(t *testing.T) {
 	}
 	if strings.Contains(w.Body.String(), context.DeadlineExceeded.Error()) {
 		t.Error("upstream error text leaked to the client")
+	}
+}
+
+// TestQARegression_AddDailyDoubleTrack_DuplicateSpotifyURI_Returns409 covers
+// dd-api-1: AddDailyDoubleTrack's INSERT is ON CONFLICT (board_id,
+// spotify_uri) DO NOTHING, so a duplicate add previously still returned 201
+// with a fabricated track object (a fresh generated id, the caller's new
+// artist/song) that was never actually written to Postgres. Against the
+// pre-fix code, mockStore.AddDailyDoubleTrack unconditionally appended and
+// returned nil, and the handler unconditionally wrote 201 regardless of
+// outcome — so this second POST would have come back 201 (with a bogus new
+// id) instead of 409, and this test would have failed.
+func TestQARegression_AddDailyDoubleTrack_DuplicateSpotifyURI_Returns409(t *testing.T) {
+	_, mux := newTestHandler()
+
+	first := strings.NewReader(`{"spotifyUri":"spotify:track:qatest123","artist":"QA Artist","song":"QA Song","durationMs":180000}`)
+	req := httptest.NewRequest("POST", "/api/boards/brd_test/daily-double-tracks", first)
+	req.Header.Set("Authorization", "Bearer test-secret")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("first add: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Same spotifyUri, different artist/song — must NOT be treated as a new track.
+	second := strings.NewReader(`{"spotifyUri":"spotify:track:qatest123","artist":"DIFFERENT ARTIST","song":"DIFFERENT SONG","durationMs":180000}`)
+	req2 := httptest.NewRequest("POST", "/api/boards/brd_test/daily-double-tracks", second)
+	req2.Header.Set("Authorization", "Bearer test-secret")
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusConflict {
+		t.Fatalf("duplicate add: expected 409, got %d: %s", w2.Code, w2.Body.String())
+	}
+	if strings.Contains(w2.Body.String(), "DIFFERENT ARTIST") {
+		t.Error("409 response must not echo back the unsaved payload's metadata")
+	}
+}
+
+// TestQARegression_DeleteDailyDoubleTrack_WrongBoard_Returns404 covers
+// dd-api-2: the DELETE route is /api/boards/{id}/daily-double-tracks/{trackId}
+// but the pre-fix handler never read the {id} board segment, and
+// RemoveDailyDoubleTrack deleted by track id alone — so a track belonging to
+// board A could be deleted through board B's URL. Against the pre-fix
+// handler/mock (deleteDailyDoubleTrack ignoring boardID, and a 1-arg
+// RemoveDailyDoubleTrack that succeeds unconditionally), this DELETE against
+// the wrong board would have returned 204 and actually removed the track —
+// this test would have failed on both assertions below.
+func TestQARegression_DeleteDailyDoubleTrack_WrongBoard_Returns404(t *testing.T) {
+	store := &mockStore{
+		boards: []Board{
+			{ID: "brd_a", Name: "Board A", Cols: 1},
+			{ID: "brd_b", Name: "Board B", Cols: 1},
+		},
+		ddTracks: []DailyDoubleTrack{
+			{ID: "ddt_owned_by_a", BoardID: "brd_a", SpotifyURI: "spotify:track:abc", Artist: "A", Song: "S"},
+		},
+	}
+	h := NewHandler(store, nil, &mockEngine{}, "test-secret")
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	// Address the DELETE at brd_b, even though the track belongs to brd_a.
+	req := httptest.NewRequest("DELETE", "/api/boards/brd_b/daily-double-tracks/ddt_owned_by_a", nil)
+	req.Header.Set("Authorization", "Bearer test-secret")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 (wrong board), got %d: %s", w.Code, w.Body.String())
+	}
+
+	found := false
+	for _, tr := range store.ddTracks {
+		if tr.ID == "ddt_owned_by_a" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("track owned by brd_a must survive a delete addressed to brd_b")
+	}
+}
+
+// TestQARegression_RenameBoard_DailyDoubleCount_RejectsOversized covers
+// dd-api-3: renameBoard's dailyDoubleCount validation only rejected negative
+// values, so an admin could PATCH an arbitrarily large count (e.g. 999999)
+// and have it persist even though the board can never have that many Daily
+// Double cells. Against the pre-fix code (only `< 0` checked, no GetBoard/
+// upper-bound check), this PATCH would have returned 204 instead of 400, and
+// this test would have failed.
+func TestQARegression_RenameBoard_DailyDoubleCount_RejectsOversized(t *testing.T) {
+	store := &mockStore{
+		boards: []Board{{ID: "brd_small", Name: "Small", Cols: 3}}, // max = 5*3 = 15
+	}
+	h := NewHandler(store, nil, &mockEngine{}, "test-secret")
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	body := strings.NewReader(`{"dailyDoubleCount":999999}`)
+	req := httptest.NewRequest("PATCH", "/api/boards/brd_small", body)
+	req.Header.Set("Authorization", "Bearer test-secret")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for oversized dailyDoubleCount, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// A value within bounds must still be accepted.
+	body2 := strings.NewReader(`{"dailyDoubleCount":10}`)
+	req2 := httptest.NewRequest("PATCH", "/api/boards/brd_small", body2)
+	req2.Header.Set("Authorization", "Bearer test-secret")
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, req2)
+
+	if w2.Code != http.StatusNoContent {
+		t.Fatalf("expected 204 for in-bounds dailyDoubleCount, got %d: %s", w2.Code, w2.Body.String())
 	}
 }

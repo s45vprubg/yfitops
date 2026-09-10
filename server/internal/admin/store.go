@@ -2,9 +2,22 @@ package admin
 
 import (
 	"context"
+	"errors"
 
 	"github.com/s45vprubg/yfitops/server/internal/game"
 )
+
+// ErrDailyDoubleTrackExists is returned by AddDailyDoubleTrack when the
+// (board_id, spotify_uri) pair already has a row — the store's INSERT ...
+// ON CONFLICT DO NOTHING found nothing to insert. The handler must not
+// respond 201 with the caller's (unsaved) payload in this case; it should
+// surface a real conflict (dd-api-1).
+var ErrDailyDoubleTrackExists = errors.New("daily double track already exists for this board and spotify uri")
+
+// ErrDailyDoubleTrackNotFound is returned by RemoveDailyDoubleTrack when no
+// row matched the given (boardID, trackID) pair — either the track id does
+// not exist at all, or it exists but belongs to a different board (dd-api-2).
+var ErrDailyDoubleTrackNotFound = errors.New("daily double track not found on this board")
 
 // AdminStore defines the data operations the admin REST handlers need.
 type AdminStore interface {
@@ -18,9 +31,14 @@ type AdminStore interface {
 	SetDailyDoubleCount(ctx context.Context, id string, count int) error
 
 	// Daily Double bucket (board-scoped, independent of the grid's Track library)
+	// AddDailyDoubleTrack returns ErrDailyDoubleTrackExists on a duplicate
+	// (board_id, spotify_uri) instead of silently no-opping.
 	AddDailyDoubleTrack(ctx context.Context, t *DailyDoubleTrack) error
 	ListDailyDoubleTracks(ctx context.Context, boardID string) ([]DailyDoubleTrack, error)
-	RemoveDailyDoubleTrack(ctx context.Context, trackID string) error
+	// RemoveDailyDoubleTrack deletes a track scoped to boardID; it returns
+	// ErrDailyDoubleTrackNotFound if trackID doesn't exist or belongs to a
+	// different board, rather than silently deleting cross-board.
+	RemoveDailyDoubleTrack(ctx context.Context, boardID, trackID string) error
 
 	// Tracks (board-scoped library)
 	AddTrack(ctx context.Context, t *Track) error

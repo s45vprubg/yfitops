@@ -257,13 +257,28 @@ export function useGame() {
       c.on("dailyDouble.performer", (env: ServerEnvelope) => {
         const d = env.d as DailyDoublePerformerData | undefined;
         if (!d) return;
-        setView((v) => ({
-          ...v,
-          ddPerformer: d,
-          // A fresh (non-performing) broadcast means a NEW Daily Double is
-          // starting — clear any stale offer/result left from a prior one.
-          ...(d.performing ? {} : { ddResult: null, ddOffer: null }),
-        }));
+        setView((v) => {
+          // dd-ui-ms-1: server's sendFullSync re-sends this message with
+          // performing:false on EVERY resync for as long as e.ddOffer is
+          // non-nil — which spans the whole accept+song-pick window, not
+          // just the pre-decision moment. A routine WebTransport reconnect
+          // during that window (e.g. a wifi blip) used to be indistinguishable
+          // from "a brand new Daily Double just started," so this handler
+          // wiped ddOffer/ddResult out from under a contestant who was
+          // already mid-flow — soft-locking them on a screen with no legal
+          // action. Only treat it as fresh when the performer's playerID
+          // actually changed (or there was no prior performer): that is the
+          // one signal a genuinely new Daily Double always carries, since
+          // ddPerformer is nulled out by the "state" handler the moment we
+          // leave DAILY_DOUBLE, so a later DD for the SAME player still shows
+          // up as a playerID transition from null.
+          const isNewOffer = !v.ddPerformer || v.ddPerformer.playerID !== d.playerID;
+          return {
+            ...v,
+            ddPerformer: d,
+            ...(isNewOffer && !d.performing ? { ddResult: null, ddOffer: null } : {}),
+          };
+        });
       });
 
       // CONTESTANT'S OWN CONNECTION ONLY — see the doc comment on

@@ -19,17 +19,33 @@ export default function BoardSelector({ api, boards, selectedId, onSelect, onRef
 
   const selectedBoard = boards.find((b) => b.id === selectedId);
   const [ddCount, setDdCount] = useState(0);
-  const ddCountTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Keyed by board id (not a single ref) so switching boards mid-debounce
+  // doesn't cancel a still-pending save for the board just left (dd-ui-admin-3).
+  const ddCountTimeouts = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   // Re-sync the input whenever the selected board (or its stored count) changes.
   useEffect(() => { setDdCount(selectedBoard?.dailyDoubleCount ?? 0); }, [selectedBoard?.id, selectedBoard?.dailyDoubleCount]);
+  // Flush any pending saves on unmount instead of silently dropping them.
+  useEffect(() => {
+    const timeouts = ddCountTimeouts.current;
+    return () => {
+      timeouts.forEach((t) => clearTimeout(t));
+      timeouts.clear();
+    };
+  }, []);
 
   const handleDailyDoubleCountChange = (n: number) => {
     if (!selectedId) return;
     setDdCount(n);
-    if (ddCountTimeout.current !== null) clearTimeout(ddCountTimeout.current);
-    ddCountTimeout.current = setTimeout(() => {
-      api.setDailyDoubleCount(selectedId, n).then(onRefresh).catch(() => {});
-    }, 500);
+    const boardId = selectedId;
+    const pending = ddCountTimeouts.current.get(boardId);
+    if (pending !== undefined) clearTimeout(pending);
+    ddCountTimeouts.current.set(
+      boardId,
+      setTimeout(() => {
+        ddCountTimeouts.current.delete(boardId);
+        api.setDailyDoubleCount(boardId, n).then(onRefresh).catch(() => {});
+      }, 500),
+    );
   };
 
   const handleCreate = async () => {

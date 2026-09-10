@@ -548,3 +548,146 @@ The higher-value moves now are the two standing structural gaps: resolve the
 have blocked work in consecutive sweeps and neither is a hunting problem. If
 features land again, re-scope per sweep 4's rule: **diff against this sweep's HEAD
 first; "converged" means converged-as-of-that-tree.**
+
+# SWEEP 6 (2026-09-10) — DONE
+
+Full writeup: `docs/security/qa-sweep-6.md`. Features landed again (the
+redesigned Daily Double + admin manual-score-edit, commit f4d1ac6, merged with
+sweeps 4/5's upstream fixes in 284fab0), so this sweep re-scoped exactly per
+sweep 5's recommendation above: diffed against f4d1ac6, hunted only that delta.
+
+## Outcome
+**18 findings, 18 CONFIRMED/PARTIAL, 0 REFUTED. 4 high, 6 medium, 8 low, 0
+critical.** Layered order held: 2 server hunters ran first; their validators
+ran in parallel with the 2 UI hunters (UI hunting doesn't need server fixes
+trusted yet, only not-yet-fixed-on-unvalidated-findings); 4 fixers then ran in
+parallel on file-disjoint surfaces with zero merge conflicts. The section 4A
+sanitization boundary (the one deliberate exception letting a Daily Double
+contestant's own phone see 5 song titles) was independently re-verified twice
+and held both times, including a transport-layer trace confirming `Hub.SendTo`
+only ever reaches the contestant's own connection IDs.
+
+## Fixed & verified (10 gated, 9 frontend-only)
+**Engine** (`server/internal/game/engine.go`): stale `roundKey` leaking a
+prior round's lyric fetch into a live Daily Double (dd-eng-1); no re-entry
+guard on DD accept letting a replay/double-tap drain the bucket and discard
+the first offered batch (dd-eng-2); the `lastScorer` contestant fast-path
+skipping the `Banned` check its own fallback enforced (dd-eng-3); a nil
+`cellAt` mid-offer (reachable via an admin board reload with no state guard)
+leaving `curRow` stale and mispricing the payout (dd-eng-4); `admin.
+skipDailyDouble` no-op'ing during a live performance, contradicting its own
+doc comment (dd-eng-5, fixed with a shared `skipDailyDouble()` helper now used
+by both that action and `endRound`); `ResetToLobby` never restoring
+`Board.DDBucket`, permanently depleting it across same-board New Game cycles
+within one running process (dd-eng-6, fixed with a load-time snapshot).
+
+**Admin API** (`server/internal/admin/dailydouble.go`, `boards.go`,
+`server/internal/store/admin_store.go`): `AddDailyDoubleTrack`'s `ON CONFLICT
+DO NOTHING` silently no-op'ing on a duplicate while the handler still returned
+a fabricated 201 (dd-api-1, live-confirmed against real Postgres, fixed via
+`RowsAffected()` + 409); `RemoveDailyDoubleTrack`'s DELETE not scoped by
+`board_id` (dd-api-2, downgraded MEDIUM->LOW on validation: this app's actual
+trust model has no per-board tenancy to escalate against, still fixed);
+`dailyDoubleCount` with no upper bound (dd-api-3, fixed by bounding to the
+board's actual cell count).
+
+**Admin frontend** (`web/admin/src/`, no automated gate, verified via `tsc
+--noEmit` + hand-traced logic): drag-to-bucket MOVE with no rollback on a
+partial failure, risking a duplicated track (dd-ui-admin-1, HIGH); an
+un-awaited refresh race in `handleDragEnd` (dd-ui-admin-2); `BoardSelector`'s
+single debounce timer dropping a pending save on a quick board switch
+(dd-ui-admin-3); `ScorePanel`'s per-row menus with no mutual exclusion
+(dd-ui-admin-4, downgraded MEDIUM->LOW: cosmetic, not a functional break);
+"Edit points" silently no-op'ing on bad input (dd-ui-admin-5); `ddResult`
+captured but never rendered anywhere (dd-ui-admin-6).
+
+**Mobile + stage frontend** (`web/mobile/src/`, `web/stage/src/`, same
+no-gate caveat): a WebTransport reconnect during the Daily Double
+accept/pick phase hard-soft-locking the contestant (dd-ui-ms-1, HIGH, the
+sweep's most valuable finding, fixed via a playerID-comparison guard on the
+client plus an 8s safety-net timer for the one remaining ambiguous race);
+`IdleScreen`'s DAILY_DOUBLE fallback missing `ddResult` and a copy entry
+(dd-ui-ms-2); a stale-result-banner edge case in stage's `isNewTrack`
+heuristic (dd-ui-ms-3, judged genuinely low-impact, fixed anyway since it was
+cheap and didn't touch the heuristic's other responsibilities).
+
+Deferred, explicitly out of scope: `tracks.go`'s `AddTrack`/`DeleteTrack` have
+the identical fabricated-201 and unscoped-delete patterns dd-api-1/dd-api-2
+just fixed in their Daily Double siblings. Not touched to stay scoped to the
+new code; same fix would apply whenever someone is next in that file.
+
+## Gotchas learned (ranked, read before sweep 7)
+- **A validator downgrading a hunter's severity is a GOOD outcome, not a
+  failed hunt.** dd-api-2 and dd-ui-admin-4 both had their mechanism
+  confirmed exactly as reported, but real severity corrected against the
+  app's actual threat model (single shared admin secret, no tenancy) or
+  actual user-visible outcome (clutter, not broken state). Fix them anyway
+  when cheap; don't inherit the hunter's severity number uncritically into
+  the gate/report.
+- **The nonce gate does not bump between two states that are the "same"
+  state.** dd-eng-2 existed because accepting a Daily Double offer doesn't
+  call `transitionTo` (state stays `DAILY_DOUBLE` from offer through pick), so
+  the nonce a client already has stays valid for a replay of the exact same
+  message. Any handler that can be called more than once while remaining in
+  the same `GameState` needs its OWN idempotency guard; the nonce gate alone
+  only stops STALE actions, not REPEATED current ones.
+- **A resync can race a client's own optimistic local state, not just the
+  server's.** dd-ui-ms-1's real bug wasn't a message ordering issue on the
+  wire, it was the mobile client conflating "the server just told me about MY
+  OWN still-live offer again" with "a new offer started." Whenever a resync
+  path (`sendFullSync`) re-sends the SAME logical state a client already
+  has, the client needs a way to recognize "this is the thing I already
+  know," not just react to the message type.
+- **Layered hunting doesn't require layered VALIDATION scheduling, only
+  layered FIXING.** Running the two UI hunters in parallel with the two
+  server validators (rather than waiting for server validation to fully
+  finish first) cut real wall-clock time with no correctness cost, since
+  nothing about hunting the UI (read-only) depends on whether an unrelated
+  server finding turns out to be confirmed or refuted.
+
+## REFUTED / not defects (don't re-report)
+None. All 18 findings across both hunt rounds survived adversarial validation
+as CONFIRMED or PARTIAL. Two had their severity corrected (see Gotchas above);
+neither was thrown out.
+
+## Known coverage gap (unchanged, NOT fixable as a patch)
+Same as sweeps 4/5: no frontend in this repo has a test runner, so the 9
+frontend-only findings this sweep fixed have no automated regression gate.
+Verified by `tsc --noEmit` + hand-traced React state/effect logic instead. This
+has now blocked coverage in three consecutive sweeps that touched frontend code.
+
+## Verification (cold)
+`qa/acid.sh` -> **ACID PASSED** (41/41 gates present, up from 32; cold
+`go build`/`go vet`/`go test -count=1 ./...` green across every package
+including the two touched by parallel fixers this sweep; all 9 new named
+gates confirmed executing via verbose output, not just present; smoke green).
+`scripts/preflight.sh` -> **PREFLIGHT PASSED** (clean installs + production
+builds, all three frontends). `npx tsc --noEmit` clean in `web/admin`,
+`web/mobile`, `web/stage`. Every new Go regression test proven to fail
+against the pre-fix code via a revert-run-restore cycle (byte-diffed to
+confirm clean restoration), then pass with the fix back in.
+
+## Still open after sweep 6
+Unchanged from sweep 5 (not re-litigated): the `client.ts` locked-contract
+question, no frontend test runner (now 3 sweeps running), uimobile-4 (ban
+enforcement design), adminapi-5 (CORS hardening), `YFI_BOARD_ROWS`/
+`YFI_BOARD_COLS` ignored, the 3x-duplicated section 7 decay curve.
+
+New from this sweep:
+- **`tracks.go`'s `AddTrack`/`DeleteTrack` sibling bugs** (see Fixed &
+  verified, deferred paragraph above).
+- **dd-ui-ms-1's 8s safety-net timer is a heuristic, not a proof.** A more
+  principled fix would be a server-side acknowledgement of receipt rather than
+  a client-side timeout on the one remaining ambiguous race (a resync landing
+  between the accept tap and the offer's arrival).
+- 5 pre-existing `TestStaging_*`/store DB-gated tests remain unverified
+  against real Postgres, unchanged from sweep 5, not part of this sweep's
+  scope.
+
+## Sweep 7 recommendation
+Low urgency. This sweep's findings were all in code that had not shipped to
+any real event yet; nothing here was a live production regression. The two
+recurring structural items (frontend test runner, `client.ts` contract
+status) remain the highest-value moves whenever there's owner bandwidth for a
+decision rather than a hunt. Re-scope again per the same rule if another
+feature lands: diff against this sweep's HEAD first.

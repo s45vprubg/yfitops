@@ -66,6 +66,17 @@ GATES=(
   # sweep 5 — buzz fairness beyond n=2 (sweep 4's gates only covered a 2-way tie)
   TestQARegression_BuzzFairnessHoldsAtFiveWayTie    # s5-eng: a biased shuffle is invisible at n=2
   TestQARegression_IneligiblePlayersNeverBecomeContendersOrWin # s5-eng: banned/already-guessed must never win a shuffled tie
+  # sweep 6 — redesigned Daily Double (feature just landed, re-scoped hunt)
+  TestQARegression_DailyDoubleFreshRoundKey             # dd-eng-1: stale roundKey leaked prior-round lyrics into a live DD
+  TestQARegression_DailyDoubleAcceptIsIdempotent        # dd-eng-2: repeat accept drained the bucket + discarded the first batch
+  TestQARegression_DailyDoubleBannedLastScorerExcluded  # dd-eng-3: lastScorer fast path skipped the Banned check
+  TestQARegression_DailyDoubleAbortsWhenCellVanishes    # dd-eng-4: nil cellAt mid-offer left curRow stale, mispricing the payout
+  TestQARegression_DailyDoubleSkipDuringLivePerformance # dd-eng-5: admin.skipDailyDouble no-op'd during a live performance
+  TestQARegression_ResetToLobbyRestoresDDBucket         # dd-eng-6: New Game never refilled the same-board DDBucket
+  # sweep 6 — Daily Double admin REST API
+  TestQARegression_AddDailyDoubleTrack_DuplicateSpotifyURI_Returns409 # dd-api-1: fabricated 201 on a DB no-op
+  TestQARegression_DeleteDailyDoubleTrack_WrongBoard_Returns404       # dd-api-2: DELETE wasn't scoped by board_id
+  TestQARegression_RenameBoard_DailyDoubleCount_RejectsOversized      # dd-api-3: no upper bound on dailyDoubleCount
 )
 echo "==> gate presence (${#GATES[@]} locked regressions)"
 for g in "${GATES[@]}"; do
