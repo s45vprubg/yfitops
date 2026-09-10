@@ -33,8 +33,21 @@ echo "==> [go] vet ./..."
 ok "go vet"
 
 echo "==> [go] test ./... (integration tests self-skip without infra)"
-( cd "${ROOT}/server" && go test ./... ) || fail "go test"
+GO_TEST_LOG="$(mktemp)"
+( cd "${ROOT}/server" && go test -v ./... ) >"${GO_TEST_LOG}" 2>&1
+GO_TEST_STATUS=$?
+grep -E '^(--- FAIL|FAIL)' "${GO_TEST_LOG}" >&2
+if [ "${GO_TEST_STATUS}" -ne 0 ]; then
+  rm -f "${GO_TEST_LOG}"
+  fail "go test"
+fi
 ok "go tests"
+# Count DB-gated tests that self-skipped (no YFI_TEST_DSN/PG/REDIS in this
+# environment) so the final banner can say plainly what "PREFLIGHT PASSED"
+# did NOT cover, instead of letting a green run be read as full coverage.
+DB_SKIP_COUNT="$(grep -c -- '--- SKIP' "${GO_TEST_LOG}" 2>/dev/null || true)"
+DB_SKIP_COUNT="${DB_SKIP_COUNT:-0}"
+rm -f "${GO_TEST_LOG}"
 
 # ---- Frontends -------------------------------------------------------------
 for app in stage mobile admin; do
@@ -61,3 +74,18 @@ done
 
 echo ""
 echo "🎉 PREFLIGHT PASSED — backend + all three frontends build clean."
+
+if [ "${DB_SKIP_COUNT}" -gt 0 ]; then
+  echo ""
+  echo "⚠️  ⚠️  ⚠️  WARNING: ${DB_SKIP_COUNT} DB-gated test(s) SELF-SKIPPED — NOT COVERED by this pass:"
+  echo "    - store-3 unique-placement guard (placement_staging_test.go)"
+  echo "    - RebuildLayout atomic-rollback guard (rebuildlayout_staging_test.go)"
+  echo "    - played-state-persistence guard (played_staging_test.go)"
+  echo "    - general Redis/Postgres store wiring (test/integration_store_test.go)"
+  echo "    PREFLIGHT PASSED means backend+frontends BUILD clean — it does NOT mean"
+  echo "    these live-DB guarantees were verified. Run them for real: start"
+  echo "    Postgres/Redis (deploy_default network) and run the DB-backed suite in"
+  echo "    a golang:1.26 container on that network with YFI_TEST_DSN/YFI_TEST_PG/"
+  echo "    YFI_TEST_REDIS set — see qa/HANDOFF.md's staging-verification recipe."
+  echo "⚠️  ⚠️  ⚠️"
+fi

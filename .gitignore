@@ -1,6 +1,16 @@
 # work / scratch area — never committed
 scripts/_work/
 
+# scratch / probe output — never committed
+temp/
+
+# QA sweep artifacts — per-agent findings and validation verdicts, machine
+# generated and only meaningful next to the run that produced them. Kept on disk
+# (qa/HANDOFF.md's resume checklist reads them) but not committed. The narrative
+# that outlives a sweep lives in qa/HANDOFF.md, which IS tracked.
+qa/findings*/
+qa/validation*/
+
 # Go
 server/bin/
 *.test

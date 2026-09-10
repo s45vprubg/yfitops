@@ -52,6 +52,14 @@ func (h *Handler) spotifyToken(w http.ResponseWriter, r *http.Request) {
 	}
 	token, err := h.spotify.ValidToken(r.Context())
 	if err != nil {
+		// Log it (s4-api-001): this branch is the ONLY signal that stage audio is
+		// about to die, and it used to be silent — the stage just quietly reports
+		// "not connected" and the operator has nothing to look at. Deliberately
+		// still a 200/connected:false rather than an error status: the stage's
+		// getOAuthToken callback treats a non-200 as fatal. Cadence is low (SDK
+		// connect + ~hourly expiry + reconnects), not a hot path, so an
+		// unthrottled log will not drown the boot output.
+		log.Printf("admin: spotify token unavailable (stage audio will not play): %v", err)
 		writeJSON(w, http.StatusOK, map[string]any{"token": nil, "connected": false})
 		return
 	}

@@ -173,6 +173,14 @@ func (r *MemRepo) SeedSampleBoard(sessionID string) *game.Board {
 // SampleBoard returns a fresh 5x5 board with 4-6 tracks per cell. Standalone so
 // engine/transport tests can use it without a repo.
 func SampleBoard() *game.Board {
+	// CONTRACT-QUESTION (QA sweep 4, s4-pat-002): these 5s are NOT a duplicate of
+	// config.Config.BoardRows/BoardCols and must not be "fixed" by wiring that in.
+	// Those two fields are read from YFI_BOARD_ROWS/YFI_BOARD_COLS and then used
+	// by nothing at all — real boards get their dimensions from Postgres via the
+	// admin layout API. Either wire them up or drop them on a contract version
+	// bump (config.go is locked, so not here). Meanwhile the demo board is fixed
+	// at 5x5 because `categories` below hardcodes exactly 5 column labels and the
+	// row difficulty curve (§7) is defined for rows 1..5.
 	const rows, cols = 5, 5
 	categories := []string{"80s Anthems", "One-Hit Wonders", "Movie Themes", "Hip-Hop", "Karaoke Classics"}
 

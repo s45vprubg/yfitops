@@ -341,6 +341,321 @@ selection and hand the contestant a real song choice instead of a buzz round.
   actual 5 choices do not) — an admin Force Skip is the recovery path if a
   contestant's phone drops mid-decision (their disconnect already
   auto-declines, so this is mostly moot).
+### Fixed — `YFI_ENV` is documented and the default-secret guard is now visible in dev (2026-08-27)
+From a tech-debt audit (DEBT-001). Two production safety gates in
+`cmd/gameserver/main.go` — the dev-default-secret boot refusal and the cleartext
+`/ws` refusal — are armed only by `YFI_ENV=prod`. That variable appeared in
+**none** of `deploy/.env.example`, `deploy/docker-compose.yml`,
+`docker-compose.dev.yml`, `README.md`, or `docs/BUILD_CONTRACT.md`, while
+`docker-compose.yml` defaults `ADMIN_SECRET` to `changeme-admin`. Following the
+documented setup (`cp .env.example .env && make up`) therefore produced a server
+running on the published default secret with both guards inert, and looking
+identical at boot to a correctly configured one.
+- `deploy/.env.example` gains a DEPLOYMENT MODE section documenting `YFI_ENV`
+  and exactly what each gate does, plus the two other previously undocumented
+  vars: `YFI_DEV_WS` and `YFI_SPOTIFY_TOKEN_FILE`.
+- `docker-compose.yml` sets `YFI_ENV: ${YFI_ENV:-dev}` explicitly, so the knob
+  is discoverable in the file that runs the server. Default kept at `dev` on
+  purpose: defaulting compose to `prod` would make `make up` fatal on an
+  unedited `.env` and break the documented local playtest loop. Flipping that
+  default is an owner call, not a doc fix.
+- `main.go` now runs the same default-secret check in dev and logs a `WARNING`
+  naming each defaulted secret. Never fatal — dropping a live event server over
+  a dev default is worse than running with one — but a misconfigured server is
+  no longer silent. Extracted as `defaultedSecrets(cfg)`; the default literals
+  stay duplicated from `config.go` because that file is a locked contract and
+  cannot be asked which of its values are defaults.
+- `README.md` gains a "Before a real event: set `YFI_ENV=prod`" subsection
+  spelling out both gates, and its stale claim that Postgres runs "`0001_init.sql`
+  and `0002_boards.sql`" on first boot is corrected — the whole `migrations/`
+  directory is mounted as an init dir, so every `*.sql` runs in lexical order.
+
+### Fixed — `integration-test.sh` ran against a stale schema and skipped the store tests (2026-08-27)
+From the same audit (DEBT-006). The only automated DB harness in the repo applied
+**only** `0001_init.sql`, so migrations 0002–0006 were absent, and it exported
+`YFI_TEST_PG` while `internal/store`'s staging tests gate on `YFI_TEST_DSN`. Net
+effect: every Postgres test written during QA sweeps 1–3 self-skipped here — the
+regression guard for the store-3 unique-placement fix among them — while the run
+still reported green. Per `qa/HANDOFF.md` these were being run by hand in a
+`golang:1.26` container instead.
+- Migrations are now globbed in lexical order with `ON_ERROR_STOP=1` and a clear
+  per-file failure message, matching what `deploy/Makefile`'s `migrate` target
+  already does — the same hardcoded-list bug that silently skipped 0006 there.
+- Both `YFI_TEST_PG` and `YFI_TEST_DSN` are exported from one `PG_DSN`, with a
+  comment on why both exist. Unifying the two names is left as a follow-up.
+
+### Added — the post-partial decay curve is pinned by tests (2026-08-27)
+From the same audit (DEBT-005). `currentPointsFromPool` is the third copy of the
+§7 decay curve: it lives in `game/engine.go` rather than the locked `scoring.go`,
+and `web/shared/scoring.ts` mirrors it for the stage's 60fps point timer
+(`views/ActiveRound.tsx`). Neither copy had a test, so a drift between them would
+surface as the projected number disagreeing with the score actually awarded.
+- Three table tests in `game/scoring_test.go`. The load-bearing one asserts the
+  pool form *equals* `CurrentPoints` for every row across 0–70s when fed the
+  row-derived ceiling and standard base — that is what catches one copy of the
+  formula being edited without the other. The others cover the shifted pool a
+  partial leaves behind (`max=150, base=50`, the real values from a row-5
+  partial), the collapsed `max == base` pool from a row-1 partial, and
+  monotonicity plus the floor.
+- Proven non-vacuous: swapping `math.Floor` for `math.Round` fails both the
+  equivalence test (row 2, t=5125ms) and the fractional vector (140 → 141).
+- `engine.go` now spells the rounding `math.Floor` instead of a bare `int()`
+  truncation. Behavior-preserving — verified by running the new vectors against
+  the original truncation, which passes, since the two agree for the
+  non-negative pools this can be called with (`PartialAward` clamps at 0) — but
+  §7 specifies floor and the JS mirror uses `Math.floor`, so all three copies
+  now read the same.
+- `scoring.ts` gains a `CONTRACT-QUESTION` pointing at the pinned vectors and
+  noting this belongs in `scoring.go` on a contract version bump. No behavior
+  change on the TS side; reproducing the vectors there needs a frontend test
+  runner, which the repo does not yet have.
+
+### Security — QA sweep 4: the `/ws` fallback was a second, unguarded door into the hub (2026-08-27)
+`transport/ws.go` landed after sweep 3 and had never been swept. It is a parallel
+transport into the **same** `Hub` and engine, so every guarantee had to be
+re-asked. The ones enforced in the engine (§4A sanitization, §4B arrival stamp,
+§4D nonce, frame cap, IP capture) were inherited correctly. The ones that lived
+in the WebTransport *branch* of `server.go` were silently void on `/ws`:
+- **Session limiter bypass (high).** `handleSession` acquires the global
+  (`YFI_MAX_SESSIONS`) and per-IP (`YFI_MAX_SESSIONS_PER_IP`) caps; `ServeHTTP`
+  acquired nothing, so one host could open unbounded `/ws` sessions and the cap
+  meant nothing while the route was up. Now acquires *before* the upgrade (a
+  flood is turned away cheaply) with exactly one release per exit path, sharing
+  the one limiter instance with `/wt` — the cap is a ceiling on the process, not
+  per-transport. Locked by `TestWSHandlerHonorsSessionLimiter`.
+- **Zombie connections (high).** `hub.add(connID, rw)` omitted the third
+  `streamCloser` argument that the WebTransport path passes. A hub-side drop
+  (`enqueue` overflow → `conn.stop()`) removed the conn from the hub but left the
+  socket open and the read loop running — a dropped player who could still buzz.
+  `drop_test.go`'s existing gate registered a bare writer and so was structurally
+  incapable of catching it. Now passes `CloseNow`, and `hub.go` documents the
+  invariant that a `streamCloser` **must not block**: `stop()` runs inline on the
+  engine's single broadcast goroutine, and nhooyr's `Close(code, reason)` waits
+  ~5s for a close reply from a peer that by construction is not reading — using
+  it here would have frozen the entire game. (That was a proposed fix, caught and
+  measured before it shipped.) Locked by `TestWSHandlerDropTearsDownSocket`.
+- **No idle timeout (medium).** QUIC reaps dead peers at
+  `MaxIdleTimeout=30s`; `/ws` had no read deadline, ping/pong, or idle reaper, so
+  a phone that vanished into a tunnel held a goroutine, a hub slot, a socket and a
+  limiter slot forever. Now a 30s inactivity reaper mirroring the QUIC value, reset
+  on every successful read *and* write. Locked by `TestWSHandlerIdleTimeout`.
+- `ws.go` had **no test file at all** before this sweep; it now has four,
+  including a framing round-trip.
+
+`OriginPatterns: []string{"*"}` was reviewed and **kept**: the default requires
+Origin host == request Host, which breaks the exact case the fallback exists for
+(a phone loading the PWA from the Vite dev server on a different host:port).
+Auth is at the hello layer, and the WebTransport twin is deliberately equally
+open. Documented in place rather than "fixed".
+
+### Security — QA sweep 4: prod gates failed open on `YFI_ENV` casing (2026-08-27)
+Both gates added in the DEBT-001 entry above compared `os.Getenv("YFI_ENV")` to
+the literal `"prod"`, so `Prod`, `PROD`, `production`, or a trailing space all
+read as dev and silently disarmed them. Now normalized (`EqualFold` + `TrimSpace`,
+accepting `prod` and `production`) and, more importantly, inverted: the
+default-secret refusal fires whenever `YFI_ENV` is anything **other** than dev, so
+a typo now fails *closed*. Unset/empty stays dev — compose defaults to it and
+`dev-up.sh` runs bare. The resolved mode is logged on the first line of boot.
+
+### Changed — the cleartext `/ws` fallback is now an explicit opt-in, independent of `YFI_ENV` (2026-08-27)
+Supersedes the "cleartext transport refusal" gate described in the DEBT-001 entry
+above. Keying `/ws` off `YFI_ENV` made the gate mutually exclusive with its own
+use case: an operator who needed the LAN fallback had to stay out of prod, which
+also disarmed the default-secret guard — the flag meant to harden the deployment
+pushed people into the weaker configuration.
+- `/ws` now requires **both** `YFI_DEV_WS=1` and `YFI_INSECURE_TRANSPORT=1`, and
+  ignores `YFI_ENV`. `YFI_DEV_WS` alone mounts nothing and logs a notice naming
+  the missing acknowledgement. Registering it with `YFI_ENV=prod` is allowed and
+  logs a loud warning naming the exact exposure (no encryption, no cert pinning,
+  the admin/stage secret is readable on the wire) on every boot.
+- The matrix is a pure function (`decideWS`) so it is unit-testable
+  (`TestDecideWS`), and was additionally proven against the real binary across
+  five live boots: both opt-ins → `101`; `YFI_DEV_WS` alone → `404` + notice;
+  both + `YFI_ENV=PROD` → `101` + prod warning; `YFI_ENV=Prod` with dev secrets →
+  refuses to boot; `YFI_ENV=` empty → still dev.
+- **Breaking for the dev flow:** `scripts/dev-up.sh` and
+  `docker-compose.dev.yml` set only `YFI_DEV_WS=1` and would have started
+  404ing the LAN fallback. Both now set the pair. If you have a local override
+  that sets `YFI_DEV_WS` by hand, add `YFI_INSECURE_TRANSPORT=1`.
+
+### Fixed — QA sweep 4: the stage projected points the server would not pay (2026-08-27)
+One root cause, four symptoms. Four sites derived the scoring pool from the board
+**row** instead of the live post-partial / post-halve state, so the stage's 60fps
+timer counted down from a ceiling that no longer existed: a row-5 partial
+projected 140 while `gradeCorrect` paid 70, and the control room's grading readout
+showed 190 against the same 70. `trackStartEnvelope`, `halvePoints`,
+`gradePartial`'s broadcast and `adminViewEnvelope` now all read one private
+accessor pair (`roundPool` / `livePool`), which is also the single place
+`pointFactor` is applied to a displayed pool.
+- **No payout change** — deliberately. `gradeCorrect`'s arithmetic is unchanged
+  (independently verified: `CurrentPoints(row, e)` is identical to
+  `currentPointsFromPool(MaxPointsForRow(row), BaseValue, e)` in all three
+  branches of the curve), and `pointFactor` is still applied exactly once, at
+  award time and never inside the pool accessor. Only the projected and displayed
+  numbers moved, onto the awarded one.
+- Residual, documented in `livePool`: because both ends of the pool are floored
+  independently, an odd bonus (rows 2 and 4 with no partial) can project **1
+  point low**. That is the closest an integer wire pool can get, and it errs low
+  rather than overstating.
+- Locked by `TestPool_ProjectedMatchesAwarded`,
+  `TestPool_AdminReadoutMatchesAward`, `TestPool_StageReconnectKeepsReducedPool`,
+  `TestPool_LivePoolNeverInverts`.
+
+### Changed — buzz ties are now broken randomly, not by player ID (2026-08-27)
+`resolveBuzzWindow` ordered contenders by `(arrivalMs, playerID)`. `arrivalMs` has
+1ms granularity, so two phones on the same conference Wi-Fi tie as a matter of
+routine — this was the common case, not a corner case — and every one of those
+ties went to the lexicographically smallest player ID for the entire game. The
+player ID *is* the client-supplied device fingerprint, so a hostile phone could
+simply pick a low one and win every tie in every round.
+Contenders are now pre-shuffled from the engine's injectable `rng` and sorted
+with `sort.SliceStable` on `arrivalMs` alone. `SliceStable` is load-bearing: the
+unstable `sort.Slice` discards the shuffle and substitutes its own
+pivot-dependent permutation, which makes fairness an accident of the sort
+implementation rather than a property that can be seeded and tested.
+Proven red before green — over 40 trials with identical arrival stamps the
+pre-fix code gave the low ID 40 wins to 0. Locked by
+`TestQARegression_BuzzTieBreakIsRandomNotPlayerID`, with
+`TestQARegression_BuzzEarliestArrivalStillWinsAfterShuffle` guarding the other
+direction (a genuine 1ms gap must still decide the round every time — §4B).
+
+### Fixed — QA sweep 4: client-side connection and audio leaks (2026-08-27)
+- **Mobile leaked a live QUIC session per reconnect attempt.** `useGame.ts`'s
+  connect-failure path dropped `clientRef.current` without closing it. `connectWT`
+  awaits `wt.ready` *before* creating the stream, so anything that threw after
+  that left an open session with no remaining reference — and burned a per-IP
+  limiter slot on every backoff retry. Now closes the captured client, matching
+  the post-hello path.
+- **`GameClient` reported a single teardown twice.** Three paths fired
+  `handleClose()` and then re-entered it via the transport's own close event
+  (`feedWS`'s overflow close, `readLoopWT`'s cancel, and a pre-open `onerror`
+  that also rejected `connect()`). A single-fire `down` latch makes each teardown
+  exactly one `onState(false)`.
+- **A text frame vanished silently.** `new Uint8Array(ev.data as ArrayBuffer)` on
+  a string yields a *zero-length* array with no throw — the frame disappeared with
+  no error and no teardown. The framing is binary-only; a non-`ArrayBuffer` frame
+  now closes with `1003`.
+- **The stage's audio overlay could be dismissed for the wrong player.** The
+  auto-dismiss was guarded only by `!disposed`, but `initSpotify()` destroys and
+  replaces `audioRef.current` at runtime, so a slow `activate()` from the dead
+  player could clear the overlay for a successor that was never activated —
+  leaving a silent projector with no way to re-arm. Both call sites now check
+  player identity.
+
+### Fixed — QA sweep 4: silent failure paths and misleading dead code (2026-08-27)
+- `GET /api/spotify/token`'s error branch had no logging, unlike its siblings.
+  It is the only signal that stage audio is about to die, and it was silent; the
+  stage just quietly reported "not connected". Still returns `200` with
+  `connected:false` (the SDK's `getOAuthToken` treats a non-200 as fatal).
+- `web/stage/src/anim/decrypt.ts`'s `PHASE1_MS=5000` / `REVEAL_INTERVAL_MS=2000`
+  disagree with `reveal.go`'s `10000`/`3000`, which looked like a live
+  client/server drift. It is not: the reveal is server-driven and only `glyphAt`
+  is imported — `computeFrame` and both constants have no callers. Documented as
+  dead rather than "synced", which would only have made dead code look
+  authoritative.
+- `config.Config.BoardRows` / `BoardCols` are read from `YFI_BOARD_ROWS` /
+  `YFI_BOARD_COLS` and then used by **nothing**; real board dimensions come from
+  Postgres via the admin layout API. `SampleBoard`'s `5, 5` is not a duplicate of
+  them and must not be "fixed" by wiring them in. Marked with a
+  `CONTRACT-QUESTION` at both ends (`config.go` is locked) and documented as inert
+  in `.env.example`.
+
+### Changed — QA sweep artifacts are no longer committed (2026-08-27)
+`qa/findings*/` and `qa/validation*/` (24 JSON files) are per-agent sweep output:
+machine generated and only meaningful next to the run that produced them. They
+are now gitignored and untracked, while staying on disk so `qa/HANDOFF.md`'s
+resume checklist can still read them. `qa/HANDOFF.md` and `qa/smoke.sh` remain
+tracked — the narrative and the tooling are what outlive a sweep.
+
+### Fixed — QA sweep 5: a reconnect fix could close the healthy connection (2026-08-28)
+Full report: `docs/security/qa-sweep-5.md`. Sweep 5 audited **sweep 4's own
+fixes**. 7 findings confirmed, all low/medium, 1 refuted; nothing critical or
+high survived validation. The two highest-severity reports were both downgraded
+with their stated mechanisms refuted — and in both cases the validator then found
+a *different, real* path to the same defect.
+- **`web/mobile/src/useGame.ts`**: sweep 4's connect-failure `close()` operated on
+  the shared `clientRef`, so two concurrent `establish()` calls could close the
+  healthy client and leak the failed one — re-creating the session leak it was
+  written to kill. The reachable path is not a double-tap (the join button is
+  disabled while connecting and `conn:"connecting"` is patched synchronously);
+  it is a pending backoff timer racing a manual retry, both passing the
+  `clientRef.current`-null guard while the manual attempt is parked in
+  `await fetchCertHashes()`. Fixed by closing the instance *this* invocation owns
+  (`if (clientRef.current === client)`) at every ref-clearing site, plus an
+  overlap latch released in a `finally` — the `finally` is load-bearing, since a
+  stranded latch would block every future reconnect and end that player's game.
+- **`web/admin/src/useAdmin.ts`**: `onState` had no stale-client guard (mobile and
+  stage both have one), and `patch({status:"connecting"})` ran *after*
+  `await close()`. On a **re-login** — `useAdmin` has no disconnect handler, so
+  the dead client is still in the ref and the Login form is re-enabled — that
+  await stalls on the broken link with the submit button still live. Patch hoisted
+  above the await so the busy gate is synchronous; guard compares the locally
+  captured `client`, not the ref (a guard against the ref is a tautology).
+  Not extended to `wire()`'s handlers: `welcome` is what admits the operator, and
+  a misapplied guard there could lock them out of the control room mid-event.
+
+### Fixed — QA sweep 5: `/ws` teardown hygiene (2026-08-28)
+- Deliberate teardown (idle reaper, or a hub drop via `conn.stop()`) left the
+  parked read loop returning a `net.ErrClosed`-shaped error that fell through the
+  `io.EOF` / normal-close check and logged `read error`. Normal behavior logging
+  as a fault is how a real fault gets scrolled past at a live event. Fixed with a
+  `localClose` flag set **before** `CloseNow()` in both paths; genuine peer errors
+  still log loudly, and the gate asserts that inverse.
+- `idleTimer.reset()` used `Timer.Reset`, which cannot retract an `AfterFunc`
+  that has already begun running. Real, but a sub-millisecond race against a 30s
+  timer with ~15x heartbeat margin. Fixed with a generation counter: a superseded
+  callback vetoes itself. It decides under `mu` and calls `onExpire()` after
+  releasing it — holding a lock across `CloseNow()` invents a deadlock while
+  fixing a benign race. Tradeoff: a fresh timer allocation per `reset()`, safe
+  only because §5's deterministic-timer contract means there is no per-tick
+  server broadcast. Revisit if one is ever added.
+- **Refuted, with a measurement**: concurrent `CloseNow()` was claimed to
+  serialize on the library's `closeMu` for the winner's full close duration (~15s
+  on the engine's single broadcast goroutine). 8 concurrent `CloseNow()` on one
+  real conn peaked at **81µs**. This re-validates sweep 4's choice of `CloseNow()`
+  over `Close(code, reason)` and `hub.go`'s "must not block" invariant.
+
+### Fixed — QA sweep 5: docs still claimed a protection sweep 4 removed (2026-08-28)
+Sweep 4 decoupled `/ws` from `YFI_ENV`; `web/mobile/.env.example` and a comment in
+`useGame.ts` were missed and still claimed the server refuses `/ws` when
+`YFI_ENV=prod`. Documentation that overstates a protection is worse than none — a
+reader skips the real check. Both now state the actual gate: both `YFI_DEV_WS=1`
+and `YFI_INSECURE_TRANSPORT=1` required, no `YFI_ENV` backstop, prod may opt in
+and only warns. Also documented at `finishDailyDouble` that its bypass of the new
+`roundPool`/`livePool` accessors is **deliberate** (a separate crowd-rating bonus,
+never broadcast as a projected decaying pool), so a future sweep does not re-file
+it as the fifth site that doesn't use the accessor pair.
+
+### Added — QA sweep 5: coverage for the gaps sweep 4 left (2026-08-28)
+`qa/acid.sh` grew from 27 to **32** locked gates. Two lock sweep 5's fixes
+(`TestWSHandlerTeardownLogging`, `TestIdleTimerResetVetoesStaleGeneration`);
+three lock holes sweep 4 left behind:
+- `TestEnvModeWrappers` — sweep 4 tested the pure predicates (`isProdEnv`,
+  `isDevEnv`, `decideWS`) and left `modeName()`/`isProd()`/`isDev()`, the
+  `os.Getenv` wrappers that actually run at boot, with **zero** coverage — and
+  the casing bug lived in precisely that wrapper layer. The `staging` case pins
+  the inverted secret guard failing **closed** on an unrecognized value.
+- `TestQARegression_BuzzFairnessHoldsAtFiveWayTie` — sweep 4's fairness gates
+  only cover n=2, where a biased shuffle is essentially invisible. Asserts every
+  one of 5 tied contenders wins at least once over a fixed seed range;
+  deliberately does not assert distribution tightness, because a flaky ratchet
+  entry is worse than an absent one.
+- `TestQARegression_IneligiblePlayersNeverBecomeContendersOrWin` — sweep 4
+  changed how contenders are *ordered*; nothing verified the reordering could not
+  admit a banned or already-guessed player at all.
+
+The engine surface came back **clean** on a re-hunt, with sweep 4's two
+game-correctness fixes independently re-proven by revert-and-watch-it-fail
+(`fp1 won 40/40`; projected 190 vs awarded 70). A brute force over the whole
+pool domain measured `worst_low=-1, worst_high=0` — the documented 1-point floor
+residual, and nothing projects high.
+
+**Known gap, stated rather than dressed up:** the two UI fixes have **no
+regression gate**, because no frontend has a test runner. They were proven by
+`tsc --noEmit`, a production build, and a line-numbered interleaving trace
+instead; no pseudo-gate was added to any script to make the coverage look
+present. This is the same gap that blocks pinning the TypeScript copy of the §7
+decay curve, and it has now blocked coverage in two consecutive sweeps.
 
 ## [Unreleased] — 2026-06-29
 

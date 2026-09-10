@@ -1,5 +1,19 @@
 // decrypt.ts — three-phase text reveal animation for the stage display.
 //
+// !! ONLY `glyphAt` IS LIVE. (QA sweep 4, s4-pat-001) !!
+// The reveal is SERVER-DRIVEN: the engine owns phase/interval timing in
+// server/internal/game/reveal.go and pushes each revealed slot over the wire;
+// ActiveRound.tsx imports glyphAt alone, to paint cosmetic noise into the slots
+// the server has not revealed yet. `computeFrame` and the two timing constants
+// below are the ORIGINAL client-side implementation and have no callers.
+//
+// They are kept because glyphAt/buildRevealOrder live here, but do NOT trust the
+// constants: they are 5000/2000 while reveal.go's defaults are 10000/3000, and
+// reveal.go's are also operator-overridable per board. If you ever re-animate on
+// the client, take the timings from the server's reveal config on the wire — do
+// not re-copy them here, and do not "sync" the numbers below, which would only
+// make dead code look authoritative.
+//
 // Phase 1: Fixed-width block of cycling random characters (NOISE_WIDTH per row).
 //          Duration: PHASE1_MS.
 //

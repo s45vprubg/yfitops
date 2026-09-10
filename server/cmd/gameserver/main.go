@@ -38,23 +38,26 @@ import (
 func main() {
 	cfg := config.Load()
 
-	// Production guard: refuse to boot with known dev-default secrets when
-	// YFI_ENV=prod. config.go is a locked contract file, so this gate lives at
-	// the caller. It must NOT fire in dev (YFI_ENV != "prod").
-	if os.Getenv("YFI_ENV") == "prod" {
-		var defaulted []string
-		if cfg.AdminSecret == "changeme-admin" {
-			defaulted = append(defaulted, "ADMIN_SECRET")
+	// Resolved deployment mode, logged first so a misconfigured YFI_ENV is
+	// visible in the opening lines rather than inferred from a missing warning.
+	log.Printf("mode: %s (YFI_ENV=%q)", modeName(), os.Getenv("YFI_ENV"))
+
+	// Production guard: refuse to boot with known dev-default secrets outside
+	// dev. config.go is a locked contract file, so this gate lives at the
+	// caller. It must NOT fire in dev (YFI_ENV unset/empty or "dev").
+	//
+	// In dev the same check still runs, but only to WARN. The guard is otherwise
+	// invisible until someone leaves dev, which means a misconfigured event
+	// server looks identical at boot to a correct one. A warning is the cheapest
+	// way to make "your secrets are the published defaults" impossible to miss;
+	// it must never be fatal in dev, because dropping a live server over a dev
+	// default is worse than running with one.
+	defaulted := defaultedSecrets(cfg)
+	if len(defaulted) > 0 {
+		if !isDev() {
+			log.Fatalf("config: refusing to start outside dev (YFI_ENV=%q) with dev-default secret(s): %s — set a non-default value", os.Getenv("YFI_ENV"), strings.Join(defaulted, ", "))
 		}
-		if cfg.NonceSecret == "dev-nonce-secret" {
-			defaulted = append(defaulted, "YFI_NONCE_SECRET")
-		}
-		if cfg.JoinSecret == "dev-join-secret" {
-			defaulted = append(defaulted, "YFI_JOIN_SECRET")
-		}
-		if len(defaulted) > 0 {
-			log.Fatalf("config: refusing to start in prod with dev-default secret(s): %s — set a non-default value", strings.Join(defaulted, ", "))
-		}
+		log.Printf("WARNING: running with dev-default secret(s): %s — anyone can claim admin/stage. Set real values and YFI_ENV=prod before an event.", strings.Join(defaulted, ", "))
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -252,24 +255,25 @@ func main() {
 		log.Printf("admin API: board management skipped (Postgres unavailable); /api/spotify/token still active")
 	}
 
-	// ---- Dev-only WebSocket fallback (phones on LAN without secure context) ----
+	// ---- Cleartext WebSocket fallback (phones on LAN without secure context) ----
 	// WebTransport requires a secure context, so a phone on a plain-HTTP LAN
 	// origin cannot use it at all. /ws carries the same framing over cleartext
-	// WebSocket purely so real devices can be tested without standing up TLS.
+	// WebSocket so real devices can join without standing up TLS.
 	//
-	// It is DEV-ONLY and fails closed: YFI_ENV=prod refuses the route even when
-	// YFI_DEV_WS=1, so a stray var in a prod .env cannot expose an unencrypted
-	// transport. Unlike the default-secret guard above this warns instead of
-	// exiting — dropping a live event server over an unused dev var is worse
-	// than declining the route.
-	if os.Getenv("YFI_DEV_WS") == "1" {
-		if os.Getenv("YFI_ENV") == "prod" {
-			log.Printf("WARNING: YFI_DEV_WS=1 ignored — the cleartext /ws fallback is refused when YFI_ENV=prod; use TLS + WebTransport")
-		} else {
-			wsHandler := transport.NewWSHandler(hub, eng, srv)
-			mux.Handle("/ws", wsHandler)
-			log.Printf("DEV: WebSocket fallback registered on /ws (YFI_DEV_WS=1)")
-		}
+	// It takes TWO explicit vars — YFI_DEV_WS=1 and YFI_INSECURE_TRANSPORT=1 —
+	// and is deliberately INDEPENDENT of YFI_ENV. Keying it off YFI_ENV made the
+	// gate mutually exclusive with its own use case: the operator who needs the
+	// LAN fallback had to stay out of prod, which also disarmed the
+	// default-secret boot guard above. Now a prod server with real secrets can
+	// serve the fallback if the operator explicitly acknowledges the cleartext
+	// risk, and that acknowledgement is logged loudly.
+	wsd := decideWS(os.Getenv("YFI_DEV_WS"), os.Getenv("YFI_INSECURE_TRANSPORT"), isProd())
+	if wsd.msg != "" {
+		log.Print(wsd.msg)
+	}
+	if wsd.register {
+		wsHandler := transport.NewWSHandler(hub, eng, srv)
+		mux.Handle("/ws", wsHandler)
 	}
 
 	go func() {
@@ -289,6 +293,83 @@ func main() {
 	<-ctx.Done()
 	log.Println("shutting down")
 	_ = srv.Close()
+}
+
+// defaultedSecrets returns the names of the secrets still holding the dev
+// defaults published in deploy/.env.example. The default literals are duplicated
+// from config.go's env() fallbacks on purpose — config.go is a locked contract
+// file, so this caller cannot ask it which values are defaults.
+func defaultedSecrets(cfg *config.Config) []string {
+	var out []string
+	if cfg.AdminSecret == "changeme-admin" {
+		out = append(out, "ADMIN_SECRET")
+	}
+	if cfg.NonceSecret == "dev-nonce-secret" {
+		out = append(out, "YFI_NONCE_SECRET")
+	}
+	if cfg.JoinSecret == "dev-join-secret" {
+		out = append(out, "YFI_JOIN_SECRET")
+	}
+	return out
+}
+
+// normEnv folds and trims YFI_ENV so the production gates cannot be defeated by
+// casing or stray whitespace ("Prod", "PROD", " prod " all mean prod).
+func normEnv(v string) string { return strings.ToLower(strings.TrimSpace(v)) }
+
+// isProdEnv reports whether a raw YFI_ENV value names a production deployment.
+// "production" counts too — it is the spelling operators reach for, and treating
+// it as dev silently disarmed every gate.
+func isProdEnv(v string) bool {
+	n := normEnv(v)
+	return n == "prod" || n == "production"
+}
+
+// isDevEnv reports whether a raw YFI_ENV value names a dev deployment. An
+// unset/empty value MUST stay dev: docker-compose.yml defaults it to dev and
+// scripts/dev-up.sh runs with it bare.
+func isDevEnv(v string) bool {
+	n := normEnv(v)
+	return n == "" || n == "dev"
+}
+
+func isProd() bool { return isProdEnv(os.Getenv("YFI_ENV")) }
+func isDev() bool  { return isDevEnv(os.Getenv("YFI_ENV")) }
+
+// modeName is the resolved deployment mode for the boot log. Anything that is
+// neither dev nor prod reports "non-dev" — the gates treat it as not-dev.
+func modeName() string {
+	switch {
+	case isProd():
+		return "prod"
+	case isDev():
+		return "dev"
+	default:
+		return "non-dev"
+	}
+}
+
+// wsDecision is the outcome of the cleartext /ws registration matrix: whether to
+// mount the route, and the single line to log about it (never empty when
+// YFI_DEV_WS=1, so a declined route can't look like a broken build).
+type wsDecision struct {
+	register bool
+	msg      string
+}
+
+// decideWS resolves the /ws registration matrix from the two opt-in vars and the
+// resolved prod flag. Pure so the matrix is unit-testable.
+func decideWS(devWS, insecureAck string, prod bool) wsDecision {
+	if devWS != "1" {
+		return wsDecision{}
+	}
+	if insecureAck != "1" {
+		return wsDecision{msg: "NOTICE: YFI_DEV_WS=1 but /ws was NOT registered — the cleartext WebSocket fallback also requires the explicit acknowledgement YFI_INSECURE_TRANSPORT=1"}
+	}
+	if prod {
+		return wsDecision{register: true, msg: "WARNING: cleartext /ws fallback REGISTERED IN PROD (YFI_DEV_WS=1 + YFI_INSECURE_TRANSPORT=1) — this transport has NO encryption and NO cert pinning: anyone on the LAN can read, forge and replay frames, including the admin/stage secret. Only use this on a network you trust; prefer TLS + WebTransport."}
+	}
+	return wsDecision{register: true, msg: "DEV: WebSocket fallback registered on /ws (YFI_DEV_WS=1 + YFI_INSECURE_TRANSPORT=1)"}
 }
 
 // randomState returns a cryptographically random hex string for the OAuth

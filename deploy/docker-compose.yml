@@ -45,6 +45,11 @@ services:
       redis:
         condition: service_healthy
     environment:
+      # Deployment mode. "prod" arms two gates in main.go: the default-secret
+      # boot refusal and the cleartext /ws refusal. Both are INERT at "dev",
+      # which is the default here so `make up` still works on an unedited .env.
+      # Set YFI_ENV=prod in deploy/.env for anything attendees can reach.
+      YFI_ENV: ${YFI_ENV:-dev}
       # Data layer wiring (service DNS names on the compose network).
       YFI_REDIS_ADDR: redis:6379
       YFI_POSTGRES_DSN: postgres://yfitops:yfitops@postgres:5432/yfitops?sslmode=disable
@@ -66,6 +71,18 @@ services:
       YFI_LRCLIB_URL: ${YFI_LRCLIB_URL:-https://lrclib.net}
       YFI_SKIP_THRESHOLD: ${YFI_SKIP_THRESHOLD:-50}
       YFI_SESSION_ID: ${YFI_SESSION_ID:-session}
+      # AI board builder (optional) — disabled (endpoint 503s) without a key.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.1-flash-lite}
+    healthcheck:
+      # Liveness only — /healthz returns 200 unconditionally and does NOT
+      # check Redis/Postgres, so "healthy" here means "the process is up",
+      # not "the data layer is attached".
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8777/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     ports:
       # WebTransport/QUIC is UDP — the /udp suffix is load-bearing.
       - "4433:4433/udp"

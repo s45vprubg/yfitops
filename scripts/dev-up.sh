@@ -159,13 +159,17 @@ echo "==> building + starting Go backend (in-memory, sample board)"
 [ -n "${SPOTIFY_CLIENT_ID:-}" ] && echo "    Spotify creds present — real audio available" \
   || echo "    no Spotify creds — stage runs in demo mode (no audio)"
 cd "${ROOT}/server"
-# YFI_DEV_WS=1 mounts the cleartext /ws fallback so phones on the LAN (no
-# secure context -> no WebTransport) can still join. This launcher IS the dev
-# environment, so it defaults on; the server refuses the route outright when
-# YFI_ENV=prod. docker-compose.dev.yml sets the same var for the containerized
-# gameserver, which this flow doesn't use (we run it bare via `go run`).
+# The cleartext /ws fallback lets phones on the LAN (no secure context -> no
+# WebTransport) join. It takes BOTH vars: YFI_DEV_WS=1 selects the route and
+# YFI_INSECURE_TRANSPORT=1 acknowledges that the transport has no encryption.
+# YFI_DEV_WS alone is a no-op that logs a NOTICE naming the missing var -- so
+# both must be here or the LAN playtest silently 404s (regression caught in QA
+# sweep 4, after the gate stopped keying off YFI_ENV). This launcher IS the dev
+# environment, so both default on. docker-compose.dev.yml sets the same pair for
+# the containerized gameserver, which this flow doesn't use (bare `go run`).
 ADMIN_SECRET="${ADMIN_SECRET}" \
 YFI_DEV_WS="${YFI_DEV_WS:-1}" \
+YFI_INSECURE_TRANSPORT="${YFI_INSECURE_TRANSPORT:-1}" \
 YFI_POSTGRES_DSN="${PG_DSN}" \
 YFI_REDIS_ADDR="${REDIS_ADDR}" \
 YFI_HTTP_ADDR=":${HTTP_PORT}" \

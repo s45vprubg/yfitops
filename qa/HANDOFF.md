@@ -270,6 +270,281 @@ unique violation; code revert **plus** index drop → the original bug reproduce
 Remaining deferrals are unchanged: uimobile-4 (server-side ban design) and
 adminapi-5 (CORS hardening, not a real vuln).
 
+# SWEEP 4 (2026-08-27) — DONE
+
+Full report: `docs/security/qa-sweep-4.md`. Findings/verdicts in
+`qa/findings-sweep4/` and `qa/validation-sweep4/` (now gitignored, on disk only).
+
+## Scoping decision that made this sweep worth running
+Sweep 3's verdict ("a sweep 4 is low-yield unless new features land") was right on
+its own terms and wrong in fact — features HAD landed. Scoping to the ~1100-line
+post-sweep-3 delta instead of re-running sweeps 1-3's surfaces found a brand-new
+transport that had never been QA'd, plus an uncommitted tech-debt audit that had
+never been reviewed. **Do this again: diff against the last sweep's HEAD first,
+and treat "converged" as converged-as-of-that-tree, not converged-forever.**
+
+## Outcome
+10 confirmed findings FIXED (3 high, 4 medium, 3 low) + 2 doc-only fixes for dead
+code that looked like defects. 4 REFUTED. 1 regression caught in a fix before
+commit. `qa/acid.sh` created (did not exist); 27 locked gates, 13 added this sweep.
+
+## The finding that organized the sweep
+`transport/ws.go` (`/ws`) is a SECOND DOOR into the same Hub and engine. Split
+cleanly by where each guarantee is enforced:
+- **Inherited safely** (enforced in the engine): §4A sanitization, §4B arrival
+  stamp, §4D nonce, frame size cap, client-IP capture.
+- **Silently void** (enforced in `server.go`'s WebTransport branch): session
+  limiter, hub-side connection teardown, idle timeout.
+Any future transport gets this exact audit. Anything added to `handleSession`
+needs a twin in `ServeHTTP`.
+
+## Fixed & verified
+- **s4-ws-c1 HIGH** — `/ws` acquired no session limiter slot; sweep 3's flood cap
+  was void while the route was up. Acquire pre-upgrade, one release per exit,
+  shared limiter with `/wt`. `TestWSHandlerHonorsSessionLimiter`.
+- **s4-ws-c2 HIGH** — `hub.add(connID, rw)` omitted the `streamCloser` the WT path
+  passes; a hub-side drop left an open socket and a live read loop (a dropped
+  player who could still buzz). `TestWSHandlerDropTearsDownSocket`.
+- **s4-ws-c3 MED** — no idle reaper vs QUIC's 30s `MaxIdleTimeout`.
+  `TestWSHandlerIdleTimeout`.
+- **s4-ws-x2 HIGH** — prod gates compared raw `YFI_ENV == "prod"`, so
+  `Prod`/`PROD`/`production`/trailing-space failed OPEN. Normalized AND inverted:
+  the secret guard now fires whenever `YFI_ENV != dev`, so a typo fails closed.
+- **s4-engine MED** — 4 sites derived the scoring pool from the board ROW, not the
+  live post-partial/post-halve state: stage projected 140 while the server paid
+  70, admin showed 190. One `roundPool`/`livePool` accessor pair now feeds all 4.
+  NO payout change. 4 `TestPool_*` gates.
+- **s4-ws-x1 HIGH** — buzz ties broke on `playerID`, which IS the client-supplied
+  device fingerprint; 1ms arrival granularity makes ties the COMMON path, so a low
+  fingerprint won every contested buzz all game. Now pre-shuffle + `SliceStable`
+  on arrivalMs alone. `TestQARegression_BuzzTieBreakIsRandomNotPlayerID`.
+- **s4-ui-new-01 MED** — mobile leaked an open QUIC session per reconnect attempt.
+- **s4-ui-02 MED** — one teardown fired `onState(false)` twice on 3 paths.
+- **s4-ui-new-03 LOW** — a text frame became a zero-length array and vanished.
+- **s4-ui-new-04 MED** — stage audio overlay dismissible by a destroyed player.
+- **s4-api-001 LOW** — `/api/spotify/token`'s error branch was silent.
+
+## Owner decisions taken this sweep (do not re-litigate)
+1. **`/ws` decoupled from `YFI_ENV`**, requires `YFI_DEV_WS=1` **and**
+   `YFI_INSECURE_TRANSPORT=1`. Keying it off `YFI_ENV` made the gate mutually
+   exclusive with its own use case and pushed operators OUT of prod.
+2. **Buzz ties broken randomly.** Not by any client-influenced field.
+3. **Payout semantics unchanged (compounding).** The pool fix is display-only.
+
+## REFUTED / not defects (don't re-report)
+- `web/shared/client.ts` is NOT a locked contract file — no `web/` file is on
+  either authoritative list. See "open" below for the real (docs) issue.
+- `math.Floor` vs `int()` in `currentPointsFromPool`: no reachable disagreement
+  (call site clamps both ends ≥0). Changed for spelling consistency only.
+- `decrypt.ts` reveal timings do NOT drift from `reveal.go` — the reveal is
+  server-driven and `computeFrame` + both constants have ZERO callers. Dead code.
+  Do not "sync" the numbers.
+- `SampleBoard`'s `5, 5` is not a duplicate of `Config.BoardRows/BoardCols`; those
+  fields are read from env and used by nothing at all.
+
+## Gotchas learned (ranked — read these before sweep 5)
+1. **A green gate can be structurally incapable of catching its own bug class.**
+   `TestConnDropClosesStreamOnOverflow` (sweep 2) registers a bare `io.Writer`, so
+   it could never catch a real call site omitting the closer argument. When a fix
+   is "pass the right argument," the gate must exercise the CALL SITE.
+2. **`streamCloser` MUST NOT BLOCK.** `conn.stop()` runs inline on the engine's
+   single broadcast goroutine. A validator proposed nhooyr's
+   `c.Close(code, reason)` — it waits ~5s for a peer close-reply from a peer that
+   by construction isn't reading, i.e. a whole-game freeze. Use `CloseNow()`.
+   Invariant is now written into `hub.go`.
+3. **Do NOT make `enqueue` call `hub.remove()`.** Deadlock: `remove()` takes
+   `h.mu.Lock()` while `Broadcast` iterates a snapshot under RLock.
+4. **Grep every consumer of a variable whose semantics you changed.** Decoupling
+   `/ws` from `YFI_ENV` silently broke `dev-up.sh` and `docker-compose.dev.yml`,
+   which set only `YFI_DEV_WS=1`. Both now set the pair.
+5. **`sort.Slice` is UNSTABLE.** A pre-shuffle followed by `sort.Slice` is
+   discarded. `SliceStable` or the randomness is decorative.
+6. **`deploy/docker-compose.yml` has no `env_file:`** — only vars listed under
+   `environment:` reach the container. `GEMINI_API_KEY` never did until this sweep.
+7. **The Bash sandbox blocks UDP binds**, which fails 4 tests with
+   `listen udp 127.0.0.1:0: bind: operation not permitted`. Not a real failure —
+   rerun unsandboxed. And an unsandboxed rerun will report `(cached)`: force
+   `-count=1` or the green is unearned.
+8. `alpine:3.20` (the server image) has BusyBox `wget` but no `curl` — the compose
+   healthcheck uses `wget`.
+9. `new Uint8Array(someString)` silently yields length 0 in JS. No throw.
+
+## Verification (cold)
+`RACE=1 qa/acid.sh` → **ACID PASSED** (27/27 gates present, cold build/vet, `go
+test -count=1` and `-count=1 -race` green all packages, gates proven to execute,
+smoke green). `scripts/preflight.sh` → **PREFLIGHT PASSED** (clean npm reinstall +
+prod build of all 3 frontends). Plus a 5-case live `/ws` boot matrix against a
+freshly built binary (`qa/ws-matrix.sh`), all 5 as specified.
+
+NOT verified, not claimed: the 5 `TestStaging_*` gates self-skip without
+`YFI_TEST_DSN`. `preflight.sh` now WARNS about this instead of implying coverage.
+Run them against real Postgres before an event — see STAGING VERIFICATION above.
+
+## Still open after sweep 4
+- **uimobile-4** — server-side ban enforcement (design, deferred since sweep 1).
+- **adminapi-5** — CORS hardening (deferred since sweep 1).
+- **s4-ui-01 (OWNER CALL)** — is `web/shared/client.ts` a locked contract file?
+  `CLAUDE.md` and `docs/BUILD_CONTRACT.md` say no; the file's own header prose and
+  an earlier section of THIS file say yes. The docs contradict each other.
+- `YFI_BOARD_ROWS`/`YFI_BOARD_COLS` are accepted and ignored (config.go locked).
+- The §7 curve exists 3× (`scoring.go`, `engine.go`, `scoring.ts`). Go pair is
+  pinned by shared vectors; the TS copy can't be — no frontend test runner.
+
+## Sweep 5 recommendation
+WARRANTED, and scoped, not broad. Sweep 4 found 3 highs in code that had shipped
+without review, and it wrote ~10 fixes of its own. Sweep 5 should be an
+adversarial audit OF SWEEP 4'S FIXES plus the surfaces they touch: the new limiter
+acquire/release pairing on `/ws` under real concurrency, the idle timer's
+interaction with the hub writer goroutine, `livePool` against every reachable
+`pointFactor`/partial combination, the buzz shuffle under >2 contenders with mixed
+eligibility, and the `down` latch against every teardown path in all 3 frontends.
+Fixes are where the nastiest bugs live.
+
 ## Resume checklist
-- Re-read this file. Check qa/findings/*.json and qa/validation/*.json.
-- Run qa/smoke.sh + `cd server && go test ./...` for a clean baseline before edits.
+- Re-read this file. Check qa/findings-sweep4/*.json and qa/validation-sweep4/*.json.
+- Run `qa/acid.sh` for a clean baseline before edits — it is the ratchet, and it
+  only grows. Every fix adds a gate, proven RED before it is trusted.
+- `scripts/preflight.sh` is the Definition of Done, not `go test` alone.
+
+---
+
+# SWEEP 5 (2026-08-28) — DONE
+
+Full report: `docs/security/qa-sweep-5.md`. Findings/verdicts in
+`qa/findings-sweep5/` and `qa/validation-sweep5/` (gitignored, on disk only).
+
+Scope: **sweep 4's own fixes**, per sweep 4's own recommendation. Ran the audit it
+asked for: the `/ws` limiter pairing, the idle timer vs the hub writer goroutine,
+`livePool` across every reachable `pointFactor`/partial combination, the buzz
+shuffle at >2 contenders with mixed eligibility, and the frontends' teardown paths.
+
+## Outcome
+8 findings reported → **7 CONFIRMED (0 critical, 0 high, 2 medium, 5 low), 1
+REFUTED**. Sweep 4's fixes held. What sweep 4 actually got wrong was its
+*documentation* and its *test coverage*, not its code — and the one real race it
+left behind was in the reconnect path, not in anything it had reasoned about.
+`qa/acid.sh` 27 → **32** gates (2 lock sweep 5's fixes, 3 lock sweep 4's holes).
+
+## Fixed & verified
+- **s5-ui-01 MED** (`web/mobile/src/useGame.ts`) — sweep 4's connect-failure
+  `close()` acted on the shared `clientRef`, so two concurrent `establish()`
+  invocations could close the HEALTHY client and leak the failed one. Now closes
+  the instance this invocation owns (`clientRef.current === client`) at every
+  ref-clearing site, plus an overlap latch released in a `finally`.
+- **s5-ui-02 LOW** (`web/admin/src/useAdmin.ts`) — `onState` had no stale-client
+  guard (mobile and stage both do), and the busy patch ran AFTER `await close()`.
+  Patch hoisted above the await; guard compares the captured `client` const.
+- **s5-ws-001 LOW** — intended teardown logged as a `read error`. `localClose`
+  flag set BEFORE `CloseNow()` in both teardown paths. `TestWSHandlerTeardownLogging`
+  (with an inverse subtest proving real peer errors still log).
+- **s5-ws-003 LOW** — `Timer.Reset` cannot retract an in-flight `AfterFunc`.
+  Generation counter; superseded callback vetoes itself, decides under `mu`, calls
+  `onExpire()` after releasing. `TestIdleTimerResetVetoesStaleGeneration`.
+- **s5-cfg-01/02 LOW** — `web/mobile/.env.example` + a `useGame.ts` comment still
+  claimed a `YFI_ENV=prod` `/ws` refusal that sweep 4 removed. Corrected.
+- **s5-cfg-03 LOW** — `modeName()`/`isProd()`/`isDev()` had ZERO coverage.
+  `TestEnvModeWrappers`.
+- Coverage added for sweep 4's holes: `TestQARegression_BuzzFairnessHoldsAtFiveWayTie`,
+  `TestQARegression_IneligiblePlayersNeverBecomeContendersOrWin`.
+
+## Gotchas learned (ranked — read these before sweep 6)
+1. **`selectCell` resets `GuessedThisTrack = false` for every player at round
+   start.** Set eligibility flags AFTER cell selection or the test silently tests
+   nothing. This is the exact shape of a green-but-empty gate.
+2. **An inverse gate ("the real error STILL logs") must use an error the server
+   actually sees as an error.** A client-side `CloseNow()` surfaces server-side as
+   `io.EOF`, which was already silent BEFORE the fix — the probe proved nothing.
+   Use an explicit protocol-error close. Prove the check can fail, including a
+   check on a check.
+3. **A latch/guard that isn't cleared on EVERY exit path is worse than the bug it
+   fixes.** s5-ui-01's overlap latch, if stranded, blocks every future reconnect
+   and ends that player's game; the leak it prevents costs 1 of 128 per-IP slots.
+   `finally` as the sole exit, and the early-return guard placed BEFORE the latch
+   is set.
+4. **A guard written against the ref instead of a captured local is a tautology.**
+   `if (clientRef.current === clientRef.current)` reads as correct and does
+   nothing. Both UI fixes had this trap; both validators flagged it in `fix_risk`.
+5. **Deliverables on disk are the contract; an agent's report is a convenience.**
+   Three agents idled without reporting this sweep. Two had already written valid
+   files (read them, proceed). One had written `[]` and could not say whether that
+   was a verdict or an unupdated stub — **an empty file is not evidence**, so the
+   surface was declared unverified and re-hunted from scratch a model rung up.
+   That redo produced the strongest work in the sweep. Where a fixer never
+   reported, its diff was reviewed and its verification re-run by hand.
+6. **One writer for `qa/acid.sh`, always.** Fixers report gate NAMES; the
+   orchestrator edits the ratchet in a single pass at the end. Two concurrent
+   writers in a ratchet file is how a gate silently disappears.
+7. **`Timer.Reset` does not retract an already-firing `AfterFunc`** — the callback
+   needs its own generation/epoch check. And never hold a mutex across the
+   callback's `onExpire()`.
+8. A fresh `time.AfterFunc` per reset is fine HERE only because §5's
+   deterministic-timer contract means no per-tick server broadcast. Revisit if one
+   is added.
+
+## REFUTED / not defects (don't re-report)
+- **s5-ws-002 REFUTED, with a measurement.** Concurrent `CloseNow()` does NOT
+  serialize on the library's `closeMu` for the winner's close duration — the loser
+  waits on already-closing channels. 8 concurrent `CloseNow()` on one real conn
+  peaked at **81µs**, not the claimed ~15s. Sweep 4's `CloseNow()` choice and
+  `hub.go`'s "must not block" invariant are independently re-validated.
+- **The mobile double-tap is not reachable.** `JoinScreen.tsx:52` disables the
+  button and `establish()` patches `conn:"connecting"` synchronously before any
+  await. The reachable race is a pending backoff timer vs a manual retry.
+- **The admin first-login race is not reachable.** `await clientRef.current?.close()`
+  on an empty ref is `await undefined`, a microtask. The reachable case is re-login.
+- **`finishDailyDouble` bypassing `roundPool`/`livePool` is DELIBERATE**, now
+  commented in place. Separate crowd-rating bonus multiplier, never broadcast as a
+  projected decaying pool, so there is no display-vs-award divergence to guard.
+- **The engine surface is CLEAN.** Brute force over the whole pool domain:
+  `worst_low=-1` (the documented 1-point floor residual), `worst_high=0` — nothing
+  projects high. Sweep 4's gates proven to genuinely fail on revert
+  (`fp1 won 400/400`; projected 190 vs awarded 70/140).
+
+## Known coverage gap (NOT fixable as a patch)
+`s5-ui-01` and `s5-ui-02` have **no regression gate**. No frontend has a test
+runner, so `qa/acid.sh` cannot lock them; they were proven by `tsc --noEmit`, a
+production build, and a line-numbered interleaving trace. No pseudo-gate was added
+to any script to make the coverage look present. Same gap blocks pinning the TS
+copy of the §7 curve. **This has now blocked coverage in two consecutive sweeps.**
+Also still true: the buzz gates cannot detect a `SliceStable`→`Slice` swap (sweep
+4's documented limitation), and the 5 `TestStaging_*` gates remain unverified
+without `YFI_TEST_DSN`.
+
+## Verification (cold)
+`RACE=1 qa/acid.sh` → **ACID PASSED** (32/32 gates present, cold build/vet,
+`go test -count=1` AND `-count=1 -race` green all packages — the `-race` run
+covers the new generation counter and teardown flag — gates proven to execute,
+smoke green). `scripts/preflight.sh` → **PREFLIGHT PASSED**. `npx tsc --noEmit`
+clean in `web/mobile` and `web/admin`. Every new gate proven RED by reverting its
+fix, then restored byte-for-byte.
+
+## Still open after sweep 5
+Unchanged from sweep 4, plus one new question. None re-litigated.
+- **s4-ui-01 (OWNER CALL, now blocking)** — is `web/shared/client.ts` a locked
+  contract file? It constrained two fixers this sweep; both were told to stop and
+  report rather than edit it. Neither needed to, but this is now two sweeps in a row.
+- **No test runner in any frontend (OWNER CALL)** — demonstrably blocking coverage.
+  Adding Vitest to three frontends is a decision, not a patch.
+- **NEW** — should admin's `wire()` message handlers carry the stale-client guard?
+  Deliberately not attempted: `welcome` is what admits the operator, and a
+  misapplied guard could lock them out of the control room mid-event.
+- **uimobile-4** — server-side ban enforcement (design, deferred since sweep 1).
+- **adminapi-5** — CORS hardening (deferred since sweep 1).
+- `YFI_BOARD_ROWS`/`YFI_BOARD_COLS` accepted and ignored (config.go locked).
+- The §7 curve exists 3× (`scoring.go`, `engine.go`, `scoring.ts`).
+
+## Sweep 6 recommendation
+**Low yield as a code hunt; the remaining work is owner decisions.** Sweep 5
+surfaced zero criticals and zero highs, downgraded both of its highest-severity
+reports (with their stated mechanisms refuted), refuted one outright, and got a
+clean result on a rigorously re-hunted engine surface. A sweep 6 targeting sweep
+5's own fixes would examine 7 low/medium changes, five of which are test-only or
+comment-only — the audit surface is the `establishingRef` latch, the `localClose`
+flag, the `idleTimer` generation counter, and the admin patch hoist. Worth one
+narrow validator pass at most.
+
+The higher-value moves now are the two standing structural gaps: resolve the
+`client.ts` contract contradiction, and decide on a frontend test runner. Both
+have blocked work in consecutive sweeps and neither is a hunting problem. If
+features land again, re-scope per sweep 4's rule: **diff against this sweep's HEAD
+first; "converged" means converged-as-of-that-tree.**
