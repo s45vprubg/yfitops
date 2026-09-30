@@ -28,18 +28,20 @@ interface Props {
 const DECISION_TIMEOUT_MS = 8000;
 
 export function DailyDoubleContestantScreen({ offer, onDecide, onChoose }: Props) {
-  const [decided, setDecided] = useState(false);
+  const [decided, setDecided] = useState<false | "accept" | "decline">(false);
   const [chosen, setChosen] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!decided || offer) return;
+    // Only an accept is waiting on an offer; a decline is final and the
+    // server no-ops a repeat decline, so it must never re-enable the buttons.
+    if (decided !== "accept" || offer) return;
     const timer = setTimeout(() => setDecided(false), DECISION_TIMEOUT_MS);
     return () => clearTimeout(timer);
   }, [decided, offer]);
 
   const decide = (accept: boolean) => {
     if (decided) return;
-    setDecided(true);
+    setDecided(accept ? "accept" : "decline");
     onDecide(accept);
   };
 
@@ -65,7 +67,7 @@ export function DailyDoubleContestantScreen({ offer, onDecide, onChoose }: Props
               e.preventDefault();
               decide(false);
             }}
-            disabled={decided}
+            disabled={!!decided}
             className="flex-1 rounded-2xl border border-neutral-700 bg-panel px-4 py-6 text-lg font-bold text-neutral-300 transition active:scale-[0.98] disabled:opacity-40"
           >
             Pass
@@ -75,7 +77,7 @@ export function DailyDoubleContestantScreen({ offer, onDecide, onChoose }: Props
               e.preventDefault();
               decide(true);
             }}
-            disabled={decided}
+            disabled={!!decided}
             className="flex-1 rounded-2xl bg-guess px-4 py-6 text-lg font-black text-black transition active:scale-[0.98] disabled:opacity-40"
           >
             I'm in!
