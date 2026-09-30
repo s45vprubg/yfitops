@@ -225,11 +225,20 @@ func main() {
 	})
 	// Dev clients need the self-signed cert's SHA-256 for serverCertificateHashes.
 	// NewServer above has already generated the cert if it was missing.
-	if _, b64, herr := transport.CertSHA256(cfg.CertFile); herr == nil {
-		mux.HandleFunc("/cert-hash", func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			_, _ = w.Write([]byte(b64))
-		})
+	//
+	// Never register this in prod: a client that receives a hash pins the
+	// WebTransport connection to serverCertificateHashes mode, which per spec
+	// requires the cert's validity period to be <=14 days. A real CA cert
+	// (routinely 90+ days) then fails the QUIC TLS handshake with
+	// CERTIFICATE_VERIFY_FAILED — silently breaking every WebTransport client
+	// in prod despite the cert being perfectly valid for normal HTTPS.
+	if !isProd() {
+		if _, b64, herr := transport.CertSHA256(cfg.CertFile); herr == nil {
+			mux.HandleFunc("/cert-hash", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				_, _ = w.Write([]byte(b64))
+			})
+		}
 	}
 
 	// ---- Spotify token endpoint (always available) ----
