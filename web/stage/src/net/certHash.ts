@@ -31,28 +31,16 @@ function looksHex(s: string): boolean {
 export type CertHashes = { algorithm: "sha-256"; value: BufferSource }[];
 
 export async function fetchCertHashes(): Promise<CertHashes | undefined> {
-  const dev = import.meta.env.DEV;
-
-  // In production the backend must be reached over https and the pinned hash
-  // must be obtainable; anything less means we'd connect with NO cert pinning,
-  // so we fail closed. In dev we stay lenient (local http, self-signed cert).
-  if (!dev && !CERT_HASH_URL.startsWith("https://")) {
-    throw new Error(
-      `[stage] refusing to fetch cert hash over cleartext (${CERT_HASH_URL}); require https in production.`,
-    );
-  }
-
+  // The backend only serves /cert-hash for the dev self-signed cert; in
+  // production it's behind a real CA cert (serverCertificateHashes pinning
+  // would break the QUIC handshake for certs valid >14 days), so the server
+  // doesn't register the route at all and this 404s. That's expected — fail
+  // open and connect without pinning, same as admin/mobile.
   try {
     const res = await fetch(CERT_HASH_URL, { mode: "cors" });
-    if (!res.ok) {
-      if (!dev) throw new Error(`[stage] cert-hash fetch failed: HTTP ${res.status}`);
-      return undefined;
-    }
+    if (!res.ok) return undefined;
     const text = (await res.text()).trim();
-    if (!text) {
-      if (!dev) throw new Error("[stage] cert-hash fetch returned empty body");
-      return undefined;
-    }
+    if (!text) return undefined;
 
     // Try JSON wrapper { hash: "..." } first, then raw string.
     let raw = text;
@@ -65,16 +53,11 @@ export async function fetchCertHashes(): Promise<CertHashes | undefined> {
     }
 
     const bytes = looksHex(raw) ? hexToBytes(raw) : base64ToBytes(raw);
-    if (bytes.length !== 32) {
-      if (!dev) throw new Error("[stage] cert-hash was not a 32-byte SHA-256 value");
-      return undefined;
-    }
+    if (bytes.length !== 32) return undefined;
     return [{ algorithm: "sha-256", value: bytes }];
-  } catch (err) {
-    // In dev, no backend / CORS blocked — connect without pinned hashes so
-    // local dev still works. In prod, propagate: connecting unpinned would
-    // silently drop cert pinning.
-    if (!dev) throw err;
+  } catch {
+    // No backend reachable / CORS blocked / cleartext in prod — connect
+    // without pinned hashes rather than blocking the connection entirely.
     return undefined;
   }
 }
