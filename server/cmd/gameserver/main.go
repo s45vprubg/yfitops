@@ -15,6 +15,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
@@ -166,6 +167,12 @@ func main() {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
+	})
+	// Public, unauthenticated player count for the public landing page (§4A-safe:
+	// carries nothing but a bare integer, no handles/scores/track data).
+	mux.HandleFunc("/api/public/player-count", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]int{"count": eng.MobilePlayerCount()})
 	})
 	// Spotify OAuth (§6, §9): admin opens /auth/spotify on the stage tab.
 	// CSRF protection: mint a random state, stash it in a short-lived cookie,

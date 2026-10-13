@@ -139,7 +139,9 @@ npm run build   # production build
 
 - **stage** (port 5174) — the central presentation screen. Hosts the Spotify
   Web Playback SDK and shows the board, timer, reveal, and karaoke lyrics.
-  Requires `VITE_STAGE_SECRET` matching `ADMIN_SECRET`.
+  Served at `/`, it's a public QR-code landing page with no privileged
+  connection; the real stage lives at `/stage` behind a runtime login (same
+  `ADMIN_SECRET` as admin — no build-time secret anymore).
 - **mobile** (port 5173) — the buzzer PWA attendees load via the lobby QR code.
 - **admin** (port 8779) — the host Control Room (grading, overrides, kick/ban,
   skip threshold) and Board Builder (track import, drag-and-drop grid). Gated

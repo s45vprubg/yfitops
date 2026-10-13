@@ -64,6 +64,24 @@ will show them as not-yet-resolved until the next probe.
     (rescan, playlist import) now run sequentially with a ~300ms delay
     between requests per LRCLIB's documented batch-scan guidance, replacing
     an 8-way concurrent worker pool that could rate-limit itself.
+- **Stage is now a public landing page + a login-gated real stage.**
+  Previously `web/stage` was served at the site root and auto-authenticated
+  as the trusted `stage` role the instant the page loaded — a build-time
+  `VITE_STAGE_SECRET` was embedded in the public JS bundle and sent with
+  zero human interaction, so anyone who loaded the page (or just read the
+  bundle in devtools) got a live connection that could control game
+  audio/playback. The site root (`/`) now renders a static, unauthenticated
+  `PublicLanding` (QR code + a live "N jacked in" count from a new
+  unauthenticated `/api/public/player-count` endpoint, carrying nothing but
+  a bare integer). The real stage moved to `/stage` and now shows a runtime
+  login screen — same `ADMIN_SECRET` password as `web/admin`, entered by a
+  human each session, never baked into the build — mirroring `web/admin`'s
+  existing `Login.tsx`/idle-until-login pattern exactly. One Vite build
+  serves both routes (asset URLs are absolute, not path-relative), split by
+  a client-side `window.location.pathname` check, no router needed.
+  Opportunistically fixed the admin/stage secret comparison
+  (`game.Engine.onHello`) to use `crypto/subtle.ConstantTimeCompare` instead
+  of a plain `!=`, per this project's own security rules.
 
 ### Changed
 - `server/internal/admin.Track`/`DailyDoubleTrack`: `HasSyncedLyrics *bool`

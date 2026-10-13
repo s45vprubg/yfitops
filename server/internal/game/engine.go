@@ -2,6 +2,7 @@ package game
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -803,7 +804,10 @@ func (e *Engine) onHello(connID string, env protocol.ClientEnvelope) {
 		return
 	}
 	// Admin and Stage roles are gated by the shared secret (§9 auth).
-	if (h.Role == protocol.RoleAdmin || h.Role == protocol.RoleStage) && e.cfg.AdminSecret != "" && h.AdminSecret != e.cfg.AdminSecret {
+	// Constant-time compare: a plain != leaks timing information about how
+	// many leading bytes of the secret matched.
+	if (h.Role == protocol.RoleAdmin || h.Role == protocol.RoleStage) && e.cfg.AdminSecret != "" &&
+		subtle.ConstantTimeCompare([]byte(h.AdminSecret), []byte(e.cfg.AdminSecret)) != 1 {
 		e.sendError(connID, "forbidden", "bad admin secret")
 		return
 	}
@@ -2712,6 +2716,26 @@ func (e *Engine) scoreboardData() protocol.ScoreboardData {
 		}
 	}
 	return protocol.ScoreboardData{Players: players}
+}
+
+// MobilePlayerCount returns the number of live mobile (buzzer) players, for
+// the public landing page's "N jacked in" count. Safe from any goroutine —
+// routed through the Run loop's command channel like StartGame/ResetToLobby,
+// so it reads the same authoritative registry the scoreboard does with no
+// separate counter to keep in sync.
+func (e *Engine) MobilePlayerCount() int {
+	type result struct{ n int }
+	ch := make(chan result, 1)
+	e.cmds <- command{fn: func() {
+		n := 0
+		for _, p := range e.reg.players {
+			if e.reg.isMobile(p.ID) {
+				n++
+			}
+		}
+		ch <- result{n}
+	}}
+	return (<-ch).n
 }
 
 // broadcastScoreboard sends scores to ALL roles. The scoreboard carries only

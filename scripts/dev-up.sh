@@ -152,8 +152,10 @@ done
 export VITE_WT_URL="https://${HOST}:${WT_PORT}/wt"
 export VITE_HTTP_URL="http://${HOST}:${HTTP_PORT}"
 export VITE_JOIN_URL="http://${HOST}:${MOBILE_PORT}"   # stage QR -> mobile buzzer
-# Stage authenticates to the backend (hello + /api/spotify/token) with this.
-export VITE_STAGE_SECRET="${ADMIN_SECRET}"
+# Stage no longer takes a build-time secret (a baked-in VITE_STAGE_SECRET
+# auto-authenticated any visitor who loaded the page). It now shows the same
+# runtime login screen admin does — enter ADMIN_SECRET there after `npm run
+# dev` starts.
 
 echo "==> building + starting Go backend (in-memory, sample board)"
 [ -n "${SPOTIFY_CLIENT_ID:-}" ] && echo "    Spotify creds present — real audio available" \

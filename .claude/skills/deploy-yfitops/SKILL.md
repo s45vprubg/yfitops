@@ -77,13 +77,18 @@ Dockerfile/prod-serving story in the repo — built locally on a real machine
 9. **Local**: build the three frontends (`npm install && npm run build` in
    each of `web/admin`, `web/mobile`, `web/stage`) with prod env vars pointed
    at `https://yfitops.us` endpoints (`VITE_WT_URL`, `VITE_HTTP_URL`,
-   `VITE_JOIN_URL`, `VITE_STAGE_SECRET` = the real `ADMIN_SECRET` from step 4).
+   `VITE_JOIN_URL`). Stage no longer takes a build-time secret — the real
+   stage (behind `/stage`) now shows a runtime login screen and the operator
+   types `ADMIN_SECRET` there; nothing Spotify/stage-privileged ships in the
+   build itself anymore.
 10. **Local → Box**: `scp`/`rsync` each `dist/` to the box (e.g.
     `/opt/yfitops/web/{admin,mobile,stage}/dist`).
 11. **Box**: nginx — replace `sites-available/default`'s proxy to `:3000`
     with a config serving the three static `dist/` dirs at appropriate
-    paths and proxying the HTTP API paths (health/OAuth/token) to
-    `127.0.0.1:8777`. `sudo nginx -t && sudo systemctl reload nginx`.
+    paths (including a `/stage/` block pointing at the SAME `stage` dist
+    dir as `/` — see the routing map below for the exact block) and
+    proxying the HTTP API paths (health/OAuth/token) to `127.0.0.1:8777`.
+    `sudo nginx -t && sudo systemctl reload nginx`.
 12. Verify live: `curl -I https://yfitops.us` and load it in a real browser
     (WebTransport needs Chromium).
 
@@ -92,11 +97,23 @@ Dockerfile/prod-serving story in the repo — built locally on a real machine
 nginx (`/etc/nginx/sites-available/yfitops`, backup of the old
 NameThatSpotify config at `sites-available/default.bak-namethatspotify`):
 
-- `https://yfitops.us/`       → `web/stage` build (base `/`)
+- `https://yfitops.us/`       → `web/stage` build (base `/`) — but renders the
+  public, unauthenticated `PublicLanding` (QR + player count only; no
+  privileged connection). Pure client-side routing on `window.location.pathname`
+  decides this — see below.
+- `https://yfitops.us/stage/` → the SAME `web/stage` dist, same files, same
+  nginx `root`/`alias` target as `/` — only the pathname differs, which is
+  what makes the bundle render the real, login-gated `StageApp` instead.
+  `location = /stage { return 301 /stage/; }` plus `location /stage/ { alias
+  /var/www/yfitops/stage/; try_files $uri $uri/ /stage/index.html; }`, same
+  alias+try_files shape as `/admin/` below. No separate build or `--base` flag
+  needed for this — stage's asset URLs are absolute (`/assets/...`), not
+  relative to the page's own path, so one `dist/` correctly serves both routes.
 - `https://yfitops.us/admin/` → `web/admin` build (base `/admin/`)
 - `https://yfitops.us/play/`  → `web/mobile` build (base `/play/`, PWA)
-- `/healthz`, `/auth/*`, `/api/*`, `/cert-hash`, `/ws` → `proxy_pass
-  http://127.0.0.1:8777` (the gameserver container's HTTP port)
+- `/healthz`, `/auth/*`, `/api/*` (including the new unauthenticated
+  `/api/public/player-count` that `PublicLanding` polls), `/cert-hash`, `/ws`
+  → `proxy_pass http://127.0.0.1:8777` (the gameserver container's HTTP port)
 - WebTransport/QUIC (UDP 4433) is NOT proxied by nginx — browsers connect
   straight to `yfitops.us:4433` with the gameserver's own TLS cert.
 
@@ -105,9 +122,8 @@ Docker for the frontends) and shipped as static `dist/` via `scp`, landing
 in `/var/www/yfitops/{stage,admin,play}`. Build env vars used:
 
 ```
-# stage
-VITE_HTTP_URL=https://yfitops.us VITE_JOIN_URL=https://yfitops.us/play/ \
-  VITE_STAGE_SECRET=<ADMIN_SECRET> npm run build
+# stage — no secret in the build anymore; operator logs in at /stage at runtime
+VITE_HTTP_URL=https://yfitops.us VITE_JOIN_URL=https://yfitops.us/play/ npm run build
 # admin (base path needs the raw vite build, not the npm script, to pass --base)
 VITE_HTTP_URL=https://yfitops.us npx vite build --base=/admin/
 # mobile

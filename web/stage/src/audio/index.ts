@@ -70,16 +70,21 @@ export function captureSpotifyToken(): string | null {
 // prefers a freshly-refreshed token from the backend (so audio survives the
 // ~1h Spotify token TTL across a long game), falling back to the cached token
 // from the OAuth redirect if the endpoint is unreachable.
-async function liveTokenProvider(initial: string): Promise<string> {
-  const fresh = await fetchSpotifyToken();
+async function liveTokenProvider(initial: string, secret: string): Promise<string> {
+  const fresh = await fetchSpotifyToken(secret);
   return fresh ?? readPersistedToken() ?? initial;
 }
 
-/** Build the right player. Returns a Spotify player if a token exists, else mock. */
-export function createAudioPlayer(): AudioPlayer {
+/**
+ * Build the right player. Returns a Spotify player if a token exists, else
+ * mock. Takes the runtime-entered stage secret (never a build-time constant,
+ * since it's only known once the operator logs in) to authenticate the
+ * backend token refresh.
+ */
+export function createAudioPlayer(secret: string): AudioPlayer {
   const token = captureSpotifyToken();
   if (token) {
-    return new SpotifyAudioPlayer(() => liveTokenProvider(token));
+    return new SpotifyAudioPlayer(() => liveTokenProvider(token, secret));
   }
   return new MockAudioPlayer();
 }

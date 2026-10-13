@@ -31,7 +31,7 @@ import type {
   WelcomeData,
 } from "@shared/protocol";
 import type { ClientEnvelope } from "@shared/protocol";
-import { WT_URL, STAGE_SECRET, fetchSpotifyToken } from "../config";
+import { WT_URL, fetchSpotifyToken } from "../config";
 import { fetchCertHashes } from "./certHash";
 import { createAudioPlayer, SpotifyAudioPlayer, type AudioPlayer, type ConnectState } from "../audio";
 
@@ -45,8 +45,16 @@ export interface TimerAnchor {
   frozen: boolean;
 }
 
+// Login/auth lifecycle, mirroring web/admin's useAdmin.ts ConnStatus shape.
+// "idle" before any login attempt, "connecting" while the hello round-trip is
+// in flight, "authed" once the server's welcome arrives, "error" on a
+// forbidden/banned rejection (the secret was wrong).
+export type AuthStatus = "idle" | "connecting" | "authed" | "error";
+
 export interface GameView {
   connected: boolean;
+  authStatus: AuthStatus;
+  authError?: string;
   state: GameState;
   board: BoardData | null;
   scoreboard: ScoreboardData | null;
@@ -88,9 +96,19 @@ function rowFromMaxPoints(maxPoints: number): number {
   return idx >= 0 ? idx + 1 : 1;
 }
 
+// useGame no longer auto-connects on mount (that's what let any visitor who
+// merely loaded the stage page auto-authenticate with a build-time-embedded
+// secret). It stays idle until login(secret) is called from the Login
+// screen; each call is a fresh connect attempt, keyed by a nonce so retrying
+// with the same (still-wrong) secret after fixing something else still
+// re-triggers the effect below instead of silently no-op'ing on an unchanged
+// dependency value.
 export function useGame() {
+  const [authAttempt, setAuthAttempt] = useState<{ secret: string; nonce: number } | null>(null);
   const [view, setView] = useState<GameView>({
     connected: false,
+    authStatus: "idle",
+    authError: undefined,
     state: "LOBBY",
     board: null,
     scoreboard: null,
@@ -118,12 +136,15 @@ export function useGame() {
   const connectedRef = useRef(false); // live link state, for guarding audio sends
 
   useEffect(() => {
+    if (!authAttempt) return; // idle — no login attempt yet, nothing privileged runs
+    const secret = authAttempt.secret;
+
     let disposed = false;
-    const audio = createAudioPlayer();
+    const audio = createAudioPlayer(secret);
     audioRef.current = audio;
 
     const patch = (p: Partial<GameView>) => setView((v) => ({ ...v, ...p }));
-    patch({ audioMode: audio.mode, spotifyConnectState: audio.getConnectState() });
+    patch({ audioMode: audio.mode, spotifyConnectState: audio.getConnectState(), authStatus: "connecting", authError: undefined });
 
     // Send only when the current client is actually connected. Audio callbacks
     // fire on their own cadence (player_state_changed etc.); after a transport
@@ -175,6 +196,16 @@ export function useGame() {
       client.on("welcome", (e: ServerEnvelope) => {
         const _d = e.d as WelcomeData; // role/playerID/nonce; nonce tracked by client
         void _d;
+        patch({ authStatus: "authed" });
+      });
+
+      // A bad secret surfaces here (server never sends welcome, just this).
+      // Mirrors web/admin's useAdmin.ts error handling.
+      client.on("error", (e: ServerEnvelope) => {
+        const d = (e.d as { code?: string; message?: string }) ?? {};
+        if (d.code === "forbidden" || d.code === "banned" || d.code === "unauthorized") {
+          patch({ authStatus: "error", authError: `${d.code}: ${d.message ?? ""}`.trim() });
+        }
       });
 
       client.on("state", (e: ServerEnvelope) => {
@@ -307,7 +338,7 @@ export function useGame() {
       if (spotifyInitedRef.current) return; // idempotent — push + full-sync may both fire
       spotifyInitedRef.current = true;
       audioRef.current?.destroy();
-      const spotify = new SpotifyAudioPlayer(async () => (await fetchSpotifyToken()) ?? pushedToken);
+      const spotify = new SpotifyAudioPlayer(async () => (await fetchSpotifyToken(secret)) ?? pushedToken);
       audioRef.current = spotify;
       patch({ audioMode: "spotify", spotifyConnectState: "connecting" });
       spotify.onReady((deviceId) => {
@@ -388,9 +419,10 @@ export function useGame() {
         void prev?.close();
         wireClientHandlers(client);
 
-        // Send hello as the stage role (gated by the same secret as admin).
+        // Send hello as the stage role (gated by the same secret as admin,
+        // entered at login time — never a build-time constant).
         await client.connect();
-        await client.send({ t: "hello", d: { role: "stage", adminSecret: STAGE_SECRET } });
+        await client.send({ t: "hello", d: { role: "stage", adminSecret: secret } });
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn("[stage] connect failed (running offline/demo):", err);
@@ -427,7 +459,13 @@ export function useGame() {
       audioRef.current?.destroy();
       void clientRef.current?.close();
     };
-  }, []);
+  }, [authAttempt]);
+
+  // login triggers a fresh connect attempt. Keyed by a nonce (not just the
+  // secret string) so resubmitting the same still-wrong secret after fixing
+  // something else still re-fires the effect above instead of being a no-op
+  // against an unchanged dependency value.
+  const login = (secret: string) => setAuthAttempt({ secret, nonce: Date.now() });
 
   const activateAudio = async () => {
     const player = audioRef.current;
@@ -439,5 +477,5 @@ export function useGame() {
     if (ok) setView((v) => ({ ...v, audioActivated: true }));
   };
 
-  return { view, audio: audioRef, activateAudio };
+  return { view, audio: audioRef, activateAudio, login };
 }

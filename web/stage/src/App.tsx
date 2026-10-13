@@ -2,6 +2,7 @@
 // corner QR (late joiners) and a connection dot.
 
 import { useGame } from "./net/useGame";
+import Login from "./components/Login";
 import CornerJoin from "./components/CornerJoin";
 import ScoreOverlay from "./components/ScoreOverlay";
 import DailyDoubleResultBanner from "./components/DailyDoubleResultBanner";
@@ -16,8 +17,15 @@ import DailyDoubleWaiting from "./views/DailyDoubleWaiting";
 // (its own big view), KARAOKE and GAME_OVER (which show scores prominently).
 const SCORE_OVERLAY_STATES = ["BOARD", "TRANSITION", "ROUND_ACTIVE", "LOCKED_OUT", "ADJUDICATE", "DAILY_DOUBLE"];
 
-export default function App() {
-  const { view, audio, activateAudio } = useGame();
+// StageApp is the real, authenticated stage — mounted only at /stage, behind
+// a login gate (same ADMIN_SECRET password as web/admin). The public landing
+// page at `/` renders PublicLanding instead and never touches this.
+export default function StageApp() {
+  const { view, audio, activateAudio, login } = useGame();
+
+  if (view.authStatus !== "authed") {
+    return <Login status={view.authStatus} error={view.authError} onSubmit={login} />;
+  }
 
   // Show the one-time "Start Stage" gesture whenever Spotify is the audio source
   // and the browser autoplay lock hasn't been cleared yet. It appears from the

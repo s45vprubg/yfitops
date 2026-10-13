@@ -71,6 +71,8 @@ Also required (not all machine-checkable):
 
 - Backend: `cd deploy && make up` (Docker Compose: postgres, redis, gameserver)
 - Frontends: `cd web/{stage,mobile,admin} && npm install && npm run dev`
-- Stage requires `VITE_STAGE_SECRET` env var matching `ADMIN_SECRET`
+- Stage's `/` is a public QR-code landing page (no auth); the real stage is
+  at `/stage`, gated by a runtime login using the same `ADMIN_SECRET` as
+  admin (no build-time secret)
 - WebTransport requires Chromium (Chrome/Edge)
 - Spotify is optional; system runs in demo mode without credentials

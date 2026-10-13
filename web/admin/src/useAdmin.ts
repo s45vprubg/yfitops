@@ -107,9 +107,10 @@ export function useAdmin(): [AdminState, AdminActions] {
       client.on("welcome", (env: ServerEnvelope) => {
         const d = env.d as WelcomeData;
         // Security (uiadmin-1): the admin secret is the crown-jewel trusted-role
-        // credential (== VITE_STAGE_SECRET). Keep it in-memory only — never
-        // persist to localStorage where XSS could steal it or it could survive
-        // on a shared/kiosk machine. An admin re-enters it after a page reload.
+        // credential (stage logs in with the same value, entered at runtime on
+        // its own login screen). Keep it in-memory only — never persist to
+        // localStorage where XSS could steal it or it could survive on a
+        // shared/kiosk machine. An admin re-enters it after a page reload.
         patch({ status: "authed", playerID: d.playerID, error: undefined, adminSecret: secretRef.current });
       });
       client.on("error", (env: ServerEnvelope) => {

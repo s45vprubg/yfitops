@@ -1267,3 +1267,34 @@ func TestDailyDouble_PerformancePlaysWithNoOtherRatersOnline(t *testing.T) {
 		t.Errorf("state after Force End Round = %s, want BOARD", h.state())
 	}
 }
+
+// TestMobilePlayerCount covers the public landing page's "N jacked in"
+// counter: it must count only mobile (buzzer) players, never admin/stage
+// connections, and must track joins live without any extra bookkeeping to
+// keep in sync (it reads the same registry the scoreboard does).
+func TestMobilePlayerCount(t *testing.T) {
+	h := newHarness(t)
+	stop := h.run()
+	defer stop()
+
+	if n := h.e.MobilePlayerCount(); n != 0 {
+		t.Fatalf("count with no players = %d, want 0", n)
+	}
+
+	h.joinAdmin("admin")
+	h.joinStage("stage")
+	if n := h.e.MobilePlayerCount(); n != 0 {
+		t.Fatalf("count after admin+stage join = %d, want 0 (neither is mobile)", n)
+	}
+
+	h.join("c1", "fp1", "alice")
+	if n := h.e.MobilePlayerCount(); n != 1 {
+		t.Fatalf("count after 1 mobile join = %d, want 1", n)
+	}
+
+	h.join("c2", "fp2", "bob")
+	h.join("c3", "fp3", "carol")
+	if n := h.e.MobilePlayerCount(); n != 3 {
+		t.Fatalf("count after 3 mobile joins = %d, want 3", n)
+	}
+}
