@@ -46,6 +46,16 @@ export type ClientMsgType =
   // admin.skipDailyDouble: abandon a stalled offer/song-pick sub-phase.
   // Mirrors cmsgAdminSkipDailyDouble (CONTRACT-QUESTION).
   | "admin.skipDailyDouble"
+  // admin.seek: control-room scrubber — jump playback to {positionMs}.
+  // Mirrors cmsgAdminSeek in engine.go (CONTRACT-QUESTION; AdminPlaybackData
+  // has no position field to extend).
+  | "admin.seek"
+  // admin.setDropPoint / admin.jumpToDropPoint: mark the current track's
+  // "best part" position ({positionMs}) and jump back to it (minus a short
+  // lead-in buffer) later. Mirrors cmsgAdminSetDropPoint/
+  // cmsgAdminJumpToDropPoint in engine.go (CONTRACT-QUESTION).
+  | "admin.setDropPoint"
+  | "admin.jumpToDropPoint"
   | "stage.playerState"
   | "stage.deviceReady";
 
@@ -89,6 +99,11 @@ export type ServerMsgType =
   // cheatReport: admin-only anti-cheat snapshot (per-player IP + shared-ip /
   // multi-conn flags). Mirrors smsgCheatReport in engine reveal.go.
   | "cheatReport"
+  // playbackPosition: admin-only control-room scrubber feed ({positionMs,
+  // durationMs, paused}). Mirrors smsgPlaybackPosition in engine.go
+  // (CONTRACT-QUESTION) — relays what stage already reports via
+  // stage.playerState, previously received and discarded server-side.
+  | "playbackPosition"
   // roundWinner: stage-only — who won the current round ({handle}; empty =
   // nobody). Mirrors smsgRoundWinner in engine reveal.go.
   | "roundWinner"

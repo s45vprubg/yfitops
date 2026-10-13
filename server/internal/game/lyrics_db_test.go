@@ -41,7 +41,7 @@ func newLyricsTestEngine(t *testing.T, lp LyricsProvider, ls LyricsTextStore) *E
 	repo := newFakeRepo()
 	audio := &fakeAudio{}
 	gate := anticheat.NewNonceGate([]byte("test-secret"))
-	return NewEngine(repo, lk, audio, lp, ls, bc, gate, Config{
+	return NewEngine(repo, lk, audio, lp, ls, nil, bc, gate, Config{
 		SessionID:    "s1",
 		BuzzWindowMs: -1,
 		Rand:         rand.New(rand.NewSource(1)),

@@ -24,6 +24,11 @@ each is probed (via "Check lyrics," board-add, or playlist import) under the
 new cache; nothing is lost, but a board with previously-known-good lyrics
 will show them as not-yet-resolved until the next probe.
 
+Migration 0009 (2026-10-13) adds `track_drop_point` (purely additive, no
+column drops) for the new Mark/Jump Drop Point feature. Run
+`cd deploy && make migrate` before starting the new server/gameserver image.
+No backfill: every song's drop point starts unmarked until an admin marks it.
+
 ## [Unreleased] — 2026-10-13
 
 ### Added
@@ -82,6 +87,36 @@ will show them as not-yet-resolved until the next probe.
   Opportunistically fixed the admin/stage secret comparison
   (`game.Engine.onHello`) to use `crypto/subtle.ConstantTimeCompare` instead
   of a plain `!=`, per this project's own security rules.
+- **Admin playback scrubber.** The control room now shows a live, clickable
+  progress bar for the current track and can seek to any position. Stage
+  already reported live position/pause state on every `player_state_changed`
+  event (`StagePlayerStateData`) but the server only read `trackEnded` and
+  silently discarded `positionMs`/`paused` — now relayed to admin only via a
+  new `playbackPosition` broadcast, with duration from the already-known
+  per-track metadata. Seeking reuses the existing, unmodified `AudioData`
+  broadcast (`{action:"play", trackURI, positionMs}` — stage's handler
+  already supported this shape, no stage-side changes needed) via a new
+  `admin.seek` command. Deliberately does **not** re-anchor the scoring decay
+  clock (`trackStartMs`/`pausedAtMs`) the way pause/resume's existing
+  re-anchor does — a seek can jump past `scoring.go`'s 60s decay window, and
+  letting decay follow would zero out the bonus just because the admin cued
+  to a later part of a song. Karaoke lyrics need no new code at all: they
+  already recompute from the audio player's live position on every render.
+- **Manual drop-point marking.** "Mark Drop" captures the scrubber's current
+  live position as a song's "best part" (chorus/drop); "Jump to Drop" seeks
+  there (minus a ~4s lead-in) via the same `seekTo` path the scrubber uses —
+  same deliberate decay-independence, no new engine logic duplicated. Stored
+  once per song in a new `track_drop_point` table (keyed by Spotify URI,
+  mirroring `track_lyrics`'s dedup-across-boards shape) with a `source`
+  column ("manual" today) so a future automated guess (YouTube "most
+  replayed" heatmap, lyrics `[Chorus]`-tag cross-referencing — discussed,
+  not built) can populate the same column without any schema/API change.
+  The one rule that matters, learned from the lyrics-cache clobber bug: an
+  automated write can never overwrite an existing human-set mark —
+  `SetDropPoint`'s upsert enforces this in SQL, not left to callers to
+  remember. The admin scrubber feed now also carries `hasDropPoint`/
+  `dropPointMs` so the UI can show a marker on the bar and disable "Jump to
+  Drop" when nothing's marked, without a separate round-trip.
 
 ### Changed
 - `server/internal/admin.Track`/`DailyDoubleTrack`: `HasSyncedLyrics *bool`
@@ -89,7 +124,8 @@ will show them as not-yet-resolved until the next probe.
   "resolved"); `web/admin`'s `TrackData`/`DailyDoubleTrackData` mirror this.
 - `game.NewEngine` takes a new `LyricsTextStore` parameter (nilable — nil
   preserves the exact pre-cache always-live-fetch behavior, e.g. without
-  Postgres).
+  Postgres), and now also a `DropPointStore` parameter (same nilable
+  contract, disables Mark/Jump Drop Point without Postgres).
 
 ## [Unreleased] — 2026-07-01
 

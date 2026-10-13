@@ -394,6 +394,53 @@ func (r *PostgresRepo) GetResolvedLyrics(ctx context.Context, spotifyURI string)
 	return *lrcText, true, nil
 }
 
+// --- Drop point cache (track_drop_point), keyed by Spotify URI -----------
+//
+// Mirrors the lyrics cache exactly: one row per song, shared by every board/
+// Daily Double placement via a join on spotify_uri. source distinguishes a
+// human-set mark ("manual") from a future automated guess (e.g.
+// "youtube_heatmap") — this is the "piping for automation" the drop-point
+// feature was explicitly asked to leave in place.
+
+// GetDropPoint implements game.DropPointStore for the engine's live-gameplay
+// path: a hit means this song already has a marked "best part" position,
+// used both to populate the admin scrubber's drop-point marker and to serve
+// "Jump to Drop".
+func (r *PostgresRepo) GetDropPoint(ctx context.Context, spotifyURI string) (int64, bool, error) {
+	var positionMs int64
+	err := r.pool.QueryRow(ctx,
+		`SELECT drop_point_ms FROM track_drop_point WHERE spotify_uri = $1`, spotifyURI).
+		Scan(&positionMs)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, false, nil
+		}
+		return 0, false, fmt.Errorf("store: get drop point: %w", err)
+	}
+	return positionMs, true, nil
+}
+
+// SetDropPoint upserts a drop-point mark. The WHERE clause on the upsert's
+// conflict action is the never-clobber-manual rule: an update is only
+// allowed when the incoming write is itself manual (an admin adjusting their
+// own mark — always wins) or the existing row isn't manual (an automated
+// write may freely overwrite a prior automated guess). A non-manual write
+// against an existing manual row matches no WHERE condition, so Postgres
+// leaves the row untouched — a silent, correct no-op, not an error.
+func (r *PostgresRepo) SetDropPoint(ctx context.Context, spotifyURI string, positionMs int64, source string) error {
+	_, err := r.pool.Exec(ctx,
+		`INSERT INTO track_drop_point (spotify_uri, drop_point_ms, source, updated_at)
+		 VALUES ($1, $2, $3, now())
+		 ON CONFLICT (spotify_uri) DO UPDATE
+		   SET drop_point_ms = EXCLUDED.drop_point_ms, source = EXCLUDED.source, updated_at = now()
+		   WHERE $3 = 'manual' OR track_drop_point.source <> 'manual'`,
+		spotifyURI, positionMs, source)
+	if err != nil {
+		return fmt.Errorf("store: set drop point: %w", err)
+	}
+	return nil
+}
+
 func (r *PostgresRepo) AddColumn(ctx context.Context, boardID string, col int, category string) error {
 	for row := 1; row <= 5; row++ {
 		_, err := r.pool.Exec(ctx,
@@ -560,14 +607,14 @@ func (r *PostgresRepo) GetLayout(ctx context.Context, boardID string) (*admin.La
 	cells := map[cellCoord]*admin.LayoutCell{}
 	for rows.Next() {
 		var (
-			row, col int
-			category string
+			row, col                                  int
+			category                                  string
 			tID, tBoardID, tURI, tArtist, tSong, tArt *string
-			tDuration, tCreated                        *int64
-			tOverride                                  *bool
-			tYear                                       *int
-			tGenre, tLyricsStatus                       *string
-			pos                                         *int
+			tDuration, tCreated                       *int64
+			tOverride                                 *bool
+			tYear                                     *int
+			tGenre, tLyricsStatus                     *string
+			pos                                       *int
 		)
 		if err := rows.Scan(&row, &col, &category,
 			&tID, &tBoardID, &tURI, &tArtist, &tSong, &tArt, &tDuration, &tCreated,
@@ -634,9 +681,9 @@ func (r *PostgresRepo) LoadBoardByID(ctx context.Context, boardID string) (*game
 
 	for rows.Next() {
 		var (
-			row, col    int
-			category    string
-			dailyDouble bool
+			row, col                        int
+			category                        string
+			dailyDouble                     bool
 			tID, tURI, tArtist, tSong, tArt *string
 			tDuration                       *int64
 			tOverride                       *bool

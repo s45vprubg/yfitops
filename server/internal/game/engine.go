@@ -165,15 +165,16 @@ func (e *Engine) livePool() (maxP, baseP int) {
 
 // Engine implements game.InboundHandler and drives the full lifecycle.
 type Engine struct {
-	repo        GameRepo
-	lock        BuzzLock
-	audio       AudioDevice
-	lyrics      LyricsProvider
-	lyricsStore LyricsTextStore // optional; DB-first lookup before any live LRCLIB call
-	bcast       Broadcaster
-	gate        *anticheat.NonceGate
-	cfg         Config
-	rng         *rand.Rand
+	repo           GameRepo
+	lock           BuzzLock
+	audio          AudioDevice
+	lyrics         LyricsProvider
+	lyricsStore    LyricsTextStore // optional; DB-first lookup before any live LRCLIB call
+	dropPointStore DropPointStore  // optional; nil disables Mark/Jump Drop Point entirely
+	bcast          Broadcaster
+	gate           *anticheat.NonceGate
+	cfg            Config
+	rng            *rand.Rand
 
 	cmds       chan command
 	seq        uint64
@@ -185,14 +186,19 @@ type Engine struct {
 	reg     *registry
 	session *Session
 
-	curCell      *Cell
-	curTrack     *Track
-	curRow       int
-	roundKey     string // BuzzLock key for the active buzz round
-	trackStartMs int64  // server epoch ms when the current track started
-	pausedAtMs   int64  // playback position when paused on a buzz
-	buzzWinner   string // playerID currently holding the lock
-	partial      pendingPartial
+	curCell  *Cell
+	curTrack *Track
+	// curDropPointMs caches e.curTrack's drop-point mark (nil = none known),
+	// refreshed whenever curTrack is set to a new track and whenever
+	// onAdminSetDropPoint successfully writes one — avoids a DB round-trip on
+	// every onAdminJumpToDropPoint call and every admin position broadcast.
+	curDropPointMs *int64
+	curRow         int
+	roundKey       string // BuzzLock key for the active buzz round
+	trackStartMs   int64  // server epoch ms when the current track started
+	pausedAtMs     int64  // playback position when paused on a buzz
+	buzzWinner     string // playerID currently holding the lock
+	partial        pendingPartial
 
 	// ---- buzz-collection window (§4B fairness, Run-loop-owned) ----
 	// buzzWindowMs is the resolved window length. >0 opens an async collection
@@ -272,8 +278,9 @@ type Engine struct {
 // NewEngine wires the engine to its dependencies (all injected for testing).
 // lyricsStore is optional (nil is fine, e.g. no Postgres/in-memory repo) —
 // nil means every lyric lookup falls back straight to lyrics.Fetch, exactly
-// matching pre-cache behavior.
-func NewEngine(repo GameRepo, lock BuzzLock, audio AudioDevice, lyrics LyricsProvider, lyricsStore LyricsTextStore, bcast Broadcaster, gate *anticheat.NonceGate, cfg Config) *Engine {
+// matching pre-cache behavior. dropPointStore is likewise optional — nil
+// disables Mark/Jump Drop Point entirely.
+func NewEngine(repo GameRepo, lock BuzzLock, audio AudioDevice, lyrics LyricsProvider, lyricsStore LyricsTextStore, dropPointStore DropPointStore, bcast Broadcaster, gate *anticheat.NonceGate, cfg Config) *Engine {
 	rng := cfg.Rand
 	if rng == nil {
 		rng = rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -309,25 +316,26 @@ func NewEngine(repo GameRepo, lock BuzzLock, audio AudioDevice, lyrics LyricsPro
 		revCfg.Alternate = cfg.RevealAlternate
 	}
 	return &Engine{
-		repo:        repo,
-		lock:        lock,
-		audio:       audio,
-		lyrics:      lyrics,
-		lyricsStore: lyricsStore,
-		bcast:       bcast,
-		gate:      gate,
-		cfg:       cfg,
-		rng:       rng,
-		cmds:      make(chan command, 256),
-		state:     protocol.StateLobby,
-		reg:       newRegistry(),
-		session:   &Session{ID: cfg.SessionID, SkipThresholdPct: cfg.SkipThresholdPct, State: string(protocol.StateLobby)},
-		revealCfg:    revCfg.clamp(),
-		connIP:       map[string]string{},
-		pointFactor:  1.0,
-		lyricCache:   map[string]*lyricEntry{},
-		buzzWindowMs: buzzWindowMs,
-		cellVisits:   map[string]int{},
+		repo:           repo,
+		lock:           lock,
+		audio:          audio,
+		lyrics:         lyrics,
+		lyricsStore:    lyricsStore,
+		dropPointStore: dropPointStore,
+		bcast:          bcast,
+		gate:           gate,
+		cfg:            cfg,
+		rng:            rng,
+		cmds:           make(chan command, 256),
+		state:          protocol.StateLobby,
+		reg:            newRegistry(),
+		session:        &Session{ID: cfg.SessionID, SkipThresholdPct: cfg.SkipThresholdPct, State: string(protocol.StateLobby)},
+		revealCfg:      revCfg.clamp(),
+		connIP:         map[string]string{},
+		pointFactor:    1.0,
+		lyricCache:     map[string]*lyricEntry{},
+		buzzWindowMs:   buzzWindowMs,
+		cellVisits:     map[string]int{},
 	}
 }
 
@@ -741,7 +749,10 @@ func (e *Engine) dispatch(connID string, role protocol.Role, env protocol.Client
 		protocol.CMsgAdminSetThresh,
 		protocol.CMsgAdminEndGame,
 		cmsgAdminSetRevealCfg,
-		cmsgAdminSkipDailyDouble:
+		cmsgAdminSkipDailyDouble,
+		cmsgAdminSeek,
+		cmsgAdminSetDropPoint,
+		cmsgAdminJumpToDropPoint:
 		if role != protocol.RoleAdmin {
 			e.sendError(connID, "forbidden", "admin role required")
 			return
@@ -787,6 +798,12 @@ func (e *Engine) dispatchAdmin(connID string, env protocol.ClientEnvelope) {
 		e.onAdminSetRevealCfg(connID, env)
 	case cmsgAdminSkipDailyDouble:
 		e.skipDailyDouble()
+	case cmsgAdminSeek:
+		e.onAdminSeek(connID, env)
+	case cmsgAdminSetDropPoint:
+		e.onAdminSetDropPoint(connID, env)
+	case cmsgAdminJumpToDropPoint:
+		e.onAdminJumpToDropPoint(connID, env)
 	case protocol.CMsgAdminEndGame:
 		e.transitionTo(protocol.StateGameOver)
 		e.persistScores()
@@ -1045,6 +1062,7 @@ func (e *Engine) assignDailyDoubles() {
 func (e *Engine) startTrack(cell *Cell, track *Track) {
 	e.curCell = cell
 	e.curTrack = track
+	e.refreshCurDropPoint()
 	e.curRow = cell.Row
 	e.trackStartMs = nowMs()
 	e.pausedAtMs = 0
@@ -1969,6 +1987,7 @@ func (e *Engine) startDailyDoublePerformance(performer *Player, track *Track) {
 	e.clearReveal() // defensive: no masked-reveal clock is used for a performance
 	e.curCell = cell
 	e.curTrack = track
+	e.refreshCurDropPoint()
 	e.curRow = cell.Row
 	e.trackStartMs = nowMs()
 	e.cellPicker = performer.ID
@@ -2168,6 +2187,118 @@ func (e *Engine) onAdminPlayback(connID string, env protocol.ClientEnvelope) {
 	}
 }
 
+// CONTRACT-QUESTION: cmsgAdminSeek lets the control room scrubber jump
+// playback to an arbitrary position. protocol.go's AdminPlaybackData is
+// {action string} only, with no position field, so a new local type carries
+// it. Defined here per the fixed-contract process; discuss with the project
+// owner for promotion into protocol.go on a version bump.
+const cmsgAdminSeek protocol.ClientMsgType = "admin.seek"
+
+type adminSeekData struct {
+	PositionMs int64 `json:"positionMs"`
+}
+
+// onAdminSeek jumps Spotify playback to an admin-chosen position, for the
+// control-room scrubber.
+func (e *Engine) onAdminSeek(connID string, env protocol.ClientEnvelope) {
+	var d adminSeekData
+	if err := json.Unmarshal(env.Data, &d); err != nil {
+		e.sendError(connID, "badSeek", err.Error())
+		return
+	}
+	e.seekTo(d.PositionMs)
+}
+
+// seekTo issues the actual playback jump: commands Spotify to positionMs and
+// broadcasts the same to stage. Shared by onAdminSeek and
+// onAdminJumpToDropPoint. Deliberately does NOT touch e.trackStartMs/
+// e.pausedAtMs: unlike resumeAudio's re-anchor (which only ever restores a
+// position identical to where the round's own decay clock already was, since
+// nothing moves playback except the round itself), a seek can jump the song
+// anywhere — including past the 60s decay window scoring.go caps at. Letting
+// decay follow the seek would let an admin cueing up a specific part of a
+// song accidentally zero out the bonus for every player. Decay stays on its
+// own clock; only the song's playback position moves.
+func (e *Engine) seekTo(positionMs int64) {
+	if e.curTrack == nil {
+		return
+	}
+	_ = e.audio.Play(context.Background(), e.curTrack.SpotifyURI, positionMs)
+	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{
+		Action: "play", TrackURI: e.curTrack.SpotifyURI, PositionMs: positionMs,
+	}))
+}
+
+// refreshCurDropPoint caches e.curTrack's drop-point mark (nil = none known),
+// so onAdminJumpToDropPoint and the admin position broadcast don't need a DB
+// round-trip per call. Called whenever curTrack is set to a new track.
+func (e *Engine) refreshCurDropPoint() {
+	e.curDropPointMs = nil
+	if e.dropPointStore == nil || e.curTrack == nil {
+		return
+	}
+	if ms, ok, err := e.dropPointStore.GetDropPoint(context.Background(), e.curTrack.SpotifyURI); err == nil && ok {
+		e.curDropPointMs = &ms
+	}
+}
+
+// CONTRACT-QUESTION: cmsgAdminSetDropPoint/cmsgAdminJumpToDropPoint let the
+// control room mark a song's "best part" position once (reusing the
+// scrubber's live position) and jump back to it later. protocol.go has no
+// field for this, so these are local types per the fixed-contract process;
+// discuss with the project owner for promotion into protocol.go on a
+// version bump.
+const (
+	cmsgAdminSetDropPoint    protocol.ClientMsgType = "admin.setDropPoint"
+	cmsgAdminJumpToDropPoint protocol.ClientMsgType = "admin.jumpToDropPoint"
+)
+
+type adminSetDropPointData struct {
+	PositionMs int64 `json:"positionMs"`
+}
+
+// dropPointSeekBufferMs is how far before the marked position "Jump to Drop"
+// actually seeks — a short lead-in so the drop itself isn't missed. The
+// user's own ask was "3, maybe 5" seconds; splitting the difference as a
+// named, trivially tunable constant.
+const dropPointSeekBufferMs = 4000
+
+// onAdminSetDropPoint marks the CURRENTLY PLAYING track's drop point at the
+// given position, always as a human ("manual") mark — this handler is only
+// ever reachable from the control room's own "Mark Drop Point" button, never
+// from any future automation (which would call SetDropPoint directly with a
+// different source, bypassing this handler entirely).
+func (e *Engine) onAdminSetDropPoint(connID string, env protocol.ClientEnvelope) {
+	var d adminSetDropPointData
+	if err := json.Unmarshal(env.Data, &d); err != nil {
+		e.sendError(connID, "badSetDropPoint", err.Error())
+		return
+	}
+	if e.dropPointStore == nil || e.curTrack == nil {
+		return
+	}
+	if err := e.dropPointStore.SetDropPoint(context.Background(), e.curTrack.SpotifyURI, d.PositionMs, "manual"); err != nil {
+		log.Printf("[engine] setDropPoint: %v", err)
+		return
+	}
+	e.curDropPointMs = &d.PositionMs
+}
+
+// onAdminJumpToDropPoint seeks to the current track's marked drop point minus
+// a short lead-in buffer, via the same seekTo path (and the same deliberate
+// decay-independence) as the scrubber's manual seek.
+func (e *Engine) onAdminJumpToDropPoint(connID string, _ protocol.ClientEnvelope) {
+	if e.dropPointStore == nil || e.curTrack == nil || e.curDropPointMs == nil {
+		e.sendError(connID, "noDropPoint", "no drop point set for the current track")
+		return
+	}
+	target := *e.curDropPointMs - dropPointSeekBufferMs
+	if target < 0 {
+		target = 0
+	}
+	e.seekTo(target)
+}
+
 func (e *Engine) onAdminAward(connID string, env protocol.ClientEnvelope) {
 	var d protocol.AdminAwardData
 	if err := json.Unmarshal(env.Data, &d); err != nil {
@@ -2362,6 +2493,7 @@ func (e *Engine) onStagePlayerState(connID string, env protocol.ClientEnvelope) 
 	if err := json.Unmarshal(env.Data, &d); err != nil {
 		return
 	}
+	e.broadcastPlaybackPosition(d)
 	if !d.TrackEnded {
 		return
 	}
@@ -2375,6 +2507,43 @@ func (e *Engine) onStagePlayerState(connID string, env protocol.ClientEnvelope) 
 			e.finishDailyDouble()
 		}
 	}
+}
+
+// CONTRACT-QUESTION: smsgPlaybackPosition relays the live playback position
+// stage already reports (protocol.go's StagePlayerStateData, used today only
+// for TrackEnded) to the admin control-room scrubber. Admin-only; carries no
+// track metadata beyond duration (already known server-side per track, same
+// field used for LRCLIB duration-matching), so it adds nothing a trusted
+// admin role can't already see elsewhere.
+const smsgPlaybackPosition protocol.ServerMsgType = "playbackPosition"
+
+type playbackPositionData struct {
+	PositionMs   int64 `json:"positionMs"`
+	DurationMs   int64 `json:"durationMs"`
+	Paused       bool  `json:"paused"`
+	HasDropPoint bool  `json:"hasDropPoint"`
+	DropPointMs  int64 `json:"dropPointMs,omitempty"`
+}
+
+// broadcastPlaybackPosition relays stage's live position/pause state to the
+// admin scrubber, plus the current track's cached drop-point mark (if any)
+// so the UI can render a marker on the bar and enable/disable "Jump to
+// Drop" without a separate round-trip. No-ops with no track loaded (nothing
+// to show).
+func (e *Engine) broadcastPlaybackPosition(d protocol.StagePlayerStateData) {
+	if e.curTrack == nil {
+		return
+	}
+	pd := playbackPositionData{
+		PositionMs: d.PositionMs,
+		DurationMs: e.curTrack.DurationMs,
+		Paused:     d.Paused,
+	}
+	if e.curDropPointMs != nil {
+		pd.HasDropPoint = true
+		pd.DropPointMs = *e.curDropPointMs
+	}
+	e.bcast.Broadcast(protocol.RoleAdmin, e.envelope(smsgPlaybackPosition, pd))
 }
 
 // ---------------------------------------------------------------------------

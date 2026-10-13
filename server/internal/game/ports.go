@@ -79,6 +79,25 @@ type LyricsTextStore interface {
 	GetResolvedLyrics(ctx context.Context, spotifyURI string) (lrcText string, ok bool, err error)
 }
 
+// DropPointStore is an additive port, mirroring LyricsTextStore's shape: a
+// lookup (and write) into the admin board builder's global drop-point cache
+// (track_drop_point, keyed by Spotify URI) — a marked "best part" position
+// for a song, reused across every board/Daily Double placement. Optional:
+// nil disables the control room's Mark/Jump Drop Point handlers entirely
+// (they no-op), matching pre-feature behavior exactly.
+type DropPointStore interface {
+	// GetDropPoint returns the cached drop-point position for spotifyURI, if
+	// any. ok=false (err=nil) means no row exists yet.
+	GetDropPoint(ctx context.Context, spotifyURI string) (positionMs int64, ok bool, err error)
+	// SetDropPoint upserts a drop-point position. Implementations must never
+	// let an automated write (source != "manual") overwrite an existing
+	// human-set ("manual") row — the lesson from the lyrics-cache rescan
+	// bug: a confirmed-good human decision must not be silently clobbered by
+	// a guess. A manual write always wins, including over another manual
+	// write (the admin adjusting their own mark).
+	SetDropPoint(ctx context.Context, spotifyURI string, positionMs int64, source string) error
+}
+
 // InboundHandler is the transport layer's view of the engine. The transport
 // owns connections and decodes frames; it forwards lifecycle + decoded client
 // messages here. The engine runs a single command loop, so these calls must be

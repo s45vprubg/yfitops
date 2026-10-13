@@ -112,6 +112,7 @@ export default function App() {
               nonce={state.nonce}
               adminSecret={secret}
               spotifyConnected={spotifyConnected}
+              playback={state.playback}
             />
             {/* Right column split: live telemetry on top, ranked scoreboard below. */}
             <div className="grid min-h-0 grid-rows-[1.4fr_1fr]">

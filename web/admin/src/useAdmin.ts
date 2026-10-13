@@ -37,6 +37,20 @@ export interface CheatReport {
   players: CheatEntry[];
 }
 
+// Live playback position for the control-room scrubber (CONTRACT-QUESTION
+// smsgPlaybackPosition; not in shared protocol). receivedAtMs is stamped
+// client-side on arrival so the UI can interpolate smooth motion between
+// snapshots the same way ActiveRound.tsx's point timer interpolates from a
+// startTime anchor rather than storing a continuously-ticking number.
+export interface PlaybackPosition {
+  positionMs: number;
+  durationMs: number;
+  paused: boolean;
+  receivedAtMs: number;
+  hasDropPoint: boolean;
+  dropPointMs?: number;
+}
+
 // The admin client holds NO authoritative state (§9). Everything below is a
 // straight render of the most recent server payload. On reconnect the backend
 // re-emits these via FULL_STATE_SYNC and the UI snaps back to the live state.
@@ -54,6 +68,7 @@ export interface AdminState {
   scoreboard?: ScoreboardData;
   revealCfg?: AdminRevealCfgData; // current letter-reveal timing knobs
   cheat?: CheatReport; // anti-cheat signals (IP, shared-ip / multi-conn flags)
+  playback?: PlaybackPosition; // live scrubber position/duration/paused
   // Daily Double status (sanitized: handle/ID only, no track data). Undefined
   // when not in one; performing=false means the contestant is still deciding
   // or picking a song (Force Skip applies), true means a track is playing
@@ -70,6 +85,9 @@ export interface AdminActions {
   select: (d: AdminSelectData) => void;
   grade: (d: AdminGradeData) => void;
   playback: (action: AdminPlaybackData["action"]) => void;
+  seek: (positionMs: number) => void;
+  markDropPoint: (positionMs: number) => void;
+  jumpToDrop: () => void;
   award: (d: AdminAwardData) => void;
   kick: (d: AdminKickData) => void;
   reveal: () => void;
@@ -141,6 +159,10 @@ export function useAdmin(): [AdminState, AdminActions] {
       });
       client.on("cheatReport", (env: ServerEnvelope) => {
         patch({ cheat: env.d as CheatReport });
+      });
+      client.on("playbackPosition", (env: ServerEnvelope) => {
+        const d = env.d as Omit<PlaybackPosition, "receivedAtMs">;
+        patch({ playback: { ...d, receivedAtMs: Date.now() } });
       });
       client.on("scoreboard", (env: ServerEnvelope) => {
         patch({ scoreboard: env.d as ScoreboardData });
@@ -263,6 +285,10 @@ export function useAdmin(): [AdminState, AdminActions] {
     grade: (d) => sendAction<AdminGradeData>("admin.grade", d),
     playback: (action) =>
       sendAction<AdminPlaybackData>("admin.playback", { action }),
+    seek: (positionMs) => sendAction<{ positionMs: number }>("admin.seek", { positionMs }),
+    markDropPoint: (positionMs) =>
+      sendAction<{ positionMs: number }>("admin.setDropPoint", { positionMs }),
+    jumpToDrop: () => sendAction("admin.jumpToDropPoint"),
     award: (d) => sendAction<AdminAwardData>("admin.award", d),
     kick: (d) => sendAction<AdminKickData>("admin.kick", d),
     reveal: () => sendAction("admin.reveal"),

@@ -76,10 +76,12 @@ func main() {
 
 	var repo game.GameRepo
 	var lyricsStore game.LyricsTextStore
+	var dropPointStore game.DropPointStore
 	var needSampleBoard bool
 	if pr, err := store.NewPostgresRepo(ctx, cfg.PostgresDSN); err == nil {
 		repo = pr
-		lyricsStore = pr // DB-first lyrics lookup; nil (live-fetch-only) without Postgres
+		lyricsStore = pr    // DB-first lyrics lookup; nil (live-fetch-only) without Postgres
+		dropPointStore = pr // Mark/Jump Drop Point; nil (feature disabled) without Postgres
 		log.Printf("repo: Postgres")
 		if b, berr := pr.LoadBoard(ctx, cfg.SessionID()); berr != nil || b == nil {
 			log.Printf("repo: no board attached for session %q — use Board Builder to create and load one", cfg.SessionID())
@@ -127,7 +129,7 @@ func main() {
 	// initial values; the control room can tune them live.
 	revAlt, revAltSet := envBool("YFI_REVEAL_ALTERNATE")
 	revEase, revEaseSet := envIntSet("YFI_REVEAL_EASE_MS")
-	eng := game.NewEngine(repo, lock, audio, lyr, lyricsStore, hub, gate, game.Config{
+	eng := game.NewEngine(repo, lock, audio, lyr, lyricsStore, dropPointStore, hub, gate, game.Config{
 		SessionID:          cfg.SessionID(),
 		AdminSecret:        cfg.AdminSecret,
 		SkipThresholdPct:   cfg.DefaultSkipThresholdPct,

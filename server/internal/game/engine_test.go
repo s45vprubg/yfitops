@@ -200,7 +200,7 @@ func newHarness(t *testing.T) *harness {
 	repo := newFakeRepo()
 	audio := &fakeAudio{}
 	gate := anticheat.NewNonceGate([]byte("test-secret"))
-	e := NewEngine(repo, lk, audio, fakeLyrics{}, nil, bc, gate, Config{
+	e := NewEngine(repo, lk, audio, fakeLyrics{}, nil, nil, bc, gate, Config{
 		SessionID:        "s1",
 		SkipThresholdPct: 50,
 		// Resolve buzzes synchronously (negative sentinel) so existing
@@ -1296,5 +1296,107 @@ func TestMobilePlayerCount(t *testing.T) {
 	h.join("c3", "fp3", "carol")
 	if n := h.e.MobilePlayerCount(); n != 3 {
 		t.Fatalf("count after 3 mobile joins = %d, want 3", n)
+	}
+}
+
+// TestAdminSeek_SeeksWithoutTouchingDecayClock covers the control-room
+// scrubber: it must command Spotify to the chosen position and broadcast the
+// same to stage, but must NOT re-anchor trackStartMs/pausedAtMs the way
+// resumeAudio does on pause/resume — a seek can jump the song anywhere
+// (including past scoring.go's 60s decay window), and letting decay follow
+// would zero out the bonus just because the admin cued to a later part of
+// the song. This is a deliberate design decision, not an oversight; this
+// test is the regression guard for it.
+func TestAdminSeek_SeeksWithoutTouchingDecayClock(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.joinStage("stage")
+	h.selectCell("admin", 1, 1)
+
+	var trackStartBefore, pausedAtBefore int64
+	h.sync(func() {
+		trackStartBefore = h.e.trackStartMs
+		pausedAtBefore = h.e.pausedAtMs
+	})
+
+	const seekTo = int64(42000)
+	d, _ := json.Marshal(adminSeekData{PositionMs: seekTo})
+	h.e.OnMessage("admin", protocol.RoleAdmin, protocol.ClientEnvelope{Type: cmsgAdminSeek, Data: d, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+
+	if last, ok := h.audio.last(); !ok || last.method != "play" || last.uri != "spotify:track:secret" || last.pos != seekTo {
+		t.Errorf("audio.last() = %+v, want play spotify:track:secret @ %d", last, seekTo)
+	}
+
+	foundSeekFrame := false
+	h.bcast.mu.Lock()
+	for _, f := range h.bcast.frames {
+		if f.env.Type == protocol.SMsgAudio {
+			var ad protocol.AudioData
+			_ = json.Unmarshal(f.env.Data, &ad)
+			if ad.Action == "play" && ad.PositionMs == seekTo && ad.TrackURI == "spotify:track:secret" {
+				foundSeekFrame = true
+			}
+		}
+	}
+	h.bcast.mu.Unlock()
+	if !foundSeekFrame {
+		t.Errorf("expected an SMsgAudio{action:play, positionMs:%d} frame after seek", seekTo)
+	}
+
+	var trackStartAfter, pausedAtAfter int64
+	h.sync(func() {
+		trackStartAfter = h.e.trackStartMs
+		pausedAtAfter = h.e.pausedAtMs
+	})
+	if trackStartAfter != trackStartBefore {
+		t.Errorf("trackStartMs changed by seek: %d -> %d, want unchanged", trackStartBefore, trackStartAfter)
+	}
+	if pausedAtAfter != pausedAtBefore {
+		t.Errorf("pausedAtMs changed by seek: %d -> %d, want unchanged", pausedAtBefore, pausedAtAfter)
+	}
+}
+
+// TestBroadcastPlaybackPosition_AdminOnly covers the server->admin relay of
+// stage's live position reports (previously received and silently discarded
+// except for the TrackEnded field). Must reach admin only — never mobile or
+// stage — and must carry the current track's known duration.
+func TestBroadcastPlaybackPosition_AdminOnly(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.joinStage("stage")
+	h.selectCell("admin", 1, 1)
+	h.bcast.reset()
+
+	d, _ := json.Marshal(protocol.StagePlayerStateData{PositionMs: 5000, Paused: false, TrackEnded: false})
+	h.e.OnMessage("stage", protocol.RoleStage, protocol.ClientEnvelope{Type: protocol.CMsgStagePlayerState, Data: d, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+
+	var toAdmin, toOther int
+	var got playbackPositionData
+	h.bcast.mu.Lock()
+	for _, f := range h.bcast.frames {
+		if f.env.Type != smsgPlaybackPosition {
+			continue
+		}
+		if f.role == protocol.RoleAdmin {
+			toAdmin++
+			_ = json.Unmarshal(f.env.Data, &got)
+		} else {
+			toOther++
+		}
+	}
+	h.bcast.mu.Unlock()
+
+	if toAdmin == 0 {
+		t.Fatal("expected a playbackPosition frame to RoleAdmin, got none")
+	}
+	if toOther != 0 {
+		t.Errorf("playbackPosition leaked to a non-admin role: %d frame(s)", toOther)
+	}
+	if got.PositionMs != 5000 || got.DurationMs != 200000 || got.Paused {
+		t.Errorf("playbackPositionData = %+v, want {5000 200000 false}", got)
 	}
 }

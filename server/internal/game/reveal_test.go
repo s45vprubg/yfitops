@@ -20,7 +20,7 @@ func newRevealHarness(t *testing.T) *harness {
 	repo := newFakeRepo()
 	audio := &fakeAudio{}
 	gate := anticheat.NewNonceGate([]byte("test-secret"))
-	e := NewEngine(repo, lk, audio, fakeLyrics{}, nil, bc, gate, Config{
+	e := NewEngine(repo, lk, audio, fakeLyrics{}, nil, nil, bc, gate, Config{
 		SessionID:        "s1",
 		SkipThresholdPct: 50,
 		RevealIntervalMs: 250, // clamp floor

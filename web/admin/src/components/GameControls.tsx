@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { GameState } from "@shared/protocol";
-import type { AdminActions, ConnStatus } from "../useAdmin";
+import type { AdminActions, ConnStatus, PlaybackPosition } from "../useAdmin";
 import { createAdminApi } from "../useAdminApi";
 import StatusPill from "./StatusPill";
 import { useModal } from "./Modal";
@@ -13,6 +13,71 @@ interface Props {
   actions: AdminActions;
   adminSecret: string;
   spotifyConnected: boolean;
+  playback?: PlaybackPosition;
+}
+
+function formatMs(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, "0")}`;
+}
+
+// Scrubber — click-to-seek playback bar. Interpolates smoothly between the
+// server's discrete playbackPosition snapshots (positionMs + receivedAtMs)
+// the same way ActiveRound.tsx's point timer interpolates from a startTime
+// anchor via requestAnimationFrame, rather than storing a continuously
+// ticking number in state.
+function Scrubber({
+  playback,
+  onSeek,
+}: {
+  playback?: PlaybackPosition;
+  onSeek: (positionMs: number) => void;
+}) {
+  const barRef = useRef<HTMLDivElement>(null);
+  const [, forceTick] = useState(0);
+
+  useEffect(() => {
+    if (!playback || playback.paused) return;
+    let raf: number;
+    const loop = () => {
+      forceTick((t) => t + 1);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [playback]);
+
+  if (!playback || playback.durationMs <= 0) return null;
+
+  const elapsed = playback.paused
+    ? playback.positionMs
+    : playback.positionMs + (Date.now() - playback.receivedAtMs);
+  const clamped = Math.min(Math.max(elapsed, 0), playback.durationMs);
+  const frac = clamped / playback.durationMs;
+
+  return (
+    <div
+      ref={barRef}
+      onClick={(e) => {
+        const bar = barRef.current;
+        if (!bar) return;
+        const rect = bar.getBoundingClientRect();
+        const clickFrac = Math.min(Math.max((e.clientX - rect.left) / rect.width, 0), 1);
+        onSeek(Math.round(clickFrac * playback.durationMs));
+      }}
+      title={`${formatMs(clamped)} / ${formatMs(playback.durationMs)}`}
+      className="relative h-2 w-40 cursor-pointer overflow-hidden rounded-full border border-edge bg-panel"
+    >
+      <div className="absolute inset-y-0 left-0 bg-accent" style={{ width: `${frac * 100}%` }} />
+      {playback.hasDropPoint && playback.dropPointMs !== undefined && (
+        <div
+          title={`Drop point: ${formatMs(playback.dropPointMs)}`}
+          className="absolute inset-y-0 w-0.5 bg-amber-400"
+          style={{ left: `${(playback.dropPointMs / playback.durationMs) * 100}%` }}
+        />
+      )}
+    </div>
+  );
 }
 
 const ACTIVE_GAME_STATES: GameState[] = [
@@ -48,6 +113,7 @@ export default function GameControls({
   actions,
   adminSecret,
   spotifyConnected,
+  playback,
 }: Props) {
   const { confirm } = useModal();
   const api = useMemo(() => createAdminApi(adminSecret), [adminSecret]);
@@ -112,6 +178,31 @@ export default function GameControls({
         >
           Pause
         </button>
+      )}
+
+      {trackLoaded && <Scrubber playback={playback} onSeek={actions.seek} />}
+
+      {trackLoaded && (
+        <>
+          <button
+            onClick={() => playback && actions.markDropPoint(
+              playback.paused ? playback.positionMs : playback.positionMs + (Date.now() - playback.receivedAtMs),
+            )}
+            disabled={!playback}
+            title="Mark the current position as this song's drop/chorus"
+            className="rounded border border-edge bg-panel px-2 py-1.5 text-xs font-semibold text-slate-300 hover:bg-panel3 disabled:pointer-events-none disabled:opacity-30"
+          >
+            Mark Drop
+          </button>
+          <button
+            onClick={actions.jumpToDrop}
+            disabled={!playback?.hasDropPoint}
+            title={playback?.hasDropPoint ? "Jump to the marked drop point" : "No drop point marked for this song yet"}
+            className="rounded border border-amber-700 bg-amber-950/30 px-2 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-900/40 disabled:pointer-events-none disabled:opacity-30"
+          >
+            Jump to Drop
+          </button>
+        </>
       )}
 
       {/* Single game action button: Start Game / End Game / New Game */}

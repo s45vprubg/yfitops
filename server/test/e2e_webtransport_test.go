@@ -167,7 +167,7 @@ func startServer(t *testing.T) (url string, teardown func()) {
 	gate := anticheat.NewNonceGate([]byte(cfg.NonceSecret))
 	hub := transport.NewHub()
 
-	eng := game.NewEngine(repo, lock, spotify.New(cfg), lyrics.New(cfg), nil, hub, gate, game.Config{
+	eng := game.NewEngine(repo, lock, spotify.New(cfg), lyrics.New(cfg), nil, nil, hub, gate, game.Config{
 		SessionID:   cfg.SessionID(),
 		AdminSecret: cfg.AdminSecret,
 	})
