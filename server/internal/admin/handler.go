@@ -28,8 +28,10 @@ func NewHandler(store AdminStore, spotify SpotifySearcher, engine BoardReloader,
 }
 
 // SetLyricsProber wires an optional lyric-availability prober used when tracks
-// are added/imported. If nil, tracks are added without a probe (has_synced_lyrics
-// stays NULL and the track is treated as playable until a re-scan).
+// are added/imported. If nil, tracks are added without a probe (no
+// track_lyrics row is ever created for them, so the grid's gating treats them
+// as playable — see store.LoadBoardByID — while the Daily Double bucket's
+// hard lyrics requirement means they simply can't be added there).
 func (h *Handler) SetLyricsProber(p LyricsProber) { h.lyrics = p }
 
 // SetCategorizer wires the optional AI board builder. If nil, the build-with-AI
@@ -59,8 +61,12 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("DELETE /api/boards/{id}/tracks/{trackId}", wrap(h.deleteTrack))
 	// Toggle the play-anyway override for a lyric-less track.
 	mux.Handle("PATCH /api/boards/{id}/tracks/{trackId}/override", wrap(h.setTrackOverride))
-	// Re-probe LRCLIB for every track on a board (lyrics can appear over time).
+	// Probe LRCLIB for every never-attempted track on a board.
 	mux.Handle("POST /api/boards/{id}/rescan-lyrics", wrap(h.rescanLyrics))
+	// Retry LRCLIB for one track regardless of its current lyrics status.
+	mux.Handle("POST /api/boards/{id}/tracks/{trackId}/requery-lyrics", wrap(h.requeryLyrics))
+	// Admin-pasted LRC text for a track whose song auto-fetch can't find.
+	mux.Handle("PUT /api/boards/{id}/tracks/{trackId}/lyrics", wrap(h.setLyricsManual))
 	// AI board builder: propose category buckets + placements from the library.
 	mux.Handle("POST /api/boards/{id}/ai-build", wrap(h.aiBuild))
 

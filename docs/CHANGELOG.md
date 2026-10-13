@@ -15,6 +15,64 @@ Migration 0007 (2026-08-27) adds `boards.daily_double_count` (default 2) and
 `board_dd_bucket_tracks` for the redesigned Daily Double — no data migration,
 purely additive.
 
+Migration 0008 (2026-10-13) adds `track_lyrics` (the new global lyrics cache)
+and **drops `board_tracks.has_synced_lyrics`** — the lyric-availability signal
+is now the join against `track_lyrics.status`, not a per-row boolean. Run
+`cd deploy && make migrate` before starting the new server/gameserver image.
+No backfill: every song's lyrics are re-resolved from scratch the first time
+each is probed (via "Check lyrics," board-add, or playlist import) under the
+new cache; nothing is lost, but a board with previously-known-good lyrics
+will show them as not-yet-resolved until the next probe.
+
+## [Unreleased] — 2026-10-13
+
+### Added
+- **Lyrics subsystem rewrite: a real, deduped, admin-correctable cache.**
+  Previously the admin "Check lyrics" rescan re-probed and overwrote every
+  track's lyric-availability flag unconditionally — a transient LRCLIB
+  error (timeout/429) was indistinguishable from "no lyrics" and silently
+  clobbered tracks that were already known-good, which is why a rescan could
+  lose more lyrics than it found. Lyrics are now stored as actual LRC text,
+  once per song (keyed by Spotify URI, shared by every board and the Daily
+  Double bucket a song appears on — never re-fetched twice), in a new
+  `track_lyrics` table with a `pending`/`not_found`/`resolved` status that a
+  transient error can never downgrade out of `resolved`.
+  - **Bulk "Check lyrics" only probes never-attempted songs** — known-good
+    and known-absent songs are left alone, so repeated clicks can't re-spend
+    LRCLIB calls or re-risk a false negative on songs that already have an
+    answer.
+  - **New per-track "Requery"** (↻) retries a song that previously came back
+    `not_found` or errored, independent of the bulk scan.
+  - **New manual lyrics entry** (✎): paste raw LRC text for a song auto-fetch
+    can't find; stored in the same cache a successful fetch would populate,
+    so it drives the identical karaoke overlay.
+  - **Daily Double now has a hard lyrics requirement.** The bucket previously
+    had no lyrics field at all and silently allowed anything in; adding a
+    song to the bucket is now rejected (409) unless it already has resolved
+    lyrics — there is no override for Daily Double, unlike the main grid.
+  - **Play-time lookup is DB-first.** The engine checks the resolved-lyrics
+    cache before ever calling LRCLIB during a live round, removing the
+    runtime dependency on LRCLIB for any song already resolved during board
+    building (previously every play re-fetched live, with only an
+    in-process, restart-wiped cache).
+  - **LRCLIB client fixes**, per LRCLIB's published API docs
+    (`https://lrclib.net/docs`): sends a required descriptive `User-Agent`
+    (previously the Go default, against LRCLIB's documented requirement);
+    classifies `404` as confirmed-absent vs. `429`/`503` as retryable
+    (one retry, honoring `Retry-After`) vs. other failures as a hard error,
+    instead of collapsing every non-success into "no lyrics"; batch probes
+    (rescan, playlist import) now run sequentially with a ~300ms delay
+    between requests per LRCLIB's documented batch-scan guidance, replacing
+    an 8-way concurrent worker pool that could rate-limit itself.
+
+### Changed
+- `server/internal/admin.Track`/`DailyDoubleTrack`: `HasSyncedLyrics *bool`
+  replaced by `LyricsStatus string` ("" / "pending" / "not_found" /
+  "resolved"); `web/admin`'s `TrackData`/`DailyDoubleTrackData` mirror this.
+- `game.NewEngine` takes a new `LyricsTextStore` parameter (nilable — nil
+  preserves the exact pre-cache always-live-fetch behavior, e.g. without
+  Postgres).
+
 ## [Unreleased] — 2026-07-01
 
 ### Added

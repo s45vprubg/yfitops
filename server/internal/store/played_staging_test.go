@@ -46,8 +46,9 @@ func TestStaging_PlayedStatePersistsAcrossReload(t *testing.T) {
 	})
 
 	for _, tid := range []string{trackA, trackB} {
-		lyr := true
-		if err := repo.AddTrack(ctx, &admin.Track{ID: tid, BoardID: boardID, Artist: "A", Song: "S", SpotifyURI: "spotify:track:" + tid, HasSyncedLyrics: &lyr}); err != nil {
+		// No track_lyrics row for these spotifyUris -> treated as playable by
+		// default (see store.LoadBoardByID), same as before this field existed.
+		if err := repo.AddTrack(ctx, &admin.Track{ID: tid, BoardID: boardID, Artist: "A", Song: "S", SpotifyURI: "spotify:track:" + tid}); err != nil {
 			t.Fatalf("add track %s: %v", tid, err)
 		}
 	}

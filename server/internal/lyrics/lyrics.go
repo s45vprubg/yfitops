@@ -7,11 +7,23 @@
 //
 // Karaoke is non-essential: when LRCLIB has no synced lyrics (404 or an empty
 // syncedLyrics field) Fetch returns (nil, nil) so the game simply shows none.
+//
+// Request shape and error handling follow LRCLIB's published API docs
+// (https://lrclib.net/docs):
+//   - a descriptive User-Agent is required ("we require you to identify your
+//     client in requests"),
+//   - 404 TrackNotFound means LRCLIB confirmed no match (not an error),
+//   - 429 (rate limited) and 503 ServerOverloaded are transient and carry a
+//     Retry-After header clients "must honor",
+//   - album_name is deliberately omitted from the request even though LRCLIB
+//     recommends it for match precision — accepted tradeoff, see
+//     docs/CHANGELOG.md.
 package lyrics
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,6 +50,11 @@ type LRCLIBClient struct {
 	baseURL string
 	http    HTTPClient
 }
+
+// userAgent identifies this client per LRCLIB's documented requirement
+// ("set the User-Agent header with your application's name, version, and a
+// link to its homepage/project page or an email address").
+const userAgent = "yfitops/1.0 (+https://github.com/s45vprubg/yfitops)"
 
 // New builds an LRCLIBClient from config (design_doc §6). The base URL comes
 // from cfg.LRCLIBBaseURL; the HTTP client is the stdlib default and can be
@@ -68,57 +85,124 @@ type lrclibResponse struct {
 	SyncedLyrics string `json:"syncedLyrics"`
 }
 
+// RateLimitError is returned by probeOnce on a 429/503 response. RetryAfter is
+// parsed from the documented Retry-After header (seconds), defaulting to 1s
+// per the docs ("usually 1 second" for 503) when the header is absent/invalid.
+type RateLimitError struct {
+	RetryAfter time.Duration
+}
+
+func (e *RateLimitError) Error() string {
+	return fmt.Sprintf("lyrics: rate limited, retry after %s", e.RetryAfter)
+}
+
+// maxRetryWait bounds how long a single Probe/Fetch call will sleep for a
+// Retry-After value before giving up — a misbehaving/huge Retry-After must
+// not hang a bulk rescan on one track indefinitely.
+const maxRetryWait = 10 * time.Second
+
 // Fetch implements game.LyricsProvider. It returns time-coded lyric lines for
 // the track, or (nil, nil) when no synced lyrics are available.
 func (c *LRCLIBClient) Fetch(ctx context.Context, artist, title string, durationSec int) ([]protocol.LyricLine, error) {
+	text, found, err := c.Probe(ctx, artist, title, durationSec)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	return ParseLRC(text), nil
+}
+
+// Probe fetches raw LRC text for a track and classifies the result per
+// LRCLIB's documented status codes:
+//   - found=false, err=nil: LRCLIB confirmed no lyrics exist (404 TrackNotFound,
+//     or a match with an empty syncedLyrics field).
+//   - err is a *RateLimitError: rate limited (429) or temporarily overloaded
+//     (503). Probe already waited out one Retry-After and retried once before
+//     returning this, so callers that still see it should back off further
+//     rather than retrying immediately.
+//   - err is any other error: transport failure, unexpected status, or a
+//     malformed response body — a genuine, non-retried-here failure.
+func (c *LRCLIBClient) Probe(ctx context.Context, artist, song string, durationSec int) (lrcText string, found bool, err error) {
+	text, found, err := c.probeOnce(ctx, artist, song, durationSec)
+	var rle *RateLimitError
+	if !errors.As(err, &rle) {
+		return text, found, err
+	}
+
+	wait := rle.RetryAfter
+	if wait > maxRetryWait {
+		wait = maxRetryWait
+	}
+	select {
+	case <-time.After(wait):
+	case <-ctx.Done():
+		return "", false, ctx.Err()
+	}
+	return c.probeOnce(ctx, artist, song, durationSec)
+}
+
+// probeOnce makes a single /api/get request with no retry logic.
+func (c *LRCLIBClient) probeOnce(ctx context.Context, artist, song string, durationSec int) (string, bool, error) {
 	q := url.Values{}
 	q.Set("artist_name", artist)
-	q.Set("track_name", title)
+	q.Set("track_name", song)
 	q.Set("duration", strconv.Itoa(durationSec))
 	endpoint := c.baseURL + "/api/get?" + q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, fmt.Errorf("lyrics: build request: %w", err)
+		return "", false, fmt.Errorf("lyrics: build request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", userAgent)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("lyrics: request: %w", err)
+		return "", false, fmt.Errorf("lyrics: request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// No match (or other client miss) -> karaoke just shows nothing.
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("lyrics: unexpected status %d", resp.StatusCode)
+	switch resp.StatusCode {
+	case http.StatusNotFound:
+		// LRCLIB confirmed no match -> karaoke just shows nothing.
+		return "", false, nil
+	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		// Docs: "the response body is not guaranteed to be JSON" for these —
+		// rely on the status code + Retry-After header only, never the body.
+		return "", false, &RateLimitError{RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}
+	case http.StatusOK:
+		// fall through to body parsing below
+	default:
+		return "", false, fmt.Errorf("lyrics: unexpected status %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxLyricsBytes))
 	if err != nil {
-		return nil, fmt.Errorf("lyrics: read body: %w", err)
+		return "", false, fmt.Errorf("lyrics: read body: %w", err)
 	}
 
 	var lr lrclibResponse
 	if err := json.Unmarshal(body, &lr); err != nil {
-		return nil, fmt.Errorf("lyrics: decode body: %w", err)
+		return "", false, fmt.Errorf("lyrics: decode body: %w", err)
 	}
 	if strings.TrimSpace(lr.SyncedLyrics) == "" {
-		return nil, nil
+		return "", false, nil
 	}
 
-	return ParseLRC(lr.SyncedLyrics), nil
+	return lr.SyncedLyrics, true, nil
 }
 
-// HasSyncedLyrics reports whether LRCLIB has time-coded lyrics for a track. Used
-// by the admin board builder to grey out karaoke-incompatible tracks. A fetch
-// error is treated as "no lyrics" (best-effort; a re-scan can retry).
-func (c *LRCLIBClient) HasSyncedLyrics(ctx context.Context, artist, song string, durationSec int) bool {
-	lines, err := c.Fetch(ctx, artist, song, durationSec)
-	return err == nil && len(lines) > 0
+// parseRetryAfter parses the Retry-After header (seconds, per RFC 7231 /
+// LRCLIB's docs) and falls back to 1s — the docs' own stated default for a
+// 503 — when the header is missing or not a valid non-negative integer.
+func parseRetryAfter(v string) time.Duration {
+	secs, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || secs < 0 {
+		return 1 * time.Second
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // tsRe matches a single LRC timestamp tag: [mm:ss.xx] or [mm:ss.xxx], with the

@@ -18,6 +18,9 @@ type mockStore struct {
 	ddTracks []DailyDoubleTrack
 	layout   *Layout
 	created  []string
+	// lyrics is the mock's global lyrics cache, keyed by spotifyUri — mirrors
+	// the real track_lyrics table closely enough for handler-level tests.
+	lyrics map[string]LyricsRecord
 }
 
 func (m *mockStore) CreateBoard(_ context.Context, id, name string) error {
@@ -83,8 +86,68 @@ func (m *mockStore) ListTracks(_ context.Context, _ string) ([]Track, error) { r
 func (m *mockStore) UnplacedTracks(_ context.Context, _ string) ([]Track, error) {
 	return m.tracks, nil
 }
-func (m *mockStore) DeleteTrack(_ context.Context, _ string) error         { return nil }
-func (m *mockStore) SetTrackLyrics(_ context.Context, _ string, _ *bool, _ *bool) error { return nil }
+func (m *mockStore) DeleteTrack(_ context.Context, _ string) error { return nil }
+func (m *mockStore) GetTrack(_ context.Context, trackID string) (*Track, error) {
+	for i := range m.tracks {
+		if m.tracks[i].ID == trackID {
+			return &m.tracks[i], nil
+		}
+	}
+	return nil, nil
+}
+func (m *mockStore) SetTrackOverride(_ context.Context, trackID string, override bool) error {
+	for i := range m.tracks {
+		if m.tracks[i].ID == trackID {
+			m.tracks[i].LyricsOverride = override
+		}
+	}
+	return nil
+}
+func (m *mockStore) GetLyricsStatus(_ context.Context, spotifyURI string) (*LyricsRecord, error) {
+	if m.lyrics == nil {
+		return nil, nil
+	}
+	if rec, ok := m.lyrics[spotifyURI]; ok {
+		return &rec, nil
+	}
+	return nil, nil
+}
+func (m *mockStore) GetLyricsStatusesForURIs(_ context.Context, uris []string) (map[string]LyricsRecord, error) {
+	out := map[string]LyricsRecord{}
+	for _, u := range uris {
+		if rec, ok := m.lyrics[u]; ok {
+			out[u] = rec
+		}
+	}
+	return out, nil
+}
+func (m *mockStore) UpsertLyricsResolved(_ context.Context, spotifyURI, lrcText, source string) error {
+	if m.lyrics == nil {
+		m.lyrics = map[string]LyricsRecord{}
+	}
+	m.lyrics[spotifyURI] = LyricsRecord{SpotifyURI: spotifyURI, Status: LyricsStatusResolved, Source: source}
+	return nil
+}
+func (m *mockStore) UpsertLyricsNotFound(_ context.Context, spotifyURI string) error {
+	if m.lyrics == nil {
+		m.lyrics = map[string]LyricsRecord{}
+	}
+	m.lyrics[spotifyURI] = LyricsRecord{SpotifyURI: spotifyURI, Status: LyricsStatusNotFound}
+	return nil
+}
+func (m *mockStore) UpsertLyricsError(_ context.Context, spotifyURI, errMsg string) error {
+	if m.lyrics == nil {
+		m.lyrics = map[string]LyricsRecord{}
+	}
+	rec := m.lyrics[spotifyURI]
+	if rec.Status != LyricsStatusResolved {
+		rec.Status = LyricsStatusPending
+	}
+	rec.SpotifyURI = spotifyURI
+	rec.LastError = errMsg
+	m.lyrics[spotifyURI] = rec
+	return nil
+}
 func (m *mockStore) AddColumn(_ context.Context, _ string, _ int, _ string) error { return nil }
 func (m *mockStore) RemoveColumn(_ context.Context, _ string, _ int) error { return nil }
 func (m *mockStore) RenameCategory(_ context.Context, _ string, _ int, _ string) error { return nil }
@@ -382,7 +445,19 @@ func TestSpotifyToken_RefreshFailed(t *testing.T) {
 // outcome — so this second POST would have come back 201 (with a bogus new
 // id) instead of 409, and this test would have failed.
 func TestQARegression_AddDailyDoubleTrack_DuplicateSpotifyURI_Returns409(t *testing.T) {
-	_, mux := newTestHandler()
+	// Daily Double has a hard lyrics requirement (no override): seed the mock's
+	// global lyrics cache with a resolved entry for this test's song so the
+	// add itself isn't rejected before the duplicate-handling behavior under
+	// test ever runs.
+	store := &mockStore{
+		boards: []Board{{ID: "brd_test", Name: "Test Board", Cols: 3}},
+		lyrics: map[string]LyricsRecord{
+			"spotify:track:qatest123": {SpotifyURI: "spotify:track:qatest123", Status: LyricsStatusResolved, Source: "manual"},
+		},
+	}
+	h := NewHandler(store, nil, &mockEngine{}, "test-secret")
+	mux := http.NewServeMux()
+	h.Register(mux)
 
 	first := strings.NewReader(`{"spotifyUri":"spotify:track:qatest123","artist":"QA Artist","song":"QA Song","durationMs":180000}`)
 	req := httptest.NewRequest("POST", "/api/boards/brd_test/daily-double-tracks", first)

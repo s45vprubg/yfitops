@@ -9,8 +9,17 @@ export interface BoardSummary {
   dailyDoubleCount: number;
 }
 
+// Lyrics status, mirrors server/internal/admin's LyricsStatus* constants.
+// "" means the song has never been attempted at all (treated as playable by
+// default on the grid — see admin.LyricsStatusUnknown); "pending" means an
+// attempt was made but errored transiently and should be retried; "not_found"
+// means LRCLIB confirmed no lyrics exist; "resolved" means lyric text is
+// stored and ready.
+export type LyricsStatus = "" | "pending" | "not_found" | "resolved";
+
 // A song in a board's standalone Daily Double bucket — independent of the
-// grid's category Track library.
+// grid's category Track library. Lyrics are a hard requirement here (no
+// override): the server rejects adding a track whose song isn't resolved.
 export interface DailyDoubleTrackData {
   id: string;
   boardId: string;
@@ -20,6 +29,7 @@ export interface DailyDoubleTrackData {
   albumArt: string;
   durationMs: number;
   createdAt: number;
+  lyricsStatus: LyricsStatus;
 }
 
 export interface TrackData {
@@ -31,10 +41,19 @@ export interface TrackData {
   albumArt: string;
   durationMs: number;
   createdAt: number;
-  // null = not yet probed; true/false = LRCLIB synced-lyric result.
-  hasSyncedLyrics: boolean | null;
+  lyricsStatus: LyricsStatus;
   // Admin chose to allow this track to play even without synced lyrics.
   lyricsOverride: boolean;
+}
+
+// One row of the global lyrics cache, keyed by Spotify URI — returned by the
+// requery/manual-entry endpoints so the caller can refresh a track's status
+// without a full re-list.
+export interface LyricsRecord {
+  spotifyUri: string;
+  status: LyricsStatus;
+  source?: "lrclib" | "manual";
+  lastError?: string;
 }
 
 export interface LayoutCell {
@@ -101,8 +120,16 @@ function api(secret: string) {
     deleteTrack: (boardId: string, trackId: string) => req<void>("DELETE", `/api/boards/${boardId}/tracks/${trackId}`),
     setTrackOverride: (boardId: string, trackId: string, override: boolean) =>
       req<void>("PATCH", `/api/boards/${boardId}/tracks/${trackId}/override`, { override }),
+    // Probes only never-attempted songs; known-resolved/not_found songs are
+    // left untouched (see server/internal/admin/tracks.go rescanLyrics).
     rescanLyrics: (boardId: string) =>
-      req<{ checked: number; withLyrics: number }>("POST", `/api/boards/${boardId}/rescan-lyrics`),
+      req<{ attempted: number; resolved: number }>("POST", `/api/boards/${boardId}/rescan-lyrics`),
+    // Retries LRCLIB for one track regardless of its current lyrics status.
+    requeryLyrics: (boardId: string, trackId: string) =>
+      req<LyricsRecord>("POST", `/api/boards/${boardId}/tracks/${trackId}/requery-lyrics`),
+    // Admin-pasted LRC text for a song auto-fetch couldn't find.
+    setLyricsManual: (boardId: string, trackId: string, lrcText: string) =>
+      req<LyricsRecord>("PUT", `/api/boards/${boardId}/tracks/${trackId}/lyrics`, { lrcText }),
     aiBuild: (boardId: string) =>
       req<{ categories: number; placed: number; total: number }>("POST", `/api/boards/${boardId}/ai-build`),
 

@@ -17,12 +17,16 @@ interface Props {
 // of any cell placement) and re-created here, so a Daily Double track can
 // never appear on the Jeopardy board. Bucket tracks are not themselves
 // draggable back out; remove via the ✕ button. Simpler than HoldingArea in
-// other ways too: no lyric-availability gating, no AI build.
+// other ways too: no override, no AI build — lyrics are a HARD requirement
+// here (unlike the grid): the server rejects any add whose song doesn't
+// already have resolved lyrics in the cache, so a song must be fetched,
+// requeried, or entered manually from the Track Library first.
 export default function DailyDoubleBucket({ api, boardId, tracks, onRefresh }: Props) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SpotifyResult[]>([]);
   const [loading, setLoading] = useState(false);
   const [adding, setAdding] = useState<Set<string>>(new Set());
+  const [addError, setAddError] = useState<string | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const search = useCallback(
@@ -48,6 +52,7 @@ export default function DailyDoubleBucket({ api, boardId, tracks, onRefresh }: P
 
   const addTrack = async (r: SpotifyResult) => {
     setAdding((s) => new Set(s).add(r.uri));
+    setAddError(null);
     try {
       await api.addDailyDoubleTrack(boardId, {
         spotifyUri: r.uri,
@@ -57,8 +62,10 @@ export default function DailyDoubleBucket({ api, boardId, tracks, onRefresh }: P
         durationMs: r.durationMs,
       });
       onRefresh();
-    } catch {
-      // dedup or other error — silently skip
+    } catch (e) {
+      // Most commonly the hard lyrics requirement (409) or a duplicate —
+      // surface it instead of silently dropping the click.
+      setAddError(e instanceof Error ? e.message : "Failed to add to Daily Double");
     } finally {
       setAdding((s) => {
         const n = new Set(s);
@@ -94,6 +101,7 @@ export default function DailyDoubleBucket({ api, boardId, tracks, onRefresh }: P
         className="rounded border border-edge bg-panel px-2 py-1 text-sm text-slate-200 placeholder-slate-500 outline-none focus:border-accent"
       />
       {loading && <div className="text-xs text-slate-500">Searching...</div>}
+      {addError && <div className="text-[11px] text-red-400">{addError}</div>}
       {results.length > 0 && (
         <div className="max-h-40 overflow-y-auto rounded border border-edge bg-panel">
           {results.map((r) => (

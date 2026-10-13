@@ -4,6 +4,7 @@ import type { AdminApi, TrackData } from "../../useAdminApi";
 import TrackCard from "./TrackCard";
 import SpotifySearch from "./SpotifySearch";
 import ImportPlaylist from "./ImportPlaylist";
+import LyricsEditorModal from "./LyricsEditorModal";
 import { useModal } from "../Modal";
 
 type SortKey = "none" | "title" | "artist";
@@ -22,9 +23,13 @@ export default function HoldingArea({ api, boardId, tracks, onRefresh, onDeleteT
   const [rescanning, setRescanning] = useState(false);
   const [building, setBuilding] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  const [requeryingId, setRequeryingId] = useState<string | null>(null);
+  const [manualLyricsTrack, setManualLyricsTrack] = useState<TrackData | null>(null);
   const { confirm } = useModal();
 
-  const noLyrics = tracks.filter((t) => t.hasSyncedLyrics === false && !t.lyricsOverride).length;
+  const noLyrics = tracks.filter(
+    (t) => (t.lyricsStatus === "pending" || t.lyricsStatus === "not_found") && !t.lyricsOverride
+  ).length;
 
   const handleRescan = async () => {
     setRescanning(true);
@@ -33,6 +38,15 @@ export default function HoldingArea({ api, boardId, tracks, onRefresh, onDeleteT
       onRefresh();
     } catch { /* surfaced via list refresh */ }
     setRescanning(false);
+  };
+
+  const handleRequeryLyrics = async (trackId: string) => {
+    setRequeryingId(trackId);
+    try {
+      await api.requeryLyrics(boardId, trackId);
+      onRefresh();
+    } catch { /* surfaced via list refresh */ }
+    setRequeryingId(null);
   };
 
   const handleAiBuild = async () => {
@@ -120,12 +134,31 @@ export default function HoldingArea({ api, boardId, tracks, onRefresh, onDeleteT
             className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto"
           >
             {sorted.map((t, i) => (
-              <TrackCard key={t.id} track={t} index={i} onDelete={onDeleteTrack} onToggleOverride={onToggleOverride} />
+              <TrackCard
+                key={t.id}
+                track={t}
+                index={i}
+                onDelete={onDeleteTrack}
+                onToggleOverride={onToggleOverride}
+                onRequeryLyrics={handleRequeryLyrics}
+                onOpenManualLyrics={setManualLyricsTrack}
+                requeryingLyrics={requeryingId === t.id}
+              />
             ))}
             {provided.placeholder}
           </div>
         )}
       </Droppable>
+
+      {manualLyricsTrack && (
+        <LyricsEditorModal
+          api={api}
+          boardId={boardId}
+          track={manualLyricsTrack}
+          onClose={() => setManualLyricsTrack(null)}
+          onSaved={onRefresh}
+        />
+      )}
     </div>
   );
 }

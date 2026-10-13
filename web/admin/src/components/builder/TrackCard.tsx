@@ -6,17 +6,41 @@ interface Props {
   index: number;
   onDelete?: (trackId: string) => void;
   onToggleOverride?: (trackId: string, override: boolean) => void;
+  onRequeryLyrics?: (trackId: string) => void;
+  onOpenManualLyrics?: (track: TrackData) => void;
+  requeryingLyrics?: boolean;
 }
 
-// A track is greyed out (won't be auto-played) when LRCLIB has no synced lyrics
-// AND the admin hasn't overridden it. hasSyncedLyrics === null means not yet
-// probed (treated as playable until a re-scan).
-function isLyricLess(t: TrackData): boolean {
-  return t.hasSyncedLyrics === false;
+// A track is greyed out (won't auto-play) when its song has no resolved
+// lyrics AND the admin hasn't overridden it. lyricsStatus === "" means never
+// attempted (treated as playable until a check is run); "pending"/"not_found"
+// means a check WAS run and came back without usable lyrics.
+function needsLyrics(t: TrackData): boolean {
+  return t.lyricsStatus === "pending" || t.lyricsStatus === "not_found";
 }
 
-export default function TrackCard({ track, index, onDelete, onToggleOverride }: Props) {
-  const lyricLess = isLyricLess(track);
+function statusLabel(t: TrackData): string {
+  if (t.lyricsStatus === "pending") return "⏳ check failed";
+  if (t.lyricsStatus === "not_found") return "⚠ no lyrics";
+  return "";
+}
+
+function statusTitle(t: TrackData): string | undefined {
+  if (t.lyricsStatus === "pending") return "The last lyrics check errored (timeout/rate limit) — use Requery to try again.";
+  if (t.lyricsStatus === "not_found") return "No synced lyrics — won't play unless overridden";
+  return undefined;
+}
+
+export default function TrackCard({
+  track,
+  index,
+  onDelete,
+  onToggleOverride,
+  onRequeryLyrics,
+  onOpenManualLyrics,
+  requeryingLyrics,
+}: Props) {
+  const lyricLess = needsLyrics(track);
   const dimmed = lyricLess && !track.lyricsOverride;
 
   return (
@@ -31,7 +55,7 @@ export default function TrackCard({ track, index, onDelete, onToggleOverride }: 
               ? "border-accent bg-accent/10"
               : "border-edge bg-panel2"
           } ${dimmed ? "opacity-45" : ""}`}
-          title={lyricLess ? "No synced lyrics — won't play unless overridden" : undefined}
+          title={statusTitle(track)}
         >
           {track.albumArt && (
             <img src={track.albumArt} alt="" className={`h-8 w-8 rounded ${dimmed ? "grayscale" : ""}`} />
@@ -42,21 +66,42 @@ export default function TrackCard({ track, index, onDelete, onToggleOverride }: 
           </div>
 
           {lyricLess && (
-            <button
-              onClick={(e) => { e.stopPropagation(); onToggleOverride?.(track.id, !track.lyricsOverride); }}
-              className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
-                track.lyricsOverride
-                  ? "bg-amber-500/20 text-amber-300"
-                  : "border border-amber-700/60 text-amber-400/80 hover:bg-amber-950/40"
-              }`}
-              title={
-                track.lyricsOverride
-                  ? "Playing despite no lyrics — click to disable"
-                  : "No synced lyrics. Click to allow playing anyway (no karaoke)."
-              }
-            >
-              {track.lyricsOverride ? "♪ playing" : "⚠ no lyrics"}
-            </button>
+            <div className="flex shrink-0 items-center gap-1">
+              <button
+                onClick={(e) => { e.stopPropagation(); onToggleOverride?.(track.id, !track.lyricsOverride); }}
+                className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
+                  track.lyricsOverride
+                    ? "bg-amber-500/20 text-amber-300"
+                    : "border border-amber-700/60 text-amber-400/80 hover:bg-amber-950/40"
+                }`}
+                title={
+                  track.lyricsOverride
+                    ? "Playing despite no lyrics — click to disable"
+                    : "No synced lyrics. Click to allow playing anyway (no karaoke)."
+                }
+              >
+                {track.lyricsOverride ? "♪ playing" : statusLabel(track)}
+              </button>
+              {onRequeryLyrics && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onRequeryLyrics(track.id); }}
+                  disabled={requeryingLyrics}
+                  className="rounded border border-edge px-1 py-0.5 text-[10px] text-slate-400 hover:text-white disabled:opacity-40"
+                  title="Retry LRCLIB for this song"
+                >
+                  {requeryingLyrics ? "…" : "↻"}
+                </button>
+              )}
+              {onOpenManualLyrics && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onOpenManualLyrics(track); }}
+                  className="rounded border border-edge px-1 py-0.5 text-[10px] text-slate-400 hover:text-white"
+                  title="Paste LRC lyrics text in by hand"
+                >
+                  ✎
+                </button>
+              )}
+            </div>
           )}
 
           {onDelete && (

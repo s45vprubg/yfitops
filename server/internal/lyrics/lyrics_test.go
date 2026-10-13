@@ -2,10 +2,12 @@ package lyrics
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/s45vprubg/yfitops/server/internal/config"
 	"github.com/s45vprubg/yfitops/server/internal/protocol"
@@ -223,6 +225,132 @@ func TestFetch_TrimsBaseURLSlash(t *testing.T) {
 	}
 	if gotPath != "/api/get" {
 		t.Errorf("path = %q, want /api/get", gotPath)
+	}
+}
+
+func TestFetch_SetsUserAgent(t *testing.T) {
+	var gotUA string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
+		_, _ = w.Write([]byte(`{"syncedLyrics":"[00:00.00]hi"}`))
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv.URL)
+	if _, err := c.Fetch(context.Background(), "a", "b", 1); err != nil {
+		t.Fatalf("Fetch error: %v", err)
+	}
+	if gotUA == "" || gotUA == "Go-http-client/1.1" {
+		t.Fatalf("User-Agent = %q, want a descriptive client identifier per LRCLIB's docs", gotUA)
+	}
+}
+
+func TestProbe_Classification(t *testing.T) {
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		retryAfter string
+		wantFound  bool
+		wantErr    bool
+		wantRLErr  bool
+	}{
+		{name: "200 with synced lyrics", status: http.StatusOK, body: `{"syncedLyrics":"[00:00.00]hi"}`, wantFound: true},
+		{name: "200 empty synced lyrics is not-found", status: http.StatusOK, body: `{"syncedLyrics":""}`, wantFound: false},
+		{name: "404 is confirmed not-found, not an error", status: http.StatusNotFound, wantFound: false, wantErr: false},
+		{name: "500 is a plain error", status: http.StatusInternalServerError, wantErr: true},
+		{name: "503 is a rate-limit error", status: http.StatusServiceUnavailable, retryAfter: "0", wantErr: true, wantRLErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.retryAfter != "" {
+					w.Header().Set("Retry-After", tc.retryAfter)
+				}
+				w.WriteHeader(tc.status)
+				if tc.body != "" {
+					_, _ = w.Write([]byte(tc.body))
+				}
+			}))
+			defer srv.Close()
+
+			c := newClient(t, srv.URL)
+			_, found, err := c.probeOnce(context.Background(), "a", "b", 1)
+			if found != tc.wantFound {
+				t.Errorf("found = %v, want %v", found, tc.wantFound)
+			}
+			if (err != nil) != tc.wantErr {
+				t.Errorf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			var rle *RateLimitError
+			if errors.As(err, &rle) != tc.wantRLErr {
+				t.Errorf("errors.As(err, *RateLimitError) = %v, want %v (err=%v)", errors.As(err, &rle), tc.wantRLErr, err)
+			}
+		})
+	}
+}
+
+func TestProbe_RetriesOnceAfterRateLimit(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(`{"syncedLyrics":"[00:00.00]hi"}`))
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv.URL)
+	text, found, err := c.Probe(context.Background(), "a", "b", 1)
+	if err != nil {
+		t.Fatalf("Probe error: %v", err)
+	}
+	if !found || text == "" {
+		t.Fatalf("found=%v text=%q, want a resolved result after the retry", found, text)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2 (one 429 + one retry)", calls)
+	}
+}
+
+func TestProbe_GivesUpAfterSecondRateLimit(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv.URL)
+	_, _, err := c.Probe(context.Background(), "a", "b", 1)
+	var rle *RateLimitError
+	if !errors.As(err, &rle) {
+		t.Fatalf("err = %v, want *RateLimitError after exhausting the single retry", err)
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2 (no unbounded retry loop)", calls)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	tests := []struct {
+		in   string
+		want time.Duration
+	}{
+		{"2", 2 * time.Second},
+		{"", 1 * time.Second},
+		{"not-a-number", 1 * time.Second},
+		{"-1", 1 * time.Second},
+		{"0", 0},
+	}
+	for _, tc := range tests {
+		if got := parseRetryAfter(tc.in); got != tc.want {
+			t.Errorf("parseRetryAfter(%q) = %v, want %v", tc.in, got, tc.want)
+		}
 	}
 }
 

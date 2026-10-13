@@ -45,9 +45,20 @@ type AdminStore interface {
 	ListTracks(ctx context.Context, boardID string) ([]Track, error)
 	UnplacedTracks(ctx context.Context, boardID string) ([]Track, error)
 	DeleteTrack(ctx context.Context, trackID string) error
-	// SetTrackLyrics updates the lyric-availability probe result and/or the
-	// admin play-override for a track. Nil args leave that column unchanged.
-	SetTrackLyrics(ctx context.Context, trackID string, hasSynced *bool, override *bool) error
+	// GetTrack looks up a single board_tracks row by id (needed to resolve a
+	// track's artist/song/duration/spotifyUri for the requery/manual-lyrics
+	// endpoints). Returns nil, nil if no such track exists.
+	GetTrack(ctx context.Context, trackID string) (*Track, error)
+	// SetTrackOverride sets the admin play-anyway override for a track.
+	SetTrackOverride(ctx context.Context, trackID string, override bool) error
+
+	// Lyrics text cache (global, keyed by Spotify URI — shared by every board
+	// and the Daily Double bucket; a song is only ever fetched/entered once).
+	GetLyricsStatus(ctx context.Context, spotifyURI string) (*LyricsRecord, error)
+	GetLyricsStatusesForURIs(ctx context.Context, uris []string) (map[string]LyricsRecord, error)
+	UpsertLyricsResolved(ctx context.Context, spotifyURI, lrcText, source string) error
+	UpsertLyricsNotFound(ctx context.Context, spotifyURI string) error
+	UpsertLyricsError(ctx context.Context, spotifyURI, errMsg string) error
 
 	// Layout
 	AddColumn(ctx context.Context, boardID string, col int, category string) error
@@ -111,10 +122,12 @@ type BoardReloader interface {
 	ResetToLobby() error
 }
 
-// LyricsProber checks whether a track has synced lyrics (for the grey-out /
-// karaoke gate). Returns true if LRCLIB has time-coded lyrics for the track.
+// LyricsProber fetches raw LRC lyric text for a track from LRCLIB, for the
+// grey-out / karaoke gate. found=false,err=nil means LRCLIB confirmed no
+// lyrics exist; err != nil means the probe failed transiently and should be
+// retried later (callers must NOT treat an error as "no lyrics").
 type LyricsProber interface {
-	HasSyncedLyrics(ctx context.Context, artist, song string, durationSec int) bool
+	Probe(ctx context.Context, artist, song string, durationSec int) (lrcText string, found bool, err error)
 }
 
 // AICategory / AIProposal mirror ai.Category / ai.Proposal without importing the

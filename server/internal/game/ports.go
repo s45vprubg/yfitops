@@ -65,6 +65,20 @@ type LyricsProvider interface {
 	Fetch(ctx context.Context, artist, title string, durationSec int) ([]protocol.LyricLine, error)
 }
 
+// LyricsTextStore is an additive port (not part of the original fixed set
+// above): a read-only lookup into the admin board builder's global lyrics
+// cache (track_lyrics, keyed by Spotify URI). A hit means the song's lyrics
+// were already resolved during board building — fetched or manually entered
+// — so the live round never needs to call LRCLIB at all. Optional: nil means
+// the engine always falls back to LyricsProvider.Fetch, matching pre-cache
+// behavior exactly.
+type LyricsTextStore interface {
+	// GetResolvedLyrics returns the raw LRC text cached for spotifyURI, if any
+	// has reached "resolved" status. ok=false (err=nil) means no resolved
+	// entry exists yet — the caller should fall back to a live fetch.
+	GetResolvedLyrics(ctx context.Context, spotifyURI string) (lrcText string, ok bool, err error)
+}
+
 // InboundHandler is the transport layer's view of the engine. The transport
 // owns connections and decodes frames; it forwards lifecycle + decoded client
 // messages here. The engine runs a single command loop, so these calls must be

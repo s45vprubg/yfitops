@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/s45vprubg/yfitops/server/internal/anticheat"
+	"github.com/s45vprubg/yfitops/server/internal/lyrics"
 	"github.com/s45vprubg/yfitops/server/internal/protocol"
 )
 
@@ -163,14 +164,15 @@ func (e *Engine) livePool() (maxP, baseP int) {
 
 // Engine implements game.InboundHandler and drives the full lifecycle.
 type Engine struct {
-	repo   GameRepo
-	lock   BuzzLock
-	audio  AudioDevice
-	lyrics LyricsProvider
-	bcast  Broadcaster
-	gate   *anticheat.NonceGate
-	cfg    Config
-	rng    *rand.Rand
+	repo        GameRepo
+	lock        BuzzLock
+	audio       AudioDevice
+	lyrics      LyricsProvider
+	lyricsStore LyricsTextStore // optional; DB-first lookup before any live LRCLIB call
+	bcast       Broadcaster
+	gate        *anticheat.NonceGate
+	cfg         Config
+	rng         *rand.Rand
 
 	cmds       chan command
 	seq        uint64
@@ -267,7 +269,10 @@ type Engine struct {
 }
 
 // NewEngine wires the engine to its dependencies (all injected for testing).
-func NewEngine(repo GameRepo, lock BuzzLock, audio AudioDevice, lyrics LyricsProvider, bcast Broadcaster, gate *anticheat.NonceGate, cfg Config) *Engine {
+// lyricsStore is optional (nil is fine, e.g. no Postgres/in-memory repo) —
+// nil means every lyric lookup falls back straight to lyrics.Fetch, exactly
+// matching pre-cache behavior.
+func NewEngine(repo GameRepo, lock BuzzLock, audio AudioDevice, lyrics LyricsProvider, lyricsStore LyricsTextStore, bcast Broadcaster, gate *anticheat.NonceGate, cfg Config) *Engine {
 	rng := cfg.Rand
 	if rng == nil {
 		rng = rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -303,11 +308,12 @@ func NewEngine(repo GameRepo, lock BuzzLock, audio AudioDevice, lyrics LyricsPro
 		revCfg.Alternate = cfg.RevealAlternate
 	}
 	return &Engine{
-		repo:      repo,
-		lock:      lock,
-		audio:     audio,
-		lyrics:    lyrics,
-		bcast:     bcast,
+		repo:        repo,
+		lock:        lock,
+		audio:       audio,
+		lyrics:      lyrics,
+		lyricsStore: lyricsStore,
+		bcast:       bcast,
 		gate:      gate,
 		cfg:       cfg,
 		rng:       rng,
@@ -1054,7 +1060,7 @@ func (e *Engine) startTrack(cell *Cell, track *Track) {
 	}
 
 	// Warm the lyric cache now so karaoke has no load time on the stage.
-	e.prefetchLyrics(track.Artist, track.Song, int(track.DurationMs/1000))
+	e.prefetchLyrics(track.SpotifyURI, track.Artist, track.Song, int(track.DurationMs/1000))
 
 	e.transitionTo(protocol.StateRoundActive)
 
@@ -1543,10 +1549,11 @@ func (e *Engine) fetchAndSendLyrics() {
 	if e.lyrics == nil || e.curTrack == nil {
 		return
 	}
+	spotifyURI := e.curTrack.SpotifyURI
 	artist, song := e.curTrack.Artist, e.curTrack.Song
 	durSec := int(e.curTrack.DurationMs / 1000)
 	rk := e.roundKey
-	ent := e.lyricFetch(artist, song, durSec) // shares/starts the singleflight fetch
+	ent := e.lyricFetch(spotifyURI, artist, song, durSec) // shares/starts the singleflight fetch
 
 	send := func() {
 		if e.roundKey != rk {
@@ -1586,11 +1593,11 @@ func (e *Engine) fetchAndSendLyrics() {
 // prefetchLyrics warms the lyric cache for a track off the Run loop (called at
 // startTrack) so karaoke has the lines in hand. It just starts/join the shared
 // fetch; the result is consumed later by fetchAndSendLyrics.
-func (e *Engine) prefetchLyrics(artist, song string, durSec int) {
+func (e *Engine) prefetchLyrics(spotifyURI, artist, song string, durSec int) {
 	if e.lyrics == nil {
 		return
 	}
-	e.lyricFetch(artist, song, durSec)
+	e.lyricFetch(spotifyURI, artist, song, durSec)
 }
 
 // lyricEntry is a singleflight cache slot: one fetch shared by the prefetch and
@@ -1601,11 +1608,15 @@ type lyricEntry struct {
 	err   error
 }
 
-// lyricFetch returns the cache entry for a track, starting the fetch once if it
-// isn't already in flight/complete. A failed fetch is evicted so a later call
-// retries (a transient LRCLIB error shouldn't poison the track forever).
-func (e *Engine) lyricFetch(artist, song string, durSec int) *lyricEntry {
-	key := lyricKey(artist, song, durSec)
+// lyricFetch returns the cache entry for a track, starting the fetch once if
+// it isn't already in flight/complete. DB-first: if lyricsStore has a
+// resolved entry for spotifyURI (fetched or manually entered during board
+// building), it's used directly with no LRCLIB call at all. Otherwise falls
+// back to a live lyrics.Fetch, exactly as before the cache existed. A failed
+// live fetch is evicted so a later call retries (a transient LRCLIB error
+// shouldn't poison the track forever).
+func (e *Engine) lyricFetch(spotifyURI, artist, song string, durSec int) *lyricEntry {
+	key := lyricKey(spotifyURI, artist, song, durSec)
 	e.lyricMu.Lock()
 	if e.lyricCache == nil {
 		e.lyricCache = map[string]*lyricEntry{}
@@ -1619,6 +1630,13 @@ func (e *Engine) lyricFetch(artist, song string, durSec int) *lyricEntry {
 	e.lyricMu.Unlock()
 
 	go func() {
+		if e.lyricsStore != nil && spotifyURI != "" {
+			if text, ok, err := e.lyricsStore.GetResolvedLyrics(context.Background(), spotifyURI); err == nil && ok {
+				ent.lines = lyrics.ParseLRC(text)
+				close(ent.done)
+				return
+			}
+		}
 		lines, err := e.lyrics.Fetch(context.Background(), artist, song, durSec)
 		ent.lines, ent.err = lines, err
 		close(ent.done)
@@ -1632,7 +1650,10 @@ func (e *Engine) lyricFetch(artist, song string, durSec int) *lyricEntry {
 	return ent
 }
 
-func lyricKey(artist, song string, durSec int) string {
+func lyricKey(spotifyURI, artist, song string, durSec int) string {
+	if spotifyURI != "" {
+		return spotifyURI
+	}
 	return fmt.Sprintf("%s|%s|%d", artist, song, durSec)
 }
 

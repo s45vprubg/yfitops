@@ -52,15 +52,29 @@ func (h *Handler) addDailyDoubleTrack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Daily Double has a hard lyrics requirement with no override (unlike the
+	// grid): a song cannot enter the bucket at all unless it already has a
+	// resolved entry in the global lyrics cache. Check before inserting.
+	rec, err := h.store.GetLyricsStatus(r.Context(), body.SpotifyURI)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if rec == nil || rec.Status != LyricsStatusResolved {
+		http.Error(w, "this song has no resolved lyrics yet — fetch, requery, or enter them manually in the holding area before adding it to Daily Double", http.StatusConflict)
+		return
+	}
+
 	track := &DailyDoubleTrack{
-		ID:         generateID("ddt"),
-		BoardID:    boardID,
-		SpotifyURI: body.SpotifyURI,
-		Artist:     body.Artist,
-		Song:       body.Song,
-		AlbumArt:   body.AlbumArt,
-		DurationMs: body.DurationMs,
-		CreatedAt:  time.Now().UnixMilli(),
+		ID:           generateID("ddt"),
+		BoardID:      boardID,
+		SpotifyURI:   body.SpotifyURI,
+		Artist:       body.Artist,
+		Song:         body.Song,
+		AlbumArt:     body.AlbumArt,
+		DurationMs:   body.DurationMs,
+		CreatedAt:    time.Now().UnixMilli(),
+		LyricsStatus: rec.Status,
 	}
 	if err := h.store.AddDailyDoubleTrack(r.Context(), track); err != nil {
 		// dd-api-1: ON CONFLICT DO NOTHING means the store call succeeds
