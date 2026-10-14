@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { DailyDoubleSongChoice } from "@shared/protocol";
 
 interface Props {
@@ -30,18 +30,33 @@ const DECISION_TIMEOUT_MS = 8000;
 export function DailyDoubleContestantScreen({ offer, onDecide, onChoose }: Props) {
   const [decided, setDecided] = useState<false | "accept" | "decline">(false);
   const [chosen, setChosen] = useState<string | null>(null);
+  // uim7-2: synchronous re-entrancy guard for decide(). `decided` state is
+  // only visible to a closure once React commits + re-renders, so two
+  // pointerdown handlers dispatched in the same event-loop turn (a genuinely
+  // simultaneous two-finger tap on both buttons) can each read the OLD
+  // `decided` closure value and both pass the `if (decided) return;` check
+  // before either's setDecided takes effect — letting both onDecide(accept)
+  // and onDecide(false) fire. A ref is mutated and read synchronously, so
+  // the second handler in the same turn always observes the first handler's
+  // write. Kept in lockstep with `decided` state (never diverges) so render
+  // logic can keep reading the state value as before.
+  const decidedRef = useRef<false | "accept" | "decline">(false);
 
   useEffect(() => {
     // Only an accept is waiting on an offer; a decline is final and the
     // server no-ops a repeat decline, so it must never re-enable the buttons.
     if (decided !== "accept" || offer) return;
-    const timer = setTimeout(() => setDecided(false), DECISION_TIMEOUT_MS);
+    const timer = setTimeout(() => {
+      decidedRef.current = false;
+      setDecided(false);
+    }, DECISION_TIMEOUT_MS);
     return () => clearTimeout(timer);
   }, [decided, offer]);
 
   const decide = (accept: boolean) => {
-    if (decided) return;
-    setDecided(accept ? "accept" : "decline");
+    if (decidedRef.current) return;
+    decidedRef.current = accept ? "accept" : "decline";
+    setDecided(decidedRef.current);
     onDecide(accept);
   };
 
@@ -51,7 +66,14 @@ export function DailyDoubleContestantScreen({ offer, onDecide, onChoose }: Props
     onChoose(trackID);
   };
 
-  if (!offer) {
+  // uim7-1: `decided === "decline"` is checked here even though a lone,
+  // clean decline can never itself trigger a late dailyDouble.offer — the
+  // race (uim7-2) that lets BOTH decide(true) and decide(false) escape the
+  // guard can still land an offer broadcast after the local decline. Without
+  // this check that late offer would flip the UI back to the song-picker
+  // screen, contradicting "decline is final," even though the server has
+  // already converged correctly.
+  if (!offer || decided === "decline") {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-8 px-6 animate-fadeIn">
         <div className="text-center">

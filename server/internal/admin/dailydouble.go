@@ -55,13 +55,21 @@ func (h *Handler) addDailyDoubleTrack(w http.ResponseWriter, r *http.Request) {
 	// Daily Double has a hard lyrics requirement with no override (unlike the
 	// grid): a song cannot enter the bucket at all unless it already has a
 	// resolved entry in the global lyrics cache. Check before inserting.
+	//
+	// api7-004: this is a *precondition* rejection (the song just isn't ready
+	// yet, nothing is wrong with the request), which is a different kind of
+	// failure than the duplicate-track conflict below — it previously used
+	// the same 409 Conflict status with only the free-text body to tell them
+	// apart. Use 412 Precondition Failed here so the two cases are
+	// distinguishable by status code alone, without a caller having to parse
+	// the message text.
 	rec, err := h.store.GetLyricsStatus(r.Context(), body.SpotifyURI)
 	if err != nil {
 		serverError(w, err)
 		return
 	}
 	if rec == nil || rec.Status != LyricsStatusResolved {
-		http.Error(w, "this song has no resolved lyrics yet — fetch, requery, or enter them manually in the holding area before adding it to Daily Double", http.StatusConflict)
+		http.Error(w, "this song has no resolved lyrics yet — fetch, requery, or enter them manually in the holding area before adding it to Daily Double", http.StatusPreconditionFailed)
 		return
 	}
 
@@ -82,6 +90,8 @@ func (h *Handler) addDailyDoubleTrack(w http.ResponseWriter, r *http.Request) {
 		// as ErrDailyDoubleTrackExists so we don't respond 201 with an id/
 		// artist/song that never made it into the database.
 		if errors.Is(err, ErrDailyDoubleTrackExists) {
+			// api7-004: true duplicate-resource conflict — kept at 409, now
+			// distinct from the precondition-failed case above (412).
 			http.Error(w, "a daily double track with this spotifyUri already exists on this board", http.StatusConflict)
 			return
 		}

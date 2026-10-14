@@ -1062,7 +1062,6 @@ func (e *Engine) assignDailyDoubles() {
 func (e *Engine) startTrack(cell *Cell, track *Track) {
 	e.curCell = cell
 	e.curTrack = track
-	e.refreshCurDropPoint()
 	e.curRow = cell.Row
 	e.trackStartMs = nowMs()
 	e.pausedAtMs = 0
@@ -1075,6 +1074,10 @@ func (e *Engine) startTrack(cell *Cell, track *Track) {
 	e.buzzWindowOpen = false
 	e.buzzContenders = nil
 	e.roundKey = fmt.Sprintf("%s:r%dc%d:%s:%d", e.cfg.SessionID, cell.Row, cell.Col, track.ID, e.trackStartMs)
+	// eng7-1 (QA sweep 7): refreshCurDropPoint's async result is guarded by
+	// comparing e.roundKey when it lands, so it must be called AFTER roundKey
+	// is minted for THIS track, not before.
+	e.refreshCurDropPoint()
 
 	// New track => everyone may guess again (§3.4 one guess per track).
 	for _, p := range e.reg.players {
@@ -1987,7 +1990,6 @@ func (e *Engine) startDailyDoublePerformance(performer *Player, track *Track) {
 	e.clearReveal() // defensive: no masked-reveal clock is used for a performance
 	e.curCell = cell
 	e.curTrack = track
-	e.refreshCurDropPoint()
 	e.curRow = cell.Row
 	e.trackStartMs = nowMs()
 	e.cellPicker = performer.ID
@@ -1999,6 +2001,10 @@ func (e *Engine) startDailyDoublePerformance(performer *Player, track *Track) {
 	// e.roundKey`) evaluates its staleness guard as false during this live
 	// Daily Double and can broadcast the wrong track's lyrics over it.
 	e.roundKey = fmt.Sprintf("%s:dd:r%dc%d:%s:%d", e.cfg.SessionID, e.ddOffer.cellRow, e.ddOffer.cellCol, track.ID, e.trackStartMs)
+	// eng7-1 (QA sweep 7): same ordering requirement as startTrack -- must
+	// come after roundKey is minted so refreshCurDropPoint's staleness guard
+	// checks against THIS performance's round, not the one that just ended.
+	e.refreshCurDropPoint()
 	e.ddOffer = nil
 	// trackStartEnvelope now derives its pool from livePool() (roundPool() +
 	// pointFactor), same as startTrack — reset both here for the same reason
@@ -2219,9 +2225,26 @@ func (e *Engine) onAdminSeek(connID string, env protocol.ClientEnvelope) {
 // decay follow the seek would let an admin cueing up a specific part of a
 // song accidentally zero out the bonus for every player. Decay stays on its
 // own clock; only the song's playback position moves.
+//
+// eng7-2 (QA sweep 7): positionMs is CLAMPED (not rejected) to
+// [0, e.curTrack.DurationMs], centralized here so both callers (onAdminSeek,
+// onAdminJumpToDropPoint) get the bound without duplicating it. Clamping
+// rather than erroring out is deliberate for this path: a scrub/seek target
+// is ephemeral and already approximate — onAdminJumpToDropPoint's own
+// pre-existing `target < 0 -> 0` clamp is the precedent this generalizes to
+// also cover the upper bound. Contrast with onAdminSetDropPoint below, which
+// REJECTS out-of-range input instead, because that value is persisted.
+// DurationMs<=0 (unknown length) skips the upper clamp since there's nothing
+// trustworthy to bound against.
 func (e *Engine) seekTo(positionMs int64) {
 	if e.curTrack == nil {
 		return
+	}
+	if positionMs < 0 {
+		positionMs = 0
+	}
+	if e.curTrack.DurationMs > 0 && positionMs > e.curTrack.DurationMs {
+		positionMs = e.curTrack.DurationMs
 	}
 	_ = e.audio.Play(context.Background(), e.curTrack.SpotifyURI, positionMs)
 	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{
@@ -2229,17 +2252,52 @@ func (e *Engine) seekTo(positionMs int64) {
 	}))
 }
 
-// refreshCurDropPoint caches e.curTrack's drop-point mark (nil = none known),
-// so onAdminJumpToDropPoint and the admin position broadcast don't need a DB
-// round-trip per call. Called whenever curTrack is set to a new track.
+// dropPointStoreTimeout bounds the drop-point store calls that now resolve
+// off the Run loop (eng7-1, QA sweep 7). The loop itself no longer waits on
+// these at all; this is defense in depth so a hung DB connection can't leak
+// the goroutine (and the connection) forever, not the fix for the blocking
+// bug itself.
+const dropPointStoreTimeout = 3 * time.Second
+
+// refreshCurDropPoint caches e.curTrack's drop-point mark (nil = none known
+// yet), so onAdminJumpToDropPoint and the admin position broadcast don't need
+// a DB round-trip per call. Called whenever curTrack is set to a new track —
+// AFTER e.roundKey has been minted for that track at both call sites
+// (startTrack, startDailyDoublePerformance), so the staleness guard below
+// compares against the round that's actually starting, not the one that just
+// ended.
+//
+// eng7-1 (QA sweep 7): GetDropPoint used to run synchronously, inline on the
+// Run loop, with an unbounded context.Background() — a slow store blocked
+// EVERY other command (buzzes, admin actions, heartbeats) for the full call
+// latency (confirmed empirically: a 2s-delay fake store blocked a trivial
+// queued command for the full 2s). This now mirrors lyricFetch/
+// fetchAndSendLyrics's shape exactly: the slow call runs in a goroutine off
+// the loop, and the result is posted back via e.submit. The roundKey
+// captured before the goroutine starts is re-checked when the result lands;
+// if a newer round has started in the meantime, the stale result is dropped
+// instead of clobbering whatever curDropPointMs the new round already has.
 func (e *Engine) refreshCurDropPoint() {
 	e.curDropPointMs = nil
 	if e.dropPointStore == nil || e.curTrack == nil {
 		return
 	}
-	if ms, ok, err := e.dropPointStore.GetDropPoint(context.Background(), e.curTrack.SpotifyURI); err == nil && ok {
-		e.curDropPointMs = &ms
-	}
+	spotifyURI := e.curTrack.SpotifyURI
+	rk := e.roundKey
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), dropPointStoreTimeout)
+		defer cancel()
+		ms, ok, err := e.dropPointStore.GetDropPoint(ctx, spotifyURI)
+		if err != nil || !ok {
+			return
+		}
+		e.submit(func() {
+			if e.roundKey != rk {
+				return // stale: a newer round started before this lookup landed
+			}
+			e.curDropPointMs = &ms
+		})
+	}()
 }
 
 // CONTRACT-QUESTION: cmsgAdminSetDropPoint/cmsgAdminJumpToDropPoint let the
@@ -2268,27 +2326,85 @@ const dropPointSeekBufferMs = 4000
 // ever reachable from the control room's own "Mark Drop Point" button, never
 // from any future automation (which would call SetDropPoint directly with a
 // different source, bypassing this handler entirely).
+//
+// eng7-3 (QA sweep 7): all three ways this used to silently no-op (no store
+// configured, no track playing, or the DB write itself failing) now call
+// sendError with a distinct code, so the control room learns WHY "Mark Drop
+// Point" didn't take instead of discovering it indirectly later (e.g. via
+// eng7-4's "noDropPoint" on a subsequent Jump attempt).
+//
+// eng7-2 (QA sweep 7): positionMs is validated against the track's own
+// DurationMs and REJECTED (not clamped) when out of range — unlike seekTo's
+// ephemeral scrub position, this value is persisted to track_drop_point and
+// can never be overwritten by a later automated write (ports.go's
+// never-clobber-manual rule), so a bad value written here is sticky across
+// every future placement of the song. The operator should see why their mark
+// didn't take, not silently get an adjusted value instead.
+//
+// eng7-1 (QA sweep 7): the DB write (SetDropPoint) now runs off the Run loop
+// in a goroutine, the same shape as refreshCurDropPoint. Unlike that read,
+// the value to cache here is already known — it's the admin's own input —
+// so e.curDropPointMs updates immediately (preserving the existing "Jump
+// works right away, no round-trip wait" behavior) and only the persistence
+// itself is async; a write failure is reported back via sendError once it
+// lands, guarded by roundKey so a failure from a now-stale round doesn't
+// surface against whatever track is playing by then.
 func (e *Engine) onAdminSetDropPoint(connID string, env protocol.ClientEnvelope) {
 	var d adminSetDropPointData
 	if err := json.Unmarshal(env.Data, &d); err != nil {
 		e.sendError(connID, "badSetDropPoint", err.Error())
 		return
 	}
-	if e.dropPointStore == nil || e.curTrack == nil {
+	if e.dropPointStore == nil {
+		e.sendError(connID, "dropPointDisabled", "drop-point marking is not configured on this server")
 		return
 	}
-	if err := e.dropPointStore.SetDropPoint(context.Background(), e.curTrack.SpotifyURI, d.PositionMs, "manual"); err != nil {
-		log.Printf("[engine] setDropPoint: %v", err)
+	if e.curTrack == nil {
+		e.sendError(connID, "dropPointNoTrack", "no track is currently playing")
 		return
 	}
-	e.curDropPointMs = &d.PositionMs
+	if d.PositionMs < 0 || (e.curTrack.DurationMs > 0 && d.PositionMs > e.curTrack.DurationMs) {
+		e.sendError(connID, "dropPointOutOfRange", fmt.Sprintf("positionMs %d outside track bounds [0,%d]", d.PositionMs, e.curTrack.DurationMs))
+		return
+	}
+
+	spotifyURI := e.curTrack.SpotifyURI
+	positionMs := d.PositionMs
+	rk := e.roundKey
+	e.curDropPointMs = &positionMs
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), dropPointStoreTimeout)
+		defer cancel()
+		if err := e.dropPointStore.SetDropPoint(ctx, spotifyURI, positionMs, "manual"); err != nil {
+			log.Printf("[engine] setDropPoint: %v", err)
+			e.submit(func() {
+				if e.roundKey != rk {
+					return // round moved on; the save failure no longer applies to the current track
+				}
+				e.sendError(connID, "dropPointSaveFailed", "failed to save drop point")
+			})
+		}
+	}()
 }
 
 // onAdminJumpToDropPoint seeks to the current track's marked drop point minus
 // a short lead-in buffer, via the same seekTo path (and the same deliberate
 // decay-independence) as the scrubber's manual seek.
+//
+// eng7-4 (QA sweep 7): the three distinct causes a jump can fail for (feature
+// disabled, no track currently playing, or a track with genuinely no mark)
+// used to all share one "noDropPoint" error code. Split into three so an
+// operator troubleshooting on-site isn't stuck guessing which one it is.
 func (e *Engine) onAdminJumpToDropPoint(connID string, _ protocol.ClientEnvelope) {
-	if e.dropPointStore == nil || e.curTrack == nil || e.curDropPointMs == nil {
+	if e.dropPointStore == nil {
+		e.sendError(connID, "dropPointDisabled", "drop-point marking is not configured on this server")
+		return
+	}
+	if e.curTrack == nil {
+		e.sendError(connID, "dropPointNoTrack", "no track is currently playing")
+		return
+	}
+	if e.curDropPointMs == nil {
 		e.sendError(connID, "noDropPoint", "no drop point set for the current track")
 		return
 	}

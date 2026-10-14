@@ -326,13 +326,28 @@ func (r *PostgresRepo) GetLyricsStatusesForURIs(ctx context.Context, uris []stri
 	return out, rows.Err()
 }
 
+// UpsertLyricsResolved marks a song's lyrics as confirmed-good. Mirrors
+// SetDropPoint's never-clobber-manual rule (admin_store.go, see SetDropPoint's
+// doc comment): the ON CONFLICT's WHERE clause only allows the update when the
+// incoming write is itself manual (an admin always wins) or the existing row
+// isn't manual (an automated write may freely overwrite a prior automated
+// resolve). A non-manual write against an existing manual row matches no WHERE
+// condition, so Postgres leaves the row untouched — a silent, correct no-op.
+//
+// Unlike track_drop_point.source (NOT NULL, migration 0009), track_lyrics.source
+// is nullable (migration 0008) — NULL for any row that was never resolved.
+// `track_lyrics.source <> 'manual'` would evaluate to NULL (not TRUE) when
+// source IS NULL, silently blocking the very common first-time
+// pending/not_found -> resolved transition, so this uses `IS DISTINCT FROM`
+// instead of SetDropPoint's `<>` (str7-003).
 func (r *PostgresRepo) UpsertLyricsResolved(ctx context.Context, spotifyURI, lrcText, source string) error {
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO track_lyrics (spotify_uri, lrc_text, status, source, last_error, checked_at, updated_at)
 		 VALUES ($1, $2, 'resolved', $3, NULL, now(), now())
 		 ON CONFLICT (spotify_uri) DO UPDATE
 		   SET lrc_text = EXCLUDED.lrc_text, status = 'resolved', source = EXCLUDED.source,
-		       last_error = NULL, checked_at = now(), updated_at = now()`,
+		       last_error = NULL, checked_at = now(), updated_at = now()
+		   WHERE $3 = 'manual' OR track_lyrics.source IS DISTINCT FROM 'manual'`,
 		spotifyURI, lrcText, source)
 	if err != nil {
 		return fmt.Errorf("store: upsert lyrics resolved: %w", err)
@@ -340,12 +355,19 @@ func (r *PostgresRepo) UpsertLyricsResolved(ctx context.Context, spotifyURI, lrc
 	return nil
 }
 
+// UpsertLyricsNotFound records that LRCLIB confirmed no lyrics exist. Status
+// and last_error are only overwritten when the existing row is NOT already
+// 'resolved' — a confirmed-good lyrics match (whether auto-fetched or
+// manually entered) must never be silently clobbered by a later probe that
+// comes back empty (str7-001).
 func (r *PostgresRepo) UpsertLyricsNotFound(ctx context.Context, spotifyURI string) error {
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO track_lyrics (spotify_uri, status, last_error, checked_at, updated_at)
 		 VALUES ($1, 'not_found', NULL, now(), now())
 		 ON CONFLICT (spotify_uri) DO UPDATE
-		   SET status = 'not_found', last_error = NULL, checked_at = now(), updated_at = now()`,
+		   SET status = CASE WHEN track_lyrics.status = 'resolved' THEN track_lyrics.status ELSE 'not_found' END,
+		       last_error = CASE WHEN track_lyrics.status = 'resolved' THEN track_lyrics.last_error ELSE NULL END,
+		       checked_at = now(), updated_at = now()`,
 		spotifyURI)
 	if err != nil {
 		return fmt.Errorf("store: upsert lyrics not found: %w", err)
@@ -355,16 +377,21 @@ func (r *PostgresRepo) UpsertLyricsNotFound(ctx context.Context, spotifyURI stri
 
 // UpsertLyricsError records a transient probe failure. Status stays/becomes
 // 'pending' — never 'not_found' — so a timeout/429/5xx can never be mistaken
-// for a confirmed absence, and never overwrites an existing 'resolved' row:
-// a song that's already known-good must not be knocked back to pending by a
-// later transient error on an unrelated requery of the same song.
+// for a confirmed absence, and it never overwrites an existing 'resolved' OR
+// 'not_found' row: a song that's already known-good must not be knocked back
+// to pending by a later transient error on an unrelated requery of the same
+// song (str7-002), and per migration 0008's own invariant, a confirmed-absent
+// result must likewise never be demoted back to 'pending' by a transient
+// error — that would make a network blip indistinguishable from a real
+// confirmed absence and trigger needless LRCLIB re-probes.
 func (r *PostgresRepo) UpsertLyricsError(ctx context.Context, spotifyURI, errMsg string) error {
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO track_lyrics (spotify_uri, status, last_error, checked_at, updated_at)
 		 VALUES ($1, 'pending', $2, now(), now())
 		 ON CONFLICT (spotify_uri) DO UPDATE
-		   SET status = CASE WHEN track_lyrics.status = 'resolved' THEN track_lyrics.status ELSE 'pending' END,
-		       last_error = $2, checked_at = now(), updated_at = now()`,
+		   SET status = CASE WHEN track_lyrics.status IN ('resolved', 'not_found') THEN track_lyrics.status ELSE 'pending' END,
+		       last_error = CASE WHEN track_lyrics.status IN ('resolved', 'not_found') THEN track_lyrics.last_error ELSE $2 END,
+		       checked_at = now(), updated_at = now()`,
 		spotifyURI, errMsg)
 	if err != nil {
 		return fmt.Errorf("store: upsert lyrics error: %w", err)

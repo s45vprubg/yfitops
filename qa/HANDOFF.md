@@ -691,3 +691,63 @@ recurring structural items (frontend test runner, `client.ts` contract
 status) remain the highest-value moves whenever there's owner bandwidth for a
 decision rather than a hunt. Re-scope again per the same rule if another
 feature lands: diff against this sweep's HEAD first.
+
+# SWEEP 7 (2026-10-13) — DONE
+
+Full writeup: `docs/security/qa-sweep-7.md`. Outcome: **24 findings, 24
+CONFIRMED, 0 REFUTED. 5 HIGH, 8 MEDIUM, 11 LOW, 0 CRITICAL. All 24 fixed and
+verified cold**, including running the full DB-gated staging suite for real
+against a live local Postgres/Redis (8/8 pass, not self-skip). `acid.sh` now
+43/43 gates (up from 41). The two headline findings: `admin_store.go`'s
+lyrics-upsert functions were missing the same never-clobber-manual
+protection `SetDropPoint` got right in the same diff (str7-001/003, both
+HIGH); and stage's Spotify SDK connect raced ahead of the server's secret
+check, with a bad-secret fallback path that could still register a live
+Spotify Connect device (uis7-001, HIGH) — the identical bug class the whole
+stage-auth rework existed to close, just on the audio side instead of the
+control channel. Both are fixed. Gotchas and the full breakdown are in the
+writeup; nothing new added here to avoid duplicating it.
+
+## Original scaffold (kept below for the resume trail)
+
+Re-scoped per sweeps 4/5/6's own rule: features landed again since sweep 6
+(`feb7458`), so hunt only the delta: `git diff --stat feb7458..HEAD` = 48
+files, ~3,100 insertions. Covers: the full lyrics subsystem redesign
+(persisted LRC cache replacing a live-probe boolean that could clobber
+itself on a transient LRCLIB error), the stage-auth rework (stage used to
+auto-authenticate on page load via a build-time-embedded secret visible in
+the public JS bundle; now gated behind a runtime login identical to admin's,
+plus a new public landing page and a new unauthenticated player-count
+endpoint), the admin playback scrubber + manual drop-point marking (new
+`admin.seek`/`admin.setDropPoint`/`admin.jumpToDropPoint` commands), and one
+small Daily Double decline-button fix that landed on top.
+
+## Baseline (clean, before any sweep-7 hunting)
+- `go build ./... && go vet ./... && go test -count=1 ./...` — all green, no
+  pre-existing failures.
+- `qa/smoke.sh` — SMOKE OK.
+- `qa/acid.sh` — ACID PASSED (41/41 locked gates present and executing).
+
+## Priority watch-list for hunters (first-hand knowledge from implementing
+this delta — hunters should still look broadly, not just rubber-stamp these)
+- Every new `admin.*` message type (`admin.seek`, `admin.setDropPoint`,
+  `admin.jumpToDropPoint`) needs the SAME role gate as every existing
+  admin.* handler — this is exactly the class of bug a new message type
+  forgets. Confirm mechanically, don't assume from the pattern looking right.
+- The stage-auth rework's actual security property: does `PublicLanding`
+  truly never reach any privileged connection path, and is there no way to
+  reach `StageApp`'s authenticated view without the login gate actually
+  firing (not just hidden by CSS/conditional render)?
+- `track_lyrics`/`track_drop_point` migrations' `ON CONFLICT` upserts under
+  real concurrent writers (sequential rescan vs. a manual edit landing
+  mid-rescan) — do the never-clobber-manual / never-reprobe-resolved
+  guarantees actually hold under a race, not just in the happy path?
+- The LRCLIB client rewrite's retry/backoff on 429/503 — bounded, or could a
+  pathological `Retry-After` value hang a rescan?
+- Any stale reference to the removed `VITE_STAGE_SECRET` anywhere outside
+  what's already been cleaned up (deploy docs, CI, `.env.example`).
+
+## Sweep plan
+Layered: Code -> API -> UI, each validated before the next, per the
+project's standard order. Surfaces below are hunted in parallel within a
+layer; a layer's validators must be green before its fixes are trusted.

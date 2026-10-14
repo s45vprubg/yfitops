@@ -117,6 +117,27 @@ NameThatSpotify config at `sites-available/default.bak-namethatspotify`):
 - WebTransport/QUIC (UDP 4433) is NOT proxied by nginx — browsers connect
   straight to `yfitops.us:4433` with the gameserver's own TLS cert.
 
+### `/cert-hash` is intentionally dev-only (not a broken proxy)
+
+`/cert-hash` is only registered when `YFI_ENV != prod` (`main.go`'s
+`isProd()` gate, commit `5c2d834`) — in prod it 404s **by design**, not
+because nginx or the route is misconfigured. `serverCertificateHashes`
+pinning requires a cert with validity under ~14 days; the real Let's
+Encrypt cert is 90-day, so pinning against it would fail the QUIC/TLS
+handshake outright.
+
+All three clients (`web/admin/src/config.ts`, `web/mobile/src/lib/cert.ts`,
+`web/stage/src/net/certHash.ts`) wrap their `/cert-hash` fetch in try/catch
+and fail open — a non-OK response, thrown fetch error, or malformed body
+all just resolve to `undefined`, and the client connects to WebTransport
+without `serverCertificateHashes` pinning. This is safe in prod: without
+pinning, the browser instead validates the gameserver's cert through the
+normal TLS/QUIC trust chain against the real Let's Encrypt CA, which is
+exactly as trustworthy as any other HTTPS site. `serverCertificateHashes`
+pinning was only ever load-bearing for the self-signed dev cert (which the
+browser has no other way to trust) — disabling `/cert-hash` in prod is not
+a security regression.
+
 Frontend builds are done **locally** (not on the droplet — 960Mi RAM, no
 Docker for the frontends) and shipped as static `dist/` via `scp`, landing
 in `/var/www/yfitops/{stage,admin,play}`. Build env vars used:

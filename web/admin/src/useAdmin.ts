@@ -25,6 +25,17 @@ import { fetchCertHash, WT_URL } from "./config";
 
 export type ConnStatus = "idle" | "connecting" | "authed" | "error" | "closed";
 
+// Game states in which a track is actually loaded/playing (round/karaoke/daily
+// double). Shared with GameControls.tsx (which uses it to gate Play/Pause and
+// the Scrubber) so the two files can't drift on what counts as "playing" —
+// used here to decide when to clear `playback` on a state transition (uia7-5).
+export const PLAYING_STATES: GameState[] = [
+  "ROUND_ACTIVE",
+  "LOCKED_OUT",
+  "KARAOKE",
+  "DAILY_DOUBLE",
+];
+
 // Anti-cheat report (CONTRACT-QUESTION smsgCheatReport; not in shared protocol).
 export interface CheatEntry {
   playerId: string;
@@ -146,7 +157,15 @@ export function useAdmin(): [AdminState, AdminActions] {
       });
       client.on("state", (env: ServerEnvelope) => {
         const state = (env.d as { state: GameState }).state;
-        patch({ gameState: state, ...(state === "DAILY_DOUBLE" ? {} : { ddPerformer: undefined }) });
+        patch({
+          gameState: state,
+          ...(state === "DAILY_DOUBLE" ? {} : { ddPerformer: undefined }),
+          // uia7-5: a remounted Scrubber must not briefly render the PREVIOUS
+          // track's stale duration/position/drop-point marker. Clear playback
+          // whenever we leave a playing state; the next track's first
+          // playbackPosition broadcast repopulates it.
+          ...(PLAYING_STATES.includes(state) ? {} : { playback: undefined }),
+        });
       });
       client.on("board", (env: ServerEnvelope) => {
         patch({ board: env.d as BoardData });

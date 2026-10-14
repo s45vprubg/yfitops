@@ -1070,3 +1070,29 @@ contract. If accepted, it should be moved into the fixed contract on a version b
 
 ### Changed — Skip threshold slider range
 - `web/admin/src/components/TopBar.tsx`: Changed slider min from 50 to 0.
+
+### Fixed — Stage: wrong secret could still trigger a real Spotify Connect (uis7-001)
+- `web/stage/src/net/useGame.ts`: `createAudioPlayer()`/the Spotify SDK
+  `connect()` call previously ran unconditionally at the top of the login
+  effect, racing the hello/welcome round trip that actually validates the
+  secret server-side. Moved both into a new `startAudio()`, now invoked only
+  from the `"welcome"` handler — i.e. strictly after `authStatus` reaches
+  `"authed"` — guarded against double-firing across reconnects.
+- `web/stage/src/config.ts`: `fetchSpotifyToken()` now returns a tagged
+  `SpotifyTokenFetch` result (`{ ok: true, token }` or `{ ok: false, reason:
+  "unauthorized" | "unavailable" }`) instead of collapsing every failure to
+  `null`, so callers can tell a server-side auth rejection (401/403) apart
+  from a genuine network/transport failure.
+- `web/stage/src/audio/index.ts`: `liveTokenProvider()` now fails hard (throws,
+  so the SDK's `getOAuthToken` callback never receives a token) on an
+  `"unauthorized"` result instead of falling back to the locally-cached
+  Spotify token — closing the window where a wrong admin secret, submitted on
+  a browser with an unexpired cached token from a prior legitimate session,
+  could still register a real Spotify Connect device. The cached-token
+  fallback is preserved for `"unavailable"` (genuine network blips), so an
+  already-authenticated session that loses connectivity mid-game still works.
+
+### Fixed — Stage: tab title didn't vary by route (uis7-002)
+- `web/stage/src/main.tsx`: Sets `document.title` based on which route
+  mounted (`"yfitops // STAGE"` for `/stage`, `"yfitops"` for the public
+  landing page) instead of relying on `index.html`'s single hardcoded title.

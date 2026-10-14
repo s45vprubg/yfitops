@@ -140,11 +140,13 @@ export function useGame() {
     const secret = authAttempt.secret;
 
     let disposed = false;
-    const audio = createAudioPlayer(secret);
-    audioRef.current = audio;
+    // audioStarted guards startAudio() below against double-firing: "welcome"
+    // re-fires on every reconnect (uistage-2's backoff re-sends hello), but the
+    // audio session must only ever be built/connected once per login attempt.
+    let audioStarted = false;
 
     const patch = (p: Partial<GameView>) => setView((v) => ({ ...v, ...p }));
-    patch({ audioMode: audio.mode, spotifyConnectState: audio.getConnectState(), authStatus: "connecting", authError: undefined });
+    patch({ authStatus: "connecting", authError: undefined });
 
     // Send only when the current client is actually connected. Audio callbacks
     // fire on their own cadence (player_state_changed etc.); after a transport
@@ -163,7 +165,8 @@ export function useGame() {
     // projector until a manual reload. We now re-run the full connect sequence
     // (fetch cert hashes -> new GameClient -> re-wire handlers -> connect ->
     // re-send hello) with capped exponential backoff. The audio layer is created
-    // once at mount and is NOT torn down across reconnects.
+    // once, on the first "welcome" (see startAudio below), and is NOT torn down
+    // across reconnects.
     let attempt = 0; // backoff step; reset to 0 on a good link
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let establishing = false; // guard against overlapping connect attempts
@@ -189,6 +192,53 @@ export function useGame() {
       }
     };
 
+    // ---- audio: build + connect only AFTER the server confirms the secret ----
+    // uis7-001: createAudioPlayer()/connect() previously ran unconditionally at
+    // the top of this effect, racing the hello/welcome round trip that actually
+    // validates `secret` server-side — a wrong secret could still register a
+    // real Spotify Connect device off a stale cached token (see audio/index.ts
+    // for the matching fix to liveTokenProvider). startAudio() is now only
+    // invoked from the "welcome" handler below, strictly after authStatus flips
+    // to "authed".
+    const startAudio = () => {
+      if (audioStarted) return;
+      audioStarted = true;
+
+      const player = createAudioPlayer(secret);
+      audioRef.current = player;
+      patch({ audioMode: player.mode, spotifyConnectState: player.getConnectState() });
+
+      // Registered once against the authed-time player; sends route through
+      // safeSend so a mid-drop callback no longer throws "not connected"
+      // (uistage-5). initSpotify's replacement player wires its own callbacks.
+      player.onReady((deviceId) => {
+        patch({ spotifyConnectState: player.getConnectState() });
+        safeSend({ t: "stage.deviceReady", d: { spotifyDeviceID: deviceId } });
+        // Identity-checked for the same reason as initSpotify's site below
+        // (s4-ui-new-04): this player is swapped out by initSpotify.
+        void player.activate().then((ok) => { if (ok && !disposed && audioRef.current === player) patch({ audioActivated: true }); });
+      });
+      player.onStateChange((s) => {
+        safeSend({
+          t: "stage.playerState",
+          d: { positionMs: Math.round(s.positionMs), paused: s.paused, trackEnded: s.trackEnded },
+        });
+      });
+      // Re-prompt for activation if this player (the authed-time
+      // createAudioPlayer one) hits the browser autoplay block.
+      player.onAutoplayBlocked?.(() => patch({ audioActivated: false }));
+
+      // If we have a Spotify token, kick off the real SDK connect now — only
+      // reachable once authStatus === "authed" (see the "welcome" handler
+      // immediately below).
+      if (player.mode === "spotify") {
+        patch({ spotifyConnectState: "connecting" });
+        void player.connect().then(() => {
+          if (!disposed) patch({ spotifyConnectState: player.getConnectState() });
+        });
+      }
+    };
+
     // wireClientHandlers registers all server -> stage subscriptions on a client.
     // Called on every (re)connect so a fresh client re-receives full-sync state.
     const wireClientHandlers = (client: GameClient) => {
@@ -197,6 +247,9 @@ export function useGame() {
         const _d = e.d as WelcomeData; // role/playerID/nonce; nonce tracked by client
         void _d;
         patch({ authStatus: "authed" });
+        // Gate the real Spotify SDK connect behind actual server-confirmed auth
+        // (uis7-001) — not merely "a login attempt was submitted".
+        startAudio();
       });
 
       // A bad secret surfaces here (server never sends welcome, just this).
@@ -338,7 +391,16 @@ export function useGame() {
       if (spotifyInitedRef.current) return; // idempotent — push + full-sync may both fire
       spotifyInitedRef.current = true;
       audioRef.current?.destroy();
-      const spotify = new SpotifyAudioPlayer(async () => (await fetchSpotifyToken(secret)) ?? pushedToken);
+      // initSpotify only ever runs off a server-pushed "spotifyToken" message
+      // (sent only to an already role-validated connection, per engine.go's
+      // onHello secret check), so `pushedToken` is a trusted, backend-issued
+      // value — not the attacker-reachable localStorage cache uis7-001
+      // targets. A refresh failure here (auth OR network) safely falls back
+      // to it unchanged.
+      const spotify = new SpotifyAudioPlayer(async () => {
+        const result = await fetchSpotifyToken(secret);
+        return result.ok ? result.token : pushedToken;
+      });
       audioRef.current = spotify;
       patch({ audioMode: "spotify", spotifyConnectState: "connecting" });
       spotify.onReady((deviceId) => {
@@ -367,27 +429,6 @@ export function useGame() {
         if (!disposed) patch({ spotifyConnectState: spotify.getConnectState() });
       });
     };
-
-    // ---- audio: local player -> backend reports ----
-    // Registered once against the mount-time player; sends route through
-    // safeSend so a mid-drop callback no longer throws "not connected"
-    // (uistage-5). initSpotify's replacement player wires its own callbacks.
-    audio.onReady((deviceId) => {
-      patch({ spotifyConnectState: audio.getConnectState() });
-      safeSend({ t: "stage.deviceReady", d: { spotifyDeviceID: deviceId } });
-      // Identity-checked for the same reason as initSpotify's site above
-      // (s4-ui-new-04): this mount-time player is swapped out by initSpotify.
-      void audio.activate().then((ok) => { if (ok && !disposed && audioRef.current === audio) patch({ audioActivated: true }); });
-    });
-    audio.onStateChange((s) => {
-      safeSend({
-        t: "stage.playerState",
-        d: { positionMs: Math.round(s.positionMs), paused: s.paused, trackEnded: s.trackEnded },
-      });
-    });
-    // Re-prompt for activation if this player (the initial createAudioPlayer
-    // one) hits the browser autoplay block.
-    audio.onAutoplayBlocked?.(() => patch({ audioActivated: false }));
 
     // establish (re)builds the transport: fresh cert hashes -> new client ->
     // re-wire handlers -> connect -> re-send hello. Reused by the initial
@@ -439,14 +480,6 @@ export function useGame() {
         establishing = false;
       }
     };
-
-    // If we have a Spotify token, kick off the SDK connect now (once).
-    if (audio.mode === "spotify") {
-      patch({ spotifyConnectState: "connecting" });
-      void audio.connect().then(() => {
-        if (!disposed) patch({ spotifyConnectState: audio.getConnectState() });
-      });
-    }
 
     void establish();
 

@@ -77,6 +77,9 @@ GATES=(
   TestQARegression_AddDailyDoubleTrack_DuplicateSpotifyURI_Returns409 # dd-api-1: fabricated 201 on a DB no-op
   TestQARegression_DeleteDailyDoubleTrack_WrongBoard_Returns404       # dd-api-2: DELETE wasn't scoped by board_id
   TestQARegression_RenameBoard_DailyDoubleCount_RejectsOversized      # dd-api-3: no upper bound on dailyDoubleCount
+  # sweep 7 — admin_store.go lyrics cache upserts (DB-gated, presence-checked)
+  TestStaging_TrackLyrics_NeverClobberResolvedOrNotFound # str7-001/002/003: resolved+manual/lrclib and not_found rows survived later probes/errors
+  TestStaging_TrackLyrics_HappyPathFirstWrite            # str7: first-ever write still resolves/not_found/pending correctly for all three upserts
 )
 echo "==> gate presence (${#GATES[@]} locked regressions)"
 for g in "${GATES[@]}"; do

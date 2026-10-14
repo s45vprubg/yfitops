@@ -12,6 +12,11 @@ import "./index.css";
 // in useGame()/any privileged connection at all.
 const isStage = window.location.pathname.startsWith("/stage");
 
+// uis7-002: index.html's hardcoded <title> showed "yfitops // STAGE" on both
+// routes, including the public landing page. Set it per-route here, the one
+// place that already knows which tree is about to mount.
+document.title = isStage ? "yfitops // STAGE" : "yfitops";
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ErrorBoundary>

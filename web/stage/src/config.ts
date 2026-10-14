@@ -38,23 +38,40 @@ export const SPOTIFY_AUTH_URL = `${HTTP_URL}/auth/spotify`;
 // every getOAuthToken call so audio survives a multi-hour game (§6).
 export const SPOTIFY_TOKEN_URL = `${HTTP_URL}/api/spotify/token`;
 
+// uis7-001: the result is tagged so callers can tell an auth rejection (the
+// server positively said `secret` is wrong) apart from a genuine
+// network/transport failure (unreachable, timeout, malformed response). These
+// are NOT the same thing: a rejected secret must never cause the caller to
+// fall back to a locally-cached token (that previously let a wrong secret
+// still drive a real Spotify Connect device off a stale browser-cached
+// token), whereas a network blip for an ALREADY-authenticated session should
+// still be allowed to fall back, for resilience.
+export type SpotifyTokenFetch =
+  | { ok: true; token: string }
+  | { ok: false; reason: "unauthorized" | "unavailable" };
+
 // fetchSpotifyToken pulls a live token from the backend, authenticating with
 // the stage secret (same Bearer the /api routes require). The secret is now
 // entered at runtime via the stage login screen, not baked into the build
 // (a build-time VITE_STAGE_SECRET auto-authenticated any visitor who loaded
-// the page — see Login.tsx). Returns null on any failure so the caller can
-// fall back to a cached token or demo mode.
-export async function fetchSpotifyToken(secret: string): Promise<string | null> {
+// the page — see Login.tsx).
+export async function fetchSpotifyToken(secret: string): Promise<SpotifyTokenFetch> {
   try {
     const res = await fetch(SPOTIFY_TOKEN_URL, {
       headers: { Authorization: `Bearer ${secret}` },
       cache: "no-store",
     });
-    if (!res.ok) return null;
+    if (res.status === 401 || res.status === 403) {
+      // The server positively rejected `secret` — distinct from "unreachable".
+      return { ok: false, reason: "unauthorized" };
+    }
+    if (!res.ok) return { ok: false, reason: "unavailable" };
     const body = (await res.json()) as { token?: string | null; connected?: boolean };
-    if (!body.connected || !body.token) return null;
-    return body.token;
+    if (!body.connected || !body.token) return { ok: false, reason: "unavailable" };
+    return { ok: true, token: body.token };
   } catch {
-    return null;
+    // Network/transport failure (offline, timeout, DNS, etc.) — not an auth
+    // rejection, so callers may still reasonably fall back to a cached token.
+    return { ok: false, reason: "unavailable" };
   }
 }

@@ -104,7 +104,9 @@ func (h *Handler) importPlaylist(w http.ResponseWriter, r *http.Request) {
 	// NOTE: do NOT probe lyrics inline here — LRCLIB responds in ~seconds per
 	// track, which would make a large import hang for minutes. Import fast, then
 	// probe lyrics in the background (the client also has a "Check lyrics"
-	// button). has_synced_lyrics stays NULL (= playable) until the probe lands.
+	// button). The track_lyrics row for this spotify_uri stays status=pending
+	// until the background probe lands (dep7-002: has_synced_lyrics was dropped
+	// from board_tracks by migration 0008 in favor of the track_lyrics table).
 	base := time.Now().UnixMilli()
 	added := make([]*Track, 0, len(tracks))
 	for i, t := range tracks {

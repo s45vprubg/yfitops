@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { GameState } from "@shared/protocol";
 import type { AdminActions, ConnStatus, PlaybackPosition } from "../useAdmin";
+import { PLAYING_STATES } from "../useAdmin";
 import { createAdminApi } from "../useAdminApi";
 import StatusPill from "./StatusPill";
 import { useModal } from "./Modal";
@@ -21,6 +22,17 @@ function formatMs(ms: number): string {
   return `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, "0")}`;
 }
 
+// Shared by the Scrubber's display AND "Mark Drop" (uia7-1) so the two can
+// never drift apart again — both need the server's discrete positionMs
+// snapshot projected forward to "now" and clamped to the track's bounds, since
+// the server REJECTS (not clamps) an out-of-range admin.setDropPoint.
+function interpolatePosition(playback: PlaybackPosition): number {
+  const elapsed = playback.paused
+    ? playback.positionMs
+    : playback.positionMs + (Date.now() - playback.receivedAtMs);
+  return Math.min(Math.max(elapsed, 0), playback.durationMs);
+}
+
 // Scrubber — click-to-seek playback bar. Interpolates smoothly between the
 // server's discrete playbackPosition snapshots (positionMs + receivedAtMs)
 // the same way ActiveRound.tsx's point timer interpolates from a startTime
@@ -35,6 +47,12 @@ function Scrubber({
 }) {
   const barRef = useRef<HTMLDivElement>(null);
   const [, forceTick] = useState(0);
+  // uia7-2: optimistic local seek target so the bar doesn't sit at the stale
+  // pre-seek position until the next organic playbackPosition broadcast
+  // arrives (which, on real Spotify hardware, is gated on Connect device-sync
+  // latency, not an instant local event). Cleared once a real broadcast whose
+  // receivedAtMs is after the click lands — the server's value then wins.
+  const [optimisticSeek, setOptimisticSeek] = useState<{ positionMs: number; atMs: number } | null>(null);
 
   useEffect(() => {
     if (!playback || playback.paused) return;
@@ -47,12 +65,17 @@ function Scrubber({
     return () => cancelAnimationFrame(raf);
   }, [playback]);
 
+  useEffect(() => {
+    if (optimisticSeek && playback && playback.receivedAtMs >= optimisticSeek.atMs) {
+      setOptimisticSeek(null);
+    }
+  }, [playback, optimisticSeek]);
+
   if (!playback || playback.durationMs <= 0) return null;
 
-  const elapsed = playback.paused
-    ? playback.positionMs
-    : playback.positionMs + (Date.now() - playback.receivedAtMs);
-  const clamped = Math.min(Math.max(elapsed, 0), playback.durationMs);
+  const clamped = optimisticSeek
+    ? Math.min(Math.max(optimisticSeek.positionMs, 0), playback.durationMs)
+    : interpolatePosition(playback);
   const frac = clamped / playback.durationMs;
 
   return (
@@ -63,7 +86,9 @@ function Scrubber({
         if (!bar) return;
         const rect = bar.getBoundingClientRect();
         const clickFrac = Math.min(Math.max((e.clientX - rect.left) / rect.width, 0), 1);
-        onSeek(Math.round(clickFrac * playback.durationMs));
+        const positionMs = Math.round(clickFrac * playback.durationMs);
+        setOptimisticSeek({ positionMs, atMs: Date.now() });
+        onSeek(positionMs);
       }}
       title={`${formatMs(clamped)} / ${formatMs(playback.durationMs)}`}
       className="relative h-2 w-40 cursor-pointer overflow-hidden rounded-full border border-edge bg-panel"
@@ -88,13 +113,6 @@ const ACTIVE_GAME_STATES: GameState[] = [
   "KARAOKE",
   "DAILY_DOUBLE",
   "TRANSITION",
-];
-
-const PLAYING_STATES: GameState[] = [
-  "ROUND_ACTIVE",
-  "LOCKED_OUT",
-  "KARAOKE",
-  "DAILY_DOUBLE",
 ];
 
 function isGameActive(s?: GameState): boolean {
@@ -138,6 +156,39 @@ export default function GameControls({
       prevState.current = gameState;
     }
   }, [gameState]);
+
+  // uia7-3: in-flight guards against rapid double-click, mirroring
+  // HoldingArea.tsx's rescanning/building/requeryingId boolean-guard pattern.
+  // markDropPoint/jumpToDrop are fire-and-forget sendAction calls (no
+  // await-able completion signal reaches this component), so the guard is
+  // cleared on a short timeout fallback rather than on response receipt.
+  const [markingDrop, setMarkingDrop] = useState(false);
+  const [jumpingToDrop, setJumpingToDrop] = useState(false);
+  const markingDropTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const jumpingToDropTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (markingDropTimeout.current) clearTimeout(markingDropTimeout.current);
+      if (jumpingToDropTimeout.current) clearTimeout(jumpingToDropTimeout.current);
+    };
+  }, []);
+
+  const handleMarkDrop = () => {
+    if (!playback || markingDrop) return;
+    setMarkingDrop(true);
+    // uia7-1: clamp with the SAME helper the Scrubber's display uses, so a
+    // click near the end of the track can never send a positionMs past
+    // durationMs and trip the server's dropPointOutOfRange rejection.
+    actions.markDropPoint(interpolatePosition(playback));
+    markingDropTimeout.current = setTimeout(() => setMarkingDrop(false), 1500);
+  };
+
+  const handleJumpToDrop = () => {
+    if (jumpingToDrop) return;
+    setJumpingToDrop(true);
+    actions.jumpToDrop();
+    jumpingToDropTimeout.current = setTimeout(() => setJumpingToDrop(false), 1500);
+  };
 
   const gameActive = isGameActive(gameState);
   // A track only exists in the PLAYING_STATES (a round/karaoke is live). Between
@@ -185,18 +236,16 @@ export default function GameControls({
       {trackLoaded && (
         <>
           <button
-            onClick={() => playback && actions.markDropPoint(
-              playback.paused ? playback.positionMs : playback.positionMs + (Date.now() - playback.receivedAtMs),
-            )}
-            disabled={!playback}
+            onClick={handleMarkDrop}
+            disabled={!playback || markingDrop}
             title="Mark the current position as this song's drop/chorus"
             className="rounded border border-edge bg-panel px-2 py-1.5 text-xs font-semibold text-slate-300 hover:bg-panel3 disabled:pointer-events-none disabled:opacity-30"
           >
             Mark Drop
           </button>
           <button
-            onClick={actions.jumpToDrop}
-            disabled={!playback?.hasDropPoint}
+            onClick={handleJumpToDrop}
+            disabled={!playback?.hasDropPoint || jumpingToDrop}
             title={playback?.hasDropPoint ? "Jump to the marked drop point" : "No drop point marked for this song yet"}
             className="rounded border border-amber-700 bg-amber-950/30 px-2 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-900/40 disabled:pointer-events-none disabled:opacity-30"
           >

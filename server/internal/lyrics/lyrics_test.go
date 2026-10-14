@@ -338,19 +338,33 @@ func TestProbe_GivesUpAfterSecondRateLimit(t *testing.T) {
 
 func TestParseRetryAfter(t *testing.T) {
 	tests := []struct {
+		name string
 		in   string
 		want time.Duration
 	}{
-		{"2", 2 * time.Second},
-		{"", 1 * time.Second},
-		{"not-a-number", 1 * time.Second},
-		{"-1", 1 * time.Second},
-		{"0", 0},
+		{"normal small value", "2", 2 * time.Second},
+		{"missing header", "", 1 * time.Second},
+		{"non-numeric", "not-a-number", 1 * time.Second},
+		{"negative input", "-1", 1 * time.Second},
+		{"zero", "0", 0},
+		{"at the max boundary", "10", 10 * time.Second},
+		{"just over the max boundary", "11", 1 * time.Second},
+		// A ~10-digit value is well within int range for strconv.Atoi but,
+		// pre-fix, overflowed the int64 multiply by time.Second and wrapped
+		// to a negative duration (see lyr7-001). Must clamp to the safe
+		// fallback, and must never be negative.
+		{"absurd ~10-digit value", "9999999999", 1 * time.Second},
 	}
 	for _, tc := range tests {
-		if got := parseRetryAfter(tc.in); got != tc.want {
-			t.Errorf("parseRetryAfter(%q) = %v, want %v", tc.in, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseRetryAfter(tc.in)
+			if got != tc.want {
+				t.Errorf("parseRetryAfter(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+			if got < 0 {
+				t.Errorf("parseRetryAfter(%q) = %v, must never be negative", tc.in, got)
+			}
+		})
 	}
 }
 

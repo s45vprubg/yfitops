@@ -97,12 +97,12 @@ func TestRescanLyrics_OnlyProbesNeverAttempted(t *testing.T) {
 		t.Errorf("never-attempted song should now be resolved, got %+v", store.lyrics["spotify:track:new"])
 	}
 
-	var summary map[string]int
+	var summary rescanLyricsResult
 	if err := json.Unmarshal(w.Body.Bytes(), &summary); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if summary["attempted"] != 1 || summary["resolved"] != 1 {
-		t.Errorf("summary = %+v, want attempted=1 resolved=1", summary)
+	if summary.Attempted != 1 || summary.Resolved != 1 || summary.Truncated {
+		t.Errorf("summary = %+v, want attempted=1 resolved=1 truncated=false", summary)
 	}
 }
 
@@ -215,10 +215,13 @@ func TestAddDailyDoubleTrack_RequiresResolvedLyrics(t *testing.T) {
 	mux := http.NewServeMux()
 	h.Register(mux)
 
+	// api7-004: lyrics-not-resolved is a precondition failure (412), distinct
+	// from the duplicate-track conflict (409) covered by
+	// TestQARegression_AddDailyDoubleTrack_RejectionCodesAreDistinguishable.
 	blocked := doReq(mux, "POST", "/api/boards/brd_test/daily-double-tracks",
 		`{"spotifyUri":"spotify:track:bad","artist":"A","song":"S","durationMs":180000}`)
-	if blocked.Code != http.StatusConflict {
-		t.Fatalf("not_found song: expected 409, got %d: %s", blocked.Code, blocked.Body.String())
+	if blocked.Code != http.StatusPreconditionFailed {
+		t.Fatalf("not_found song: expected 412, got %d: %s", blocked.Code, blocked.Body.String())
 	}
 	if len(store.ddTracks) != 0 {
 		t.Fatalf("ddTracks = %v, want none added for an unresolved song", store.ddTracks)
@@ -226,8 +229,8 @@ func TestAddDailyDoubleTrack_RequiresResolvedLyrics(t *testing.T) {
 
 	blockedUnknown := doReq(mux, "POST", "/api/boards/brd_test/daily-double-tracks",
 		`{"spotifyUri":"spotify:track:nevercheckedxyz","artist":"A","song":"S","durationMs":180000}`)
-	if blockedUnknown.Code != http.StatusConflict {
-		t.Fatalf("never-checked song: expected 409, got %d: %s", blockedUnknown.Code, blockedUnknown.Body.String())
+	if blockedUnknown.Code != http.StatusPreconditionFailed {
+		t.Fatalf("never-checked song: expected 412, got %d: %s", blockedUnknown.Code, blockedUnknown.Body.String())
 	}
 
 	allowed := doReq(mux, "POST", "/api/boards/brd_test/daily-double-tracks",

@@ -485,6 +485,60 @@ func TestQARegression_AddDailyDoubleTrack_DuplicateSpotifyURI_Returns409(t *test
 	}
 }
 
+// TestQARegression_AddDailyDoubleTrack_RejectionCodesAreDistinguishable
+// covers api7-004: addDailyDoubleTrack has two different rejection paths —
+// lyrics not yet resolved, and a duplicate spotifyUri already in the bucket
+// — that both used to return 409 Conflict with only the free-text body to
+// tell them apart. A future caller/frontend branching on status code alone
+// (ignoring body text) would have conflated the two. They must now use
+// distinct status codes: 412 Precondition Failed (lyrics not ready — not a
+// conflict at all) vs 409 Conflict (true duplicate resource).
+func TestQARegression_AddDailyDoubleTrack_RejectionCodesAreDistinguishable(t *testing.T) {
+	store := &mockStore{
+		boards: []Board{{ID: "brd_test", Name: "Test Board", Cols: 3}},
+		lyrics: map[string]LyricsRecord{
+			"spotify:track:resolved123": {SpotifyURI: "spotify:track:resolved123", Status: LyricsStatusResolved, Source: "manual"},
+		},
+	}
+	h := NewHandler(store, nil, &mockEngine{}, "test-secret")
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	notResolved := strings.NewReader(`{"spotifyUri":"spotify:track:unresolved999","artist":"A","song":"S","durationMs":180000}`)
+	req := httptest.NewRequest("POST", "/api/boards/brd_test/daily-double-tracks", notResolved)
+	req.Header.Set("Authorization", "Bearer test-secret")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	if w.Code != http.StatusPreconditionFailed {
+		t.Fatalf("lyrics not resolved: expected 412, got %d: %s", w.Code, w.Body.String())
+	}
+
+	first := strings.NewReader(`{"spotifyUri":"spotify:track:resolved123","artist":"A","song":"S","durationMs":180000}`)
+	req2 := httptest.NewRequest("POST", "/api/boards/brd_test/daily-double-tracks", first)
+	req2.Header.Set("Authorization", "Bearer test-secret")
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusCreated {
+		t.Fatalf("first add: expected 201, got %d: %s", w2.Code, w2.Body.String())
+	}
+
+	duplicate := strings.NewReader(`{"spotifyUri":"spotify:track:resolved123","artist":"A","song":"S","durationMs":180000}`)
+	req3 := httptest.NewRequest("POST", "/api/boards/brd_test/daily-double-tracks", duplicate)
+	req3.Header.Set("Authorization", "Bearer test-secret")
+	req3.Header.Set("Content-Type", "application/json")
+	w3 := httptest.NewRecorder()
+	mux.ServeHTTP(w3, req3)
+	if w3.Code != http.StatusConflict {
+		t.Fatalf("duplicate add: expected 409, got %d: %s", w3.Code, w3.Body.String())
+	}
+
+	if w.Code == w3.Code {
+		t.Fatalf("the two rejection cases must use distinct status codes, both got %d", w.Code)
+	}
+}
+
 // TestQARegression_DeleteDailyDoubleTrack_WrongBoard_Returns404 covers
 // dd-api-2: the DELETE route is /api/boards/{id}/daily-double-tracks/{trackId}
 // but the pre-fix handler never read the {id} board segment, and

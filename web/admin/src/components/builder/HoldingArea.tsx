@@ -24,6 +24,7 @@ export default function HoldingArea({ api, boardId, tracks, onRefresh, onDeleteT
   const [building, setBuilding] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [requeryingId, setRequeryingId] = useState<string | null>(null);
+  const [requeryError, setRequeryError] = useState<string | null>(null);
   const [manualLyricsTrack, setManualLyricsTrack] = useState<TrackData | null>(null);
   const { confirm } = useModal();
 
@@ -42,10 +43,19 @@ export default function HoldingArea({ api, boardId, tracks, onRefresh, onDeleteT
 
   const handleRequeryLyrics = async (trackId: string) => {
     setRequeryingId(trackId);
+    setRequeryError(null);
     try {
       await api.requeryLyrics(boardId, trackId);
       onRefresh();
-    } catch { /* surfaced via list refresh */ }
+    } catch (e) {
+      // uia7-4: this used to be an empty catch with a comment claiming the
+      // error was "surfaced via list refresh" — but onRefresh() only runs on
+      // the success path above, so a failure (expected/recurring per
+      // TrackCard's "pending" status copy) previously produced zero
+      // user-visible feedback. Reuse the same error-display convention
+      // handleAiBuild already uses (aiError) for the requery button.
+      setRequeryError(e instanceof Error ? e.message : "Lyrics requery failed");
+    }
     setRequeryingId(null);
   };
 
@@ -104,6 +114,7 @@ export default function HoldingArea({ api, boardId, tracks, onRefresh, onDeleteT
           {rescanning ? "checking…" : "Check lyrics"}
         </button>
       </div>
+      {requeryError && <div className="text-[11px] text-red-400">{requeryError}</div>}
 
       <div className="flex items-center justify-between">
         <span className="text-xs text-slate-500">

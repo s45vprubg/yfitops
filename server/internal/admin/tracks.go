@@ -16,7 +16,25 @@ var spotifyURIPattern = regexp.MustCompile(`^spotify:track:[a-zA-Z0-9]+$`)
 // clients to send requests sequentially with a 200-500ms delay between them
 // rather than hammering the API concurrently — this is documented guidance,
 // not a guess.
-const lyricsProbeDelay = 300 * time.Millisecond
+//
+// A var (not const) solely so tests exercising maxRescanTracksPerRequest's
+// cap (which otherwise walks up to 100 iterations) can shrink it and avoid a
+// real multi-second sleep; production code never reassigns it.
+var lyricsProbeDelay = 300 * time.Millisecond
+
+// maxRescanTracksPerRequest caps how many never-attempted songs a single
+// rescan-lyrics call will probe (api7-002). Without a cap, lyricsProbeDelay
+// times an unbounded ListTracks() result can block the HTTP request for a
+// very long time with no progress feedback and no way to stop it short of a
+// disconnect — there is no server-side request timeout configured anywhere
+// in this repo (gameserver's http.ListenAndServe uses Go's zero-value
+// defaults) that would otherwise cut it off. 100 is comfortably above any
+// realistic single board's track library (boardRows=5 rows per column, see
+// boards.go, times a handful of columns, plus the separate Daily Double
+// bucket) while still bounding the worst case to roughly 100 LRCLIB round
+// trips. When the cap is hit, the response's Truncated field tells the
+// admin/frontend to re-run the rescan to pick up the rest.
+const maxRescanTracksPerRequest = 100
 
 func (h *Handler) listTracks(w http.ResponseWriter, r *http.Request) {
 	boardID := r.PathValue("id")
@@ -219,10 +237,27 @@ func (h *Handler) rescanLyrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	attempted, resolved := 0, 0
+	attempted, resolved, truncated := 0, 0, false
 	for i, t := range tracks {
+		// api7-001: stop the moment the client's request context is gone
+		// (disconnect/cancel) instead of grinding through every remaining
+		// track. A track that was never reached must stay in its true
+		// never-attempted state — no row at all — rather than getting a
+		// bogus pending/"context canceled" row via UpsertLyricsError below
+		// (the ON CONFLICT UPDATE guard in that upsert only protects rows
+		// that already exist; a brand-new row's bare INSERT path has no
+		// such guard).
+		if r.Context().Err() != nil {
+			break
+		}
 		if _, ok := existing[t.SpotifyURI]; ok {
 			continue
+		}
+		// api7-002: cap how many never-attempted songs one request will
+		// probe. See maxRescanTracksPerRequest's doc comment for why.
+		if attempted >= maxRescanTracksPerRequest {
+			truncated = true
+			break
 		}
 		text, found, perr := h.lyrics.Probe(r.Context(), t.Artist, t.Song, int(t.DurationMs/1000))
 		attempted++
@@ -236,10 +271,28 @@ func (h *Handler) rescanLyrics(w http.ResponseWriter, r *http.Request) {
 			resolved++
 		}
 		if i < len(tracks)-1 {
-			time.Sleep(lyricsProbeDelay)
+			// Interruptible: a disconnect mid-sleep stops immediately
+			// instead of waiting out the full delay before the next
+			// iteration's context check even gets a chance to run.
+			select {
+			case <-time.After(lyricsProbeDelay):
+			case <-r.Context().Done():
+			}
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]int{"attempted": attempted, "resolved": resolved})
+	writeJSON(w, http.StatusOK, rescanLyricsResult{Attempted: attempted, Resolved: resolved, Truncated: truncated})
+}
+
+// rescanLyricsResult summarizes one rescan-lyrics call. Truncated is true
+// when maxRescanTracksPerRequest was hit with never-attempted tracks still
+// remaining (api7-002) — the admin/frontend should re-run the rescan to pick
+// up the rest. It is NOT set when the loop stopped early due to a cancelled
+// request context (api7-001): in that case nothing is listening for the
+// response anyway.
+type rescanLyricsResult struct {
+	Attempted int  `json:"attempted"`
+	Resolved  int  `json:"resolved"`
+	Truncated bool `json:"truncated"`
 }
 
 // requeryLyrics re-probes LRCLIB for a single track's song regardless of its
@@ -251,14 +304,19 @@ func (h *Handler) requeryLyrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "lyrics prober not configured", http.StatusServiceUnavailable)
 		return
 	}
+	boardID := r.PathValue("id")
 	trackID := r.PathValue("trackId")
 	t, err := h.store.GetTrack(r.Context(), trackID)
 	if err != nil {
 		serverError(w, err)
 		return
 	}
-	if t == nil {
-		http.Error(w, "track not found", http.StatusNotFound)
+	// api7-003: scope the lookup to the board in the URL, mirroring
+	// dailydouble.go's deleteDailyDoubleTrack/RemoveDailyDoubleTrack
+	// board-scoped pattern (dd-api-2) — a trackId from board A must not
+	// resolve through board B's URL.
+	if t == nil || t.BoardID != boardID {
+		http.Error(w, "track not found on this board", http.StatusNotFound)
 		return
 	}
 	h.probeOne(r.Context(), t.SpotifyURI, t.Artist, t.Song, int(t.DurationMs/1000))
@@ -277,14 +335,17 @@ func (h *Handler) requeryLyrics(w http.ResponseWriter, r *http.Request) {
 // every other lyrics-aware code path reads from — a manually-entered song
 // gets the identical karaoke overlay a successful LRCLIB fetch would have.
 func (h *Handler) setLyricsManual(w http.ResponseWriter, r *http.Request) {
+	boardID := r.PathValue("id")
 	trackID := r.PathValue("trackId")
 	t, err := h.store.GetTrack(r.Context(), trackID)
 	if err != nil {
 		serverError(w, err)
 		return
 	}
-	if t == nil {
-		http.Error(w, "track not found", http.StatusNotFound)
+	// api7-003: scope the lookup to the board in the URL (see requeryLyrics's
+	// identical check above for the full rationale).
+	if t == nil || t.BoardID != boardID {
+		http.Error(w, "track not found on this board", http.StatusNotFound)
 		return
 	}
 

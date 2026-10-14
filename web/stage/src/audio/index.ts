@@ -69,10 +69,25 @@ export function captureSpotifyToken(): string | null {
 // liveTokenProvider returns a token for the SDK's getOAuthToken callback. It
 // prefers a freshly-refreshed token from the backend (so audio survives the
 // ~1h Spotify token TTL across a long game), falling back to the cached token
-// from the OAuth redirect if the endpoint is unreachable.
+// from the OAuth redirect ONLY on a genuine network/transport failure.
+//
+// uis7-001: an "unauthorized" result means the server positively rejected
+// `secret` — that must never fall back to the cached/initial token (a wrong
+// secret could otherwise still drive a real Spotify Connect device off a
+// stale, previously-legitimate token cached in this browser's localStorage).
+// We fail hard instead: throwing here means the SDK's getOAuthToken callback
+// (spotify.ts) never receives a token for this call, so no Spotify-side
+// action occurs. A genuine network/transport failure ("unavailable") is the
+// distinct, acceptable resilience case — an already-authenticated session
+// that loses connectivity mid-game should still be able to keep playing on
+// its last-known-good token.
 async function liveTokenProvider(initial: string, secret: string): Promise<string> {
-  const fresh = await fetchSpotifyToken(secret);
-  return fresh ?? readPersistedToken() ?? initial;
+  const result = await fetchSpotifyToken(secret);
+  if (result.ok) return result.token;
+  if (result.reason === "unauthorized") {
+    throw new Error("[spotify] token fetch unauthorized — secret rejected by server");
+  }
+  return readPersistedToken() ?? initial;
 }
 
 /**

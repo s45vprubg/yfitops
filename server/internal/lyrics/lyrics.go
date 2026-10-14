@@ -138,7 +138,7 @@ func (c *LRCLIBClient) Probe(ctx context.Context, artist, song string, durationS
 	select {
 	case <-time.After(wait):
 	case <-ctx.Done():
-		return "", false, ctx.Err()
+		return "", false, fmt.Errorf("lyrics: retry wait: %w", ctx.Err())
 	}
 	return c.probeOnce(ctx, artist, song, durationSec)
 }
@@ -199,7 +199,13 @@ func (c *LRCLIBClient) probeOnce(ctx context.Context, artist, song string, durat
 // 503 — when the header is missing or not a valid non-negative integer.
 func parseRetryAfter(v string) time.Duration {
 	secs, err := strconv.Atoi(strings.TrimSpace(v))
-	if err != nil || secs < 0 {
+	// Bound secs before multiplying by time.Second: a pathologically large
+	// value (e.g. a corrupted/malicious ~10-digit header) can overflow the
+	// int64 multiply and wrap to a negative duration, which would then evade
+	// the caller's `wait > maxRetryWait` clamp (a negative is never greater
+	// than maxRetryWait). Clamping the input here, pre-multiply, closes that
+	// window entirely regardless of what the caller does afterward.
+	if err != nil || secs < 0 || secs > int(maxRetryWait/time.Second) {
 		return 1 * time.Second
 	}
 	return time.Duration(secs) * time.Second
