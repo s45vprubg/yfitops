@@ -7,7 +7,6 @@ import EvaluationPanel from "./components/EvaluationPanel";
 import TelemetryPanel from "./components/TelemetryPanel";
 import ScorePanel from "./components/ScorePanel";
 import BoardBuilderPage from "./components/BoardBuilderPage";
-import SettingsPage from "./components/SettingsPage";
 import { HTTP_URL } from "./config";
 
 const ACTIVE_GAME_STATES: GameState[] = [
@@ -15,7 +14,7 @@ const ACTIVE_GAME_STATES: GameState[] = [
   "KARAOKE", "DAILY_DOUBLE", "TRANSITION",
 ];
 
-type Page = "control" | "builder" | "settings";
+type Page = "control" | "builder";
 
 export default function App() {
   const [state, actions] = useAdmin();
@@ -63,7 +62,6 @@ export default function App() {
         {([
           ["control", "Control Room"],
           ["builder", "Board Builder"],
-          ["settings", "Mixer"],
         ] as [Page, string][]).map(([id, label]) => (
           <button
             key={id}
@@ -100,6 +98,10 @@ export default function App() {
               spotifyConnected={spotifyConnected}
               adminSecret={secret}
               onSelect={(row, col) => actions.select({ row, col })}
+              volumePct={state.volumePct}
+              onSetVolume={actions.setVolume}
+              revealCfg={state.revealCfg}
+              actions={actions}
             />
             <EvaluationPanel
               gameState={state.gameState}
@@ -159,12 +161,6 @@ export default function App() {
       {page === "builder" && (
         <div className="min-h-0 flex-1">
           <BoardBuilderPage secret={secret} />
-        </div>
-      )}
-
-      {page === "settings" && (
-        <div className="min-h-0 flex-1">
-          <SettingsPage revealCfg={state.revealCfg} actions={actions} />
         </div>
       )}
     </div>

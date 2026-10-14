@@ -183,7 +183,7 @@ type tokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 	ExpiresIn    int    `json:"expires_in"` // seconds until the access token dies (~3600)
-	Scope        string `json:"scope"`       // space-separated scopes Spotify actually granted
+	Scope        string `json:"scope"`      // space-separated scopes Spotify actually granted
 }
 
 // Exchange swaps an authorization code for access+refresh tokens
@@ -393,7 +393,7 @@ func (c *Client) Play(ctx context.Context, trackURI string, positionMs int64) er
 	if err != nil {
 		return fmt.Errorf("spotify: marshal play body: %w", err)
 	}
-	return c.playerCommand(ctx, "play", body)
+	return c.playerCommand(ctx, "play", body, nil)
 }
 
 // Pause pauses playback on the bound device (game.AudioDevice), porting
@@ -401,22 +401,39 @@ func (c *Client) Play(ctx context.Context, trackURI string, positionMs int64) er
 // handled by the engine over WebTransport, not this API round-trip; this is
 // the slower-path API pause used outside that hot path.
 func (c *Client) Pause(ctx context.Context) error {
-	return c.playerCommand(ctx, "pause", nil)
+	return c.playerCommand(ctx, "pause", nil, nil)
 }
 
 // Resume resumes playback on the bound device (game.AudioDevice). Legacy resume
 // was a bare play() with no body (server.js:1481); we send no body so Spotify
 // continues the current track from its paused position.
 func (c *Client) Resume(ctx context.Context) error {
-	return c.playerCommand(ctx, "play", nil)
+	return c.playerCommand(ctx, "play", nil, nil)
 }
 
-// playerCommand issues PUT /v1/me/player/{action}?device_id=... with the
-// bearer token, and on a 401 refreshes the token and retries exactly once —
-// the control flow ported from the legacy play/pause handlers
-// (server.js:1300-1311, 1481-1490).
-func (c *Client) playerCommand(ctx context.Context, action string, body []byte) error {
-	resp, err := c.doPlayer(ctx, action, body)
+// SetVolume sets the bound device's playback volume (game.AudioDevice), used
+// by the Daily Double fade-out and the admin volume control. Unlike
+// play/pause/resume, Spotify's volume endpoint takes the level as a query
+// param (volume_percent), not a JSON body — routed through the same
+// extra-params plumbing playerCommand/doPlayer already have.
+func (c *Client) SetVolume(ctx context.Context, percent int) error {
+	if percent < 0 {
+		percent = 0
+	} else if percent > 100 {
+		percent = 100
+	}
+	extra := url.Values{}
+	extra.Set("volume_percent", fmt.Sprintf("%d", percent))
+	return c.playerCommand(ctx, "volume", nil, extra)
+}
+
+// playerCommand issues PUT /v1/me/player/{action}?device_id=...[&extra] with
+// the bearer token, and on a 401 refreshes the token and retries exactly
+// once — the control flow ported from the legacy play/pause handlers
+// (server.js:1300-1311, 1481-1490). extra carries action-specific query
+// params (e.g. SetVolume's volume_percent); nil for play/pause/resume.
+func (c *Client) playerCommand(ctx context.Context, action string, body []byte, extra url.Values) error {
+	resp, err := c.doPlayer(ctx, action, body, extra)
 	if err != nil {
 		return fmt.Errorf("spotify: %s: %w", action, err)
 	}
@@ -434,7 +451,7 @@ func (c *Client) playerCommand(ctx context.Context, action string, body []byte) 
 		if rerr := c.refresh(ctx, true, failed); rerr != nil {
 			return fmt.Errorf("spotify: %s: %w", action, rerr)
 		}
-		resp, err = c.doPlayer(ctx, action, body)
+		resp, err = c.doPlayer(ctx, action, body, extra)
 		if err != nil {
 			return fmt.Errorf("spotify: %s (after refresh): %w", action, err)
 		}
@@ -452,8 +469,9 @@ func (c *Client) playerCommand(ctx context.Context, action string, body []byte) 
 
 // doPlayer builds and sends a single player PUT. Each call reads the current
 // access token + device id under the lock so a mid-flight refresh is picked up
-// on retry.
-func (c *Client) doPlayer(ctx context.Context, action string, body []byte) (*http.Response, error) {
+// on retry. extra's keys (if any) are merged into the query string alongside
+// device_id.
+func (c *Client) doPlayer(ctx context.Context, action string, body []byte, extra url.Values) (*http.Response, error) {
 	c.mu.Lock()
 	token := c.accessToken
 	device := c.deviceID
@@ -464,9 +482,16 @@ func (c *Client) doPlayer(ctx context.Context, action string, body []byte) (*htt
 	}
 
 	endpoint := c.apiBase + "/me/player/" + action
+	q := url.Values{}
+	for k, vs := range extra {
+		for _, v := range vs {
+			q.Add(k, v)
+		}
+	}
 	if device != "" {
-		q := url.Values{}
 		q.Set("device_id", device)
+	}
+	if len(q) > 0 {
 		endpoint += "?" + q.Encode()
 	}
 

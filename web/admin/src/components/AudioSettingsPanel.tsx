@@ -1,0 +1,216 @@
+import { useEffect, useRef, useState } from "react";
+import type { AdminRevealCfgData } from "@shared/protocol";
+import type { AdminActions } from "../useAdmin";
+
+// AudioSettingsPanel — everything audio-related in one place: the live
+// operating-volume slider (also what a Daily Double fade-out restores to)
+// plus the full mixing desk, moved here from the former standalone "Mixer"
+// tab so operators don't have to leave the Control Room to touch either.
+//
+// Each mixer knob is a VERTICAL fader (fills from the bottom like a channel
+// strip) with the value on top and the label on the bottom cap, plus a toggle
+// "switch" channel. Reveal knobs seed from the server echo and apply NEXT
+// round; skip threshold applies immediately.
+
+interface Props {
+  volumePct?: number;
+  onSetVolume: (percent: number) => void;
+  revealCfg?: AdminRevealCfgData;
+  actions: AdminActions;
+}
+
+// Server clamp bounds (mirror reveal.go): [min, max, step].
+const B = {
+  interval: [250, 10000, 250] as const,
+  phase1: [0, 20000, 500] as const,
+  block: [0, 20000, 500] as const,
+  ease: [0, 10000, 100] as const,
+  lockout: [0, 20, 1] as const,
+  autoKaraoke: [0, 15000, 500] as const,
+  hintDelay: [0, 20000, 500] as const,
+};
+
+export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, actions }: Props) {
+  // Skip threshold: no server readback; local, applies immediately.
+  const [thresh, setThresh] = useState(50);
+  const threshTouched = useRef(false);
+  useEffect(() => {
+    if (!threshTouched.current) return;
+    const id = setTimeout(() => actions.setThresh(thresh), 120);
+    return () => clearTimeout(id);
+  }, [thresh, actions]);
+
+  // Reveal knobs seed from the server echo until edited.
+  const [intervalMs, setIntervalMs] = useState(revealCfg?.intervalMs ?? 3000);
+  const [phase1Ms, setPhase1Ms] = useState(revealCfg?.phase1Ms ?? 10000);
+  const [blockMs, setBlockMs] = useState(revealCfg?.blockMs ?? 15000);
+  const [easeMs, setEaseMs] = useState(revealCfg?.easeMs ?? 3000);
+  const [lockoutChars, setLockoutChars] = useState(revealCfg?.lockoutChars ?? 2);
+  const [autoKaraokeMs, setAutoKaraokeMs] = useState(revealCfg?.autoKaraokeMs ?? 3000);
+  const [genreDelayMs, setGenreDelayMs] = useState(revealCfg?.genreDelayMs ?? 3000);
+  const [yearDelayMs, setYearDelayMs] = useState(revealCfg?.yearDelayMs ?? 5000);
+  const [alternate, setAlternate] = useState(revealCfg?.alternate ?? true);
+  const revealTouched = useRef(false);
+
+  useEffect(() => {
+    if (revealTouched.current || !revealCfg) return;
+    setIntervalMs(revealCfg.intervalMs);
+    setPhase1Ms(revealCfg.phase1Ms);
+    setBlockMs(revealCfg.blockMs);
+    setEaseMs(revealCfg.easeMs);
+    setLockoutChars(revealCfg.lockoutChars);
+    setAutoKaraokeMs(revealCfg.autoKaraokeMs);
+    setGenreDelayMs(revealCfg.genreDelayMs);
+    setYearDelayMs(revealCfg.yearDelayMs);
+    setAlternate(revealCfg.alternate);
+  }, [revealCfg]);
+
+  useEffect(() => {
+    if (!revealTouched.current) return;
+    const id = setTimeout(
+      () => actions.setRevealCfg({ intervalMs, phase1Ms, blockMs, easeMs, lockoutChars, autoKaraokeMs, genreDelayMs, yearDelayMs }),
+      150,
+    );
+    return () => clearTimeout(id);
+  }, [intervalMs, phase1Ms, blockMs, easeMs, lockoutChars, autoKaraokeMs, genreDelayMs, yearDelayMs, actions]);
+
+  const edit = <T,>(setter: (v: T) => void) => (v: T) => { revealTouched.current = true; setter(v); };
+
+  const volume = volumePct ?? 100;
+
+  return (
+    <div className="border-t border-edge">
+      <div className="flex items-baseline justify-between px-3 py-2">
+        <h2 className="text-xs font-bold uppercase tracking-[0.25em] text-accent">Audio Settings</h2>
+      </div>
+
+      {/* Live operating volume — also the level a Daily Double fade-out
+          restores to once a performance ends, so this is the baseline, not
+          a one-off control. */}
+      <div className="flex items-center gap-2 border-b border-edge px-3 py-2">
+        <span className="text-[10px] uppercase tracking-wide text-slate-500" title="Playback volume">
+          🔊
+        </span>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          value={volume}
+          onChange={(e) => onSetVolume(Number(e.target.value))}
+          className="flex-1 accent-accent"
+          aria-label="Playback volume"
+        />
+        <span className="tnum w-8 text-right text-[10px] text-slate-500">{volume}%</span>
+      </div>
+
+      {/* The desk: channel strips, wrapping to fit this column's width. */}
+      <div className="max-h-[40vh] overflow-auto p-2">
+        <div className="flex flex-wrap items-end gap-2">
+          <Fader label="Skip" sub="threshold" value={thresh} min={0} max={100} step={5}
+            fmt={(v) => `${v}%`} onChange={(v) => { threshTouched.current = true; setThresh(v); }} />
+
+          <Divider label="Hints" />
+
+          <Fader label="Genre" sub="show after" value={genreDelayMs} min={B.hintDelay[0]} max={B.hintDelay[1]} step={B.hintDelay[2]}
+            fmt={(v) => `${(v / 1000).toFixed(1)}s`} onChange={edit(setGenreDelayMs)} />
+          <Fader label="Year" sub="after genre" value={yearDelayMs} min={B.hintDelay[0]} max={B.hintDelay[1]} step={B.hintDelay[2]}
+            fmt={(v) => `${(v / 1000).toFixed(1)}s`} onChange={edit(setYearDelayMs)} />
+
+          <Divider label="Reveal" />
+
+          <Fader label="Interval" sub="per letter" value={intervalMs} min={B.interval[0]} max={B.interval[1]} step={B.interval[2]}
+            fmt={(v) => `${(v / 1000).toFixed(2)}s`} onChange={edit(setIntervalMs)} />
+          <Fader label="Start" sub="letters after" value={phase1Ms} min={B.phase1[0]} max={B.phase1[1]} step={B.phase1[2]}
+            fmt={(v) => `${(v / 1000).toFixed(1)}s`} onChange={edit(setPhase1Ms)} />
+          <Fader label="Hide len" sub="block until" value={blockMs} min={B.block[0]} max={B.block[1]} step={B.block[2]}
+            fmt={(v) => (v === 0 ? "off" : `${(v / 1000).toFixed(1)}s`)} onChange={edit(setBlockMs)} />
+          <Fader label="Morph" sub="length ease" value={easeMs} min={B.ease[0]} max={B.ease[1]} step={B.ease[2]}
+            fmt={(v) => `${(v / 1000).toFixed(1)}s`} onChange={edit(setEaseMs)} />
+          <Fader label="Lockout" sub="chars left" value={lockoutChars} min={B.lockout[0]} max={B.lockout[1]} step={B.lockout[2]}
+            fmt={(v) => `${v}`} onChange={edit(setLockoutChars)} />
+          <Fader label="Auto lyrics" sub="after reveal" value={autoKaraokeMs} min={B.autoKaraoke[0]} max={B.autoKaraoke[1]} step={B.autoKaraoke[2]}
+            fmt={(v) => (v === 0 ? "off" : `${(v / 1000).toFixed(1)}s`)} onChange={edit(setAutoKaraokeMs)} />
+
+          <Switch label="Alt" sub="artist/song" checked={alternate}
+            onChange={(v) => { revealTouched.current = true; setAlternate(v); actions.setRevealCfg({ alternate: v }); }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Divider — a labelled gap between channel groups on the desk.
+function Divider({ label }: { label: string }) {
+  return (
+    <div className="mx-1 flex h-56 flex-col items-center justify-center">
+      <div className="h-full w-px bg-edge" />
+      <span className="mt-2 max-w-[3rem] rotate-180 text-center text-[9px] uppercase tracking-widest text-slate-600 [writing-mode:vertical-rl]">
+        {label}
+      </span>
+    </div>
+  );
+}
+
+// Fader — a vertical channel fader. The native range input is rotated so the
+// thumb travels bottom→top like a real mixer slider; the filled track shows
+// level. Value reads on top, label on the bottom cap.
+function Fader({
+  label, sub, value, min, max, step, fmt, onChange,
+}: {
+  label: string; sub?: string; value: number; min: number; max: number; step: number;
+  fmt: (v: number) => string; onChange: (v: number) => void;
+}) {
+  const pct = max > min ? ((value - min) / (max - min)) * 100 : 0;
+  return (
+    <div className="flex w-14 flex-col items-center gap-2">
+      <div className="font-mono text-xs font-semibold text-accent">{fmt(value)}</div>
+
+      {/* Fader track: a tall rail with a fill from the bottom + the rotated input. */}
+      <div className="relative flex h-48 w-7 items-center justify-center rounded bg-panel">
+        <div className="absolute inset-x-0 bottom-0 rounded-b bg-accent/25" style={{ height: `${pct}%` }} />
+        <div className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-edge" />
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(e) => onChange(Number(e.target.value))}
+          className="h-48 w-48 -rotate-90 cursor-pointer accent-accent"
+          style={{ appearance: "auto" }}
+        />
+      </div>
+
+      <div className="text-center leading-tight">
+        <div className="text-[10px] font-bold uppercase tracking-wide text-slate-200">{label}</div>
+        {sub && <div className="text-[8px] uppercase tracking-wide text-slate-500">{sub}</div>}
+      </div>
+    </div>
+  );
+}
+
+// Switch — a mixer-style on/off channel (a vertical toggle button in the same
+// footprint as a fader).
+function Switch({ label, sub, checked, onChange }: { label: string; sub?: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div className="flex w-14 flex-col items-center gap-2">
+      <div className={`font-mono text-xs font-semibold ${checked ? "text-accent" : "text-slate-600"}`}>
+        {checked ? "ON" : "OFF"}
+      </div>
+      <button
+        onClick={() => onChange(!checked)}
+        className={`relative flex h-48 w-7 flex-col rounded p-1 transition ${
+          checked ? "justify-start bg-accent/25" : "justify-end bg-panel"
+        }`}
+        aria-pressed={checked}
+        title="Toggle"
+      >
+        <span className={`h-7 w-full rounded shadow ${checked ? "bg-accent" : "bg-slate-600"}`} />
+      </button>
+      <div className="text-center leading-tight">
+        <div className="text-[10px] font-bold uppercase tracking-wide text-slate-200">{label}</div>
+        {sub && <div className="text-[8px] uppercase tracking-wide text-slate-500">{sub}</div>}
+      </div>
+    </div>
+  );
+}

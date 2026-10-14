@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import type { BoardCell, BoardData, GameState } from "@shared/protocol";
+import type { AdminRevealCfgData, BoardCell, BoardData, GameState } from "@shared/protocol";
 import { createAdminApi, type BoardSummary } from "../useAdminApi";
+import type { AdminActions } from "../useAdmin";
+import AudioSettingsPanel from "./AudioSettingsPanel";
 
 interface Props {
   board?: BoardData;
@@ -8,6 +10,10 @@ interface Props {
   spotifyConnected: boolean;
   adminSecret: string;
   onSelect: (row: number, col: number) => void;
+  volumePct?: number;
+  onSetVolume: (percent: number) => void;
+  revealCfg?: AdminRevealCfgData;
+  actions: AdminActions;
 }
 
 const SELECTABLE_STATES: GameState[] = [
@@ -26,7 +32,7 @@ function isGameActive(s?: GameState): boolean {
   return !!s && s !== "LOBBY" && s !== "GAME_OVER";
 }
 
-export default function BoardPanel({ board, gameState, spotifyConnected, adminSecret, onSelect }: Props) {
+export default function BoardPanel({ board, gameState, spotifyConnected, adminSecret, onSelect, volumePct, onSetVolume, revealCfg, actions }: Props) {
   const selectable = canSelectCell(gameState, spotifyConnected);
   const api = useMemo(() => createAdminApi(adminSecret), [adminSecret]);
 
@@ -75,6 +81,7 @@ export default function BoardPanel({ board, gameState, spotifyConnected, adminSe
           <BoardGrid board={board} selectable={selectable} onSelect={onSelect} />
         )}
       </div>
+      <AudioSettingsPanel volumePct={volumePct} onSetVolume={onSetVolume} revealCfg={revealCfg} actions={actions} />
     </section>
   );
 }

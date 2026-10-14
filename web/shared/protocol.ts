@@ -56,6 +56,13 @@ export type ClientMsgType =
   // cmsgAdminJumpToDropPoint in engine.go (CONTRACT-QUESTION).
   | "admin.setDropPoint"
   | "admin.jumpToDropPoint"
+  // admin.setVolume: {percent} — operating playback volume, applied
+  // immediately. Mirrors cmsgAdminSetVolume in engine.go (CONTRACT-QUESTION).
+  | "admin.setVolume"
+  // admin.endDailyDouble: end the current Daily Double performance early
+  // with a graceful fade, instead of the instant admin.skipDailyDouble.
+  // Mirrors cmsgAdminEndDailyDouble in engine.go (CONTRACT-QUESTION).
+  | "admin.endDailyDouble"
   // player.selectCell: {row, col} — the designated picker's own connection
   // only (whoever most recently scored). Mirrors cmsgPlayerSelectCell in
   // engine.go (CONTRACT-QUESTION — not in the fixed protocol.go).
@@ -130,7 +137,11 @@ export type ServerMsgType =
   | "dailyDouble.offer"
   // dailyDouble.result: sanitized (avgStars + points, no track data) final
   // outcome, broadcast to ALL roles. Mirrors smsgDailyDoubleResult.
-  | "dailyDouble.result";
+  | "dailyDouble.result"
+  // volumeStatus: {percent} — admin-only, current operating playback
+  // volume (the admin volume slider + the Daily Double fade's restore
+  // level). Mirrors smsgVolumeStatus in engine.go (CONTRACT-QUESTION).
+  | "volumeStatus";
 
 export interface ClientEnvelope<D = unknown> {
   t: ClientMsgType;

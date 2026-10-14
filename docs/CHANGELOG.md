@@ -139,6 +139,22 @@ No backfill: every song's drop point starts unmarked until an admin marks it.
   category/points/exhausted data is not track metadata, so sending it to
   the picker's phone needs no §4A exception the way Daily Double's song
   titles did. New `web/mobile` screen `PickCellScreen.tsx`.
+- **Daily Double now ends with a graceful 3s fade, plus an admin volume
+  control.** A performance used to call `audio.Pause()` the instant the
+  last rating landed — an audible hard cut. `checkDailyDoubleComplete` now
+  routes through a shared `fadeOutAndFinishDailyDouble()` that steps
+  playback volume down over 3 seconds before pausing, then restores it
+  afterward — guaranteed via a `defer`, so the volume can never get stuck
+  faded down even if the round ends some other way (Force End Round/
+  `admin.skipDailyDouble`) while a fade is mid-flight; that race is guarded
+  by a new `e.ddEnding` flag so the two paths can't double-award. New admin
+  button "End Daily Double" (`admin.endDailyDouble`) ends a performance
+  early with the identical fade, as an alternative to the instant Force End
+  Round/skip kill switches, which stay unchanged on purpose. This also
+  needed real new capability: `AudioDevice` gained `SetVolume`, implemented
+  against Spotify's volume endpoint, and a persistent admin volume slider
+  (under the Board panel) that applies immediately and is the level the
+  fade restores to — not just a one-off mechanism for this feature.
 
 ### Changed
 - `server/internal/admin.Track`/`DailyDoubleTrack`: `HasSyncedLyrics *bool`

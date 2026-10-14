@@ -54,6 +54,9 @@ type AudioDevice interface {
 	Play(ctx context.Context, trackURI string, positionMs int64) error
 	Pause(ctx context.Context) error
 	Resume(ctx context.Context) error
+	// SetVolume sets playback volume 0-100 on the bound device. Used by the
+	// Daily Double fade-out and the admin volume control.
+	SetVolume(ctx context.Context, percent int) error
 	// AuthURL / Exchange support the admin OAuth flow on the stage tab.
 	AuthURL(state string) string
 	Exchange(ctx context.Context, code string) error

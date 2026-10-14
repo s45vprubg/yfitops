@@ -246,6 +246,20 @@ type Engine struct {
 	// permanently shrink the bucket game over game (dd-eng-6, QA sweep 6).
 	ddBucketOriginal []*Track
 
+	// volumePct is the operating playback volume (0-100, default 100),
+	// settable any time via admin.setVolume. It is the level the Daily
+	// Double fade-out restores to once a performance ends — not DD-specific
+	// itself, just introduced alongside that feature.
+	volumePct int
+	// ddEnding guards fadeOutAndFinishDailyDouble against double-firing: set
+	// while a graceful fade-out is in flight (from either the automatic
+	// all-rated completion or the admin.endDailyDouble button), checked
+	// again when the fade's goroutine re-enters the loop so a Force End
+	// Round/admin.skipDailyDouble that already finished the round in the
+	// meantime (both stay instant, untouched by this field) makes the
+	// fade's own continuation a safe no-op instead of double-awarding.
+	ddEnding bool
+
 	// spotifyAuthed records that the admin completed Spotify OAuth, so a stage
 	// that connects AFTER the OAuth dance still learns to initialize the Web
 	// Playback SDK (it then fetches the live token from /api/spotify/token).
@@ -346,6 +360,7 @@ func NewEngine(repo GameRepo, lock BuzzLock, audio AudioDevice, lyrics LyricsPro
 		lyricCache:     map[string]*lyricEntry{},
 		buzzWindowMs:   buzzWindowMs,
 		cellVisits:     map[string]int{},
+		volumePct:      100,
 	}
 }
 
@@ -808,7 +823,9 @@ func (e *Engine) dispatch(connID string, role protocol.Role, env protocol.Client
 		cmsgAdminSkipDailyDouble,
 		cmsgAdminSeek,
 		cmsgAdminSetDropPoint,
-		cmsgAdminJumpToDropPoint:
+		cmsgAdminJumpToDropPoint,
+		cmsgAdminSetVolume,
+		cmsgAdminEndDailyDouble:
 		if role != protocol.RoleAdmin {
 			e.sendError(connID, "forbidden", "admin role required")
 			return
@@ -860,6 +877,10 @@ func (e *Engine) dispatchAdmin(connID string, env protocol.ClientEnvelope) {
 		e.onAdminSetDropPoint(connID, env)
 	case cmsgAdminJumpToDropPoint:
 		e.onAdminJumpToDropPoint(connID, env)
+	case cmsgAdminSetVolume:
+		e.onAdminSetVolume(connID, env)
+	case cmsgAdminEndDailyDouble:
+		e.onAdminEndDailyDouble(connID, env)
 	case protocol.CMsgAdminEndGame:
 		e.transitionTo(protocol.StateGameOver)
 		e.persistScores()
@@ -958,6 +979,7 @@ func (e *Engine) sendFullSync(connID string, role protocol.Role) {
 		e.bcast.SendTo(connID, e.envelope(smsgAdminRevealCfg, e.revealCfgData()))
 		e.bcast.SendTo(connID, e.envelope(protocol.SMsgTelemetry, e.telemetryData()))
 		e.bcast.SendTo(connID, e.envelope(smsgCheatReport, e.cheatReportData()))
+		e.bcast.SendTo(connID, e.envelope(smsgVolumeStatus, e.volumeStatusData()))
 	}
 	// Scoreboard goes to everyone (handles + scores only, §4A-safe) so mobile
 	// players see standings on connect too.
@@ -2320,12 +2342,17 @@ func (e *Engine) onRate(connID string, env protocol.ClientEnvelope) {
 // Guarded on curTrack != nil so a disconnect/kick during the offer/song-pick
 // sub-phase (state already DAILY_DOUBLE, but no performance started yet and
 // ratingPool not yet built) is a safe no-op rather than a premature finish.
+//
+// Routes through fadeOutAndFinishDailyDouble (not finishDailyDouble
+// directly) so the "all ratings are in" completion fades gracefully too,
+// not just the admin.endDailyDouble button — the abrupt instant stop this
+// used to do was the actual complaint being fixed here.
 func (e *Engine) checkDailyDoubleComplete() {
 	if e.state != protocol.StateDailyDouble || e.curTrack == nil {
 		return
 	}
 	if len(e.ratingPool) > 0 && len(e.ratings) >= len(e.ratingPool) {
-		e.finishDailyDouble()
+		e.fadeOutAndFinishDailyDouble()
 	}
 }
 
@@ -2632,6 +2659,125 @@ func (e *Engine) onAdminJumpToDropPoint(connID string, _ protocol.ClientEnvelope
 		target = 0
 	}
 	e.seekTo(target)
+}
+
+// CONTRACT-QUESTION: cmsgAdminSetVolume/cmsgAdminEndDailyDouble/
+// smsgVolumeStatus. protocol.go has no field for an operating volume level
+// or a graceful Daily Double end, so these are local types per the fixed-
+// contract process; discuss with the project owner for promotion into
+// protocol.go on a version bump.
+const (
+	cmsgAdminSetVolume      protocol.ClientMsgType = "admin.setVolume"
+	cmsgAdminEndDailyDouble protocol.ClientMsgType = "admin.endDailyDouble"
+	smsgVolumeStatus        protocol.ServerMsgType = "volumeStatus"
+)
+
+type adminSetVolumeData struct {
+	Percent int `json:"percent"`
+}
+
+type volumeStatusData struct {
+	Percent int `json:"percent"`
+}
+
+// dailyDoubleFadeSteps/DailyDoubleFadeDuration control the graceful
+// fade-out's granularity. DailyDoubleFadeDuration is a var (not const) so
+// tests can shrink it, mirroring TransitionDelay's own override pattern.
+const dailyDoubleFadeSteps = 6
+
+var DailyDoubleFadeDuration = 3 * time.Second
+
+func (e *Engine) volumeStatusData() volumeStatusData {
+	return volumeStatusData{Percent: e.volumePct}
+}
+
+func (e *Engine) broadcastVolumeStatus() {
+	e.bcast.Broadcast(protocol.RoleAdmin, e.envelope(smsgVolumeStatus, e.volumeStatusData()))
+}
+
+// onAdminSetVolume sets the operating playback volume, applied immediately
+// to the live device so the control room's slider has an audible effect
+// right away — independent of any Daily Double performance. This is also
+// the level fadeOutAndFinishDailyDouble restores to once a fade completes.
+func (e *Engine) onAdminSetVolume(connID string, env protocol.ClientEnvelope) {
+	var d adminSetVolumeData
+	if err := json.Unmarshal(env.Data, &d); err != nil {
+		e.sendError(connID, "badSetVolume", err.Error())
+		return
+	}
+	if d.Percent < 0 {
+		d.Percent = 0
+	} else if d.Percent > 100 {
+		d.Percent = 100
+	}
+	e.volumePct = d.Percent
+	e.broadcastVolumeStatus()
+	go func() {
+		_ = e.audio.SetVolume(context.Background(), d.Percent)
+	}()
+}
+
+// onAdminEndDailyDouble lets the control room end a Daily Double
+// performance early with the same graceful fade the automatic all-rated
+// completion uses, instead of the instant Force End Round/
+// admin.skipDailyDouble kill switches. Legal only while a performance is
+// actually in progress (curTrack set) — matches checkDailyDoubleComplete's
+// own guard, and the admin UI only shows this button under the identical
+// condition.
+func (e *Engine) onAdminEndDailyDouble(connID string, _ protocol.ClientEnvelope) {
+	if e.state != protocol.StateDailyDouble || e.curTrack == nil {
+		e.sendError(connID, "noDailyDoublePerformance", "no Daily Double performance is currently in progress")
+		return
+	}
+	e.fadeOutAndFinishDailyDouble()
+}
+
+// fadeOutAndFinishDailyDouble is the one shared path for ending a Daily
+// Double performance gracefully — used by both checkDailyDoubleComplete's
+// automatic all-rated completion and the admin.endDailyDouble button. Force
+// End Round / admin.skipDailyDouble deliberately do NOT go through this —
+// they stay instant, true emergency stops.
+//
+// Guaranteed volume restore: restoreTo is captured BEFORE the fade starts,
+// and the defer that restores it is registered as the very first thing in
+// the submitted continuation, before any other logic runs — so the device
+// is restored to its configured operating level whether the continuation
+// completes normally, bails out early (round already ended some other way
+// while the fade was in flight), or finishDailyDouble's own body does
+// anything unexpected. The volume can never get stuck faded down.
+func (e *Engine) fadeOutAndFinishDailyDouble() {
+	if e.ddEnding || e.state != protocol.StateDailyDouble || e.curTrack == nil {
+		return
+	}
+	e.ddEnding = true
+	restoreTo := e.volumePct
+
+	go func() {
+		stepDelay := DailyDoubleFadeDuration / dailyDoubleFadeSteps
+		for i := dailyDoubleFadeSteps - 1; i >= 0; i-- {
+			level := restoreTo * i / dailyDoubleFadeSteps
+			_ = e.audio.SetVolume(context.Background(), level)
+			time.Sleep(stepDelay)
+		}
+		e.submit(func() {
+			defer func() {
+				_ = e.audio.SetVolume(context.Background(), restoreTo)
+				e.ddEnding = false
+				e.broadcastVolumeStatus()
+			}()
+			// A Force End Round / admin.skipDailyDouble may have already
+			// finished the round (both stay instant, independent of
+			// e.ddEnding) while this fade was mid-flight — in that case the
+			// state has moved on and this must be a safe no-op, not a
+			// double-award. The defer above still restores the volume
+			// regardless, so the brief lower-volume window during the race
+			// never outlives this continuation.
+			if e.state != protocol.StateDailyDouble || e.curTrack == nil {
+				return
+			}
+			e.finishDailyDouble()
+		})
+	}()
 }
 
 func (e *Engine) onAdminAward(connID string, env protocol.ClientEnvelope) {

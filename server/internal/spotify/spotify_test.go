@@ -3,6 +3,7 @@ package spotify
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -177,6 +178,75 @@ func TestPauseRoutesToDevice(t *testing.T) {
 	}
 	if gotDevice != "dev-9" {
 		t.Errorf("device_id = %q", gotDevice)
+	}
+}
+
+// TestSetVolumeRoutesToDeviceWithPercent confirms the volume endpoint takes
+// its level as a query param (volume_percent), not a JSON body like Play
+// does, alongside device_id — the two params merge correctly rather than
+// one clobbering the other (doPlayer's extra-params plumbing).
+func TestSetVolumeRoutesToDeviceWithPercent(t *testing.T) {
+	var gotPath, gotDevice, gotVolume, gotMethod string
+	var bodyLen int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotDevice = r.URL.Query().Get("device_id")
+		gotVolume = r.URL.Query().Get("volume_percent")
+		b, _ := io.ReadAll(r.Body)
+		bodyLen = len(b)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := New(testConfig())
+	c.HTTPClient = &http.Client{Transport: rewriteTransport{base: srv.URL}}
+	c.accessToken = "live-token"
+	c.SetDevice("dev-9")
+
+	if err := c.SetVolume(context.Background(), 65); err != nil {
+		t.Fatalf("SetVolume: %v", err)
+	}
+	if gotMethod != http.MethodPut {
+		t.Errorf("method = %q, want PUT", gotMethod)
+	}
+	if gotPath != "/v1/me/player/volume" {
+		t.Errorf("path = %q, want /v1/me/player/volume", gotPath)
+	}
+	if gotDevice != "dev-9" {
+		t.Errorf("device_id = %q, want dev-9 (must not be clobbered by volume_percent)", gotDevice)
+	}
+	if gotVolume != "65" {
+		t.Errorf("volume_percent = %q, want 65", gotVolume)
+	}
+	if bodyLen != 0 {
+		t.Errorf("body length = %d, want 0 (volume takes a query param, not a body)", bodyLen)
+	}
+}
+
+// TestSetVolumeClampsOutOfRangeInput mirrors the engine-level clamp
+// (onAdminSetVolume) at the transport boundary too, so a caller that
+// bypasses the engine (or a future direct caller) can't send Spotify an
+// invalid volume_percent.
+func TestSetVolumeClampsOutOfRangeInput(t *testing.T) {
+	var gotVolume string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotVolume = r.URL.Query().Get("volume_percent")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := New(testConfig())
+	c.HTTPClient = &http.Client{Transport: rewriteTransport{base: srv.URL}}
+	c.accessToken = "live-token"
+
+	for _, tc := range []struct{ send, want int }{{-5, 0}, {150, 100}, {50, 50}} {
+		if err := c.SetVolume(context.Background(), tc.send); err != nil {
+			t.Fatalf("SetVolume(%d): %v", tc.send, err)
+		}
+		if gotVolume != fmt.Sprintf("%d", tc.want) {
+			t.Errorf("send %d: volume_percent = %q, want %q", tc.send, gotVolume, fmt.Sprintf("%d", tc.want))
+		}
 	}
 }
 

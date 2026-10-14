@@ -86,6 +86,10 @@ export interface AdminState {
   // (the existing Force End Round finishes it).
   ddPerformer?: DailyDoublePerformerData;
   ddResult?: DailyDoubleResultData; // transient — last resolved payout
+  // Operating playback volume (0-100), echoed from the server so the
+  // slider reflects truth on connect/reconnect rather than assuming a
+  // default. Also the level the Daily Double fade-out restores to.
+  volumePct?: number;
   nonce: number;
 }
 
@@ -99,6 +103,8 @@ export interface AdminActions {
   seek: (positionMs: number) => void;
   markDropPoint: (positionMs: number) => void;
   jumpToDrop: () => void;
+  setVolume: (percent: number) => void;
+  endDailyDouble: () => void;
   award: (d: AdminAwardData) => void;
   kick: (d: AdminKickData) => void;
   reveal: () => void;
@@ -182,6 +188,9 @@ export function useAdmin(): [AdminState, AdminActions] {
       client.on("playbackPosition", (env: ServerEnvelope) => {
         const d = env.d as Omit<PlaybackPosition, "receivedAtMs">;
         patch({ playback: { ...d, receivedAtMs: Date.now() } });
+      });
+      client.on("volumeStatus", (env: ServerEnvelope) => {
+        patch({ volumePct: (env.d as { percent: number }).percent });
       });
       client.on("scoreboard", (env: ServerEnvelope) => {
         patch({ scoreboard: env.d as ScoreboardData });
@@ -308,6 +317,8 @@ export function useAdmin(): [AdminState, AdminActions] {
     markDropPoint: (positionMs) =>
       sendAction<{ positionMs: number }>("admin.setDropPoint", { positionMs }),
     jumpToDrop: () => sendAction("admin.jumpToDropPoint"),
+    setVolume: (percent) => sendAction<{ percent: number }>("admin.setVolume", { percent }),
+    endDailyDouble: () => sendAction("admin.endDailyDouble"),
     award: (d) => sendAction<AdminAwardData>("admin.award", d),
     kick: (d) => sendAction<AdminKickData>("admin.kick", d),
     reveal: () => sendAction("admin.reveal"),

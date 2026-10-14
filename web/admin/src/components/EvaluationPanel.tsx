@@ -56,6 +56,10 @@ export default function EvaluationPanel({
 }: Props) {
   const phase = derivePhase(gameState, adminView);
   const ddAwaitingResponse = gameState === "DAILY_DOUBLE" && !!ddPerformer && !ddPerformer.performing;
+  // Mirrors ddAwaitingResponse's complement exactly — the modal below is
+  // mounted (not just visually hidden) only while a track is actually
+  // playing, so it can never fire a stale end once performing flips false.
+  const ddPerforming = gameState === "DAILY_DOUBLE" && !!ddPerformer && ddPerformer.performing;
 
   return (
     <section className="flex h-full flex-col bg-panel">
@@ -81,6 +85,9 @@ export default function EvaluationPanel({
         {ddResult && <DailyDoubleResultBanner result={ddResult} />}
         <Overrides actions={actions} roundActive={isRoundActive(gameState)} />
       </div>
+      {ddPerforming && ddPerformer && (
+        <EndDailyDoubleModal actions={actions} performer={ddPerformer} />
+      )}
     </section>
   );
 }
@@ -210,6 +217,32 @@ function DailyDoubleOfferCard({ actions, performer }: { actions: AdminActions; p
       >
         Force Skip Daily Double
       </button>
+    </div>
+  );
+}
+
+// EndDailyDoubleModal — a floating overlay (not an inline card like
+// DailyDoubleOfferCard above) so it's unmistakably a deliberate action, not
+// something that could be clicked by accident while scanning the panel.
+// Only mounted while ddPerformer.performing is true (checked by the caller,
+// EvaluationPanel's ddPerforming), so it unmounts entirely the instant the
+// performance ends — there's no window where a stale modal could fire a
+// second end. Ends gracefully (admin.endDailyDouble, a 3s fade) rather than
+// the instant admin.skipDailyDouble/Force End Round, which stay the true
+// emergency kill switches.
+function EndDailyDoubleModal({ actions, performer }: { actions: AdminActions; performer: DailyDoublePerformerData }) {
+  return (
+    <div className="pointer-events-none fixed inset-0 z-[60] flex items-end justify-center bg-transparent p-6">
+      <div className="pointer-events-auto w-[360px] rounded-lg border border-amber-600 bg-panel2 p-4 shadow-2xl">
+        <div className="mb-1 text-[10px] uppercase tracking-wide text-amber-400">Daily Double — performing</div>
+        <div className="mb-3 text-lg font-bold text-white">{performer.handle}</div>
+        <button
+          onClick={() => actions.endDailyDouble()}
+          className="w-full rounded border border-amber-500 bg-amber-950/30 py-2 text-xs font-semibold uppercase text-amber-300 hover:bg-amber-900/40"
+        >
+          End Daily Double (fade out)
+        </button>
+      </div>
     </div>
   );
 }

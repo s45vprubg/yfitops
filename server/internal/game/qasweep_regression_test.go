@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/s45vprubg/yfitops/server/internal/protocol"
 )
@@ -71,6 +72,7 @@ func TestQARegression_StageMessagesRequireStageRole(t *testing.T) {
 // rater disconnecting should complete the daily double (advance to BOARD),
 // not hang in DAILY_DOUBLE forever.
 func TestQARegression_DailyDoubleCompletesWhenRaterLeaves(t *testing.T) {
+	withFastFade(t) // completion now lands after a graceful fade, not synchronously
 	h := newHarness(t)
 	defer h.run()()
 	h.joinAdmin("admin")
@@ -120,6 +122,10 @@ func TestQARegression_DailyDoubleCompletesWhenRaterLeaves(t *testing.T) {
 	h.e.OnDisconnect("r2")
 	h.sync(func() {})
 
+	// Completion now lands after a graceful fade, not synchronously.
+	if !waitUntil(t, time.Second, func() bool { return len(h.audio.ofMethod("pause")) > 0 }) {
+		t.Fatal("timed out waiting for the Daily Double fade to finish and pause")
+	}
 	if got := h.state(); got == protocol.StateDailyDouble {
 		t.Fatalf("daily double deadlocked: still DAILY_DOUBLE after all remaining raters resolved")
 	}

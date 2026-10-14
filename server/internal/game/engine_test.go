@@ -83,20 +83,33 @@ type audioCall struct {
 	method string
 	uri    string
 	pos    int64
+	vol    int
 }
 
 type fakeAudio struct {
-	mu    sync.Mutex
-	calls []audioCall
+	mu           sync.Mutex
+	calls        []audioCall
+	volumeErr    error // injected failure for SetVolume, to test the restore-is-still-attempted guarantee
+	volumeNow    int
+	volumeNowSet bool
 }
 
 func (a *fakeAudio) SetDevice(string) {}
 func (a *fakeAudio) Play(_ context.Context, uri string, pos int64) error {
-	a.add(audioCall{"play", uri, pos})
+	a.add(audioCall{method: "play", uri: uri, pos: pos})
 	return nil
 }
-func (a *fakeAudio) Pause(context.Context) error            { a.add(audioCall{method: "pause"}); return nil }
-func (a *fakeAudio) Resume(context.Context) error           { a.add(audioCall{method: "resume"}); return nil }
+func (a *fakeAudio) Pause(context.Context) error  { a.add(audioCall{method: "pause"}); return nil }
+func (a *fakeAudio) Resume(context.Context) error { a.add(audioCall{method: "resume"}); return nil }
+func (a *fakeAudio) SetVolume(_ context.Context, percent int) error {
+	a.mu.Lock()
+	a.volumeNow = percent
+	a.volumeNowSet = true
+	err := a.volumeErr
+	a.mu.Unlock()
+	a.add(audioCall{method: "setVolume", vol: percent})
+	return err
+}
 func (a *fakeAudio) AuthURL(string) string                  { return "" }
 func (a *fakeAudio) Exchange(context.Context, string) error { return nil }
 func (a *fakeAudio) add(c audioCall) {
@@ -111,6 +124,17 @@ func (a *fakeAudio) last() (audioCall, bool) {
 		return audioCall{}, false
 	}
 	return a.calls[len(a.calls)-1], true
+}
+func (a *fakeAudio) ofMethod(method string) []audioCall {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var out []audioCall
+	for _, c := range a.calls {
+		if c.method == method {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 type fakeLyrics struct{}
@@ -822,6 +846,7 @@ func TestGrade_SecondConcurrentGradeIgnored(t *testing.T) {
 // track, accept, song choice, crowd rating, and the row-value x multiplier
 // payout — then straight back to BOARD (no karaoke).
 func TestDailyDouble_BonusApplied(t *testing.T) {
+	withFastFade(t) // the payout now lands after a graceful fade, not synchronously
 	h := newHarness(t)
 	defer h.run()()
 	h.joinAdmin("admin")
@@ -873,6 +898,12 @@ func TestDailyDouble_BonusApplied(t *testing.T) {
 	rd, _ := json.Marshal(protocol.RateData{Stars: 5})
 	h.e.OnMessage("c2", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgRate, Data: rd, Nonce: h.gate.Current()}, nowMs())
 	h.sync(func() {})
+
+	// The payout now lands after a graceful fade (fadeOutAndFinishDailyDouble),
+	// not synchronously the instant the last rating arrives — wait for it.
+	if !waitUntil(t, time.Second, func() bool { return len(h.audio.ofMethod("pause")) > 0 }) {
+		t.Fatal("timed out waiting for the Daily Double fade to finish and pause")
+	}
 
 	if got := h.score(performer); got != 300 {
 		t.Errorf("performer after DD payout = %d, want 300 (100 from round 1 + 200 DD payout)", got)
@@ -1650,6 +1681,7 @@ func TestPlayerPicker_NoScorerYetAdminOnly(t *testing.T) {
 // shared award() path) — the performer can pick the next cell directly from
 // BOARD, with no karaoke/vote phase to wait on.
 func TestDailyDouble_WinnerBecomesPicker(t *testing.T) {
+	withFastFade(t) // the DD resolution now lands after a graceful fade, not synchronously
 	h := newHarness(t)
 	defer h.run()()
 	h.joinAdmin("admin")
@@ -1683,6 +1715,10 @@ func TestDailyDouble_WinnerBecomesPicker(t *testing.T) {
 	rd, _ := json.Marshal(protocol.RateData{Stars: 5})
 	h.e.OnMessage("c2", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgRate, Data: rd, Nonce: h.gate.Current()}, nowMs())
 	h.sync(func() {})
+	// The DD resolution now lands after a graceful fade, not synchronously.
+	if !waitUntil(t, time.Second, func() bool { return len(h.audio.ofMethod("pause")) > 0 }) {
+		t.Fatal("timed out waiting for the Daily Double fade to finish and pause")
+	}
 	if h.state() != protocol.StateBoard {
 		t.Fatalf("state = %s, want BOARD after DD resolves", h.state())
 	}
