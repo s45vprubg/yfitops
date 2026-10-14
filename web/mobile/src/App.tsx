@@ -8,6 +8,7 @@ import { VoteScreen } from "./screens/VoteScreen";
 import { DailyDoubleScreen } from "./screens/DailyDoubleScreen";
 import { DailyDoubleContestantScreen } from "./screens/DailyDoubleContestantScreen";
 import { DailyDoubleWaitingScreen } from "./screens/DailyDoubleWaitingScreen";
+import { PickCellScreen } from "./screens/PickCellScreen";
 import { getSavedHandle } from "./lib/fingerprint";
 
 // Pure state-flag router (§4A): every branch below keys off the server's
@@ -15,7 +16,9 @@ import { getSavedHandle } from "./lib/fingerprint";
 // EXCEPT view.ddOffer, which is the deliberate, narrowly-scoped §4A exception
 // for the Daily Double contestant's own device only (see protocol.ts).
 export default function App() {
-  const { view, connect, buzz, vote, rate, ddDecide, ddChoose } = useGame();
+  const { view, connect, buzz, vote, rate, ddDecide, ddChoose, selectCell } = useGame();
+  const iAmPicker = !!view.pickerStatus && view.pickerStatus.pickerID === view.myPlayerID;
+  const stillPicking = iAmPicker && !view.pickerStatus!.hasPicked;
 
   if (!view.joined) {
     return (
@@ -64,11 +67,41 @@ export default function App() {
         );
 
       case "KARAOKE":
+        // The designated picker (whoever most recently scored) picks the
+        // next cell here first; everyone else — and the picker too, once
+        // they've picked — votes on skipping ahead like today. Both
+        // progress independently (the server's AND-gate fires the
+        // transition once BOTH have happened, in either order), so
+        // non-pickers are never blocked from voting while a pick is
+        // pending.
         return (
           <div className="flex flex-1 flex-col">
-            <VoteScreen vote={view.vote} onVote={vote} />
+            {stillPicking ? (
+              <PickCellScreen board={view.pickableBoard} onSelect={selectCell} />
+            ) : (
+              <VoteScreen vote={view.vote} onVote={vote} />
+            )}
             {revealBand}
           </div>
+        );
+
+      case "BOARD":
+        // Normally admin-only (falls to the idle screen below). The one
+        // exception: right after a Daily Double, which goes straight to
+        // BOARD with no karaoke phase, the performer becomes the picker —
+        // same rule as a normal correct guess — with no vote to wait on.
+        if (view.pickerStatus && !view.pickerStatus.hasPicked) {
+          return stillPicking ? (
+            <PickCellScreen board={view.pickableBoard} onSelect={selectCell} />
+          ) : (
+            <DailyDoubleWaitingScreen
+              title={`${view.pickerStatus.pickerHandle} is picking the next cell…`}
+              sub="Hang tight."
+            />
+          );
+        }
+        return (
+          <IdleScreen state={view.state} scoreboard={view.scoreboard} me={getSavedHandle()} ddResult={view.ddResult} />
         );
 
       case "DAILY_DOUBLE": {
@@ -102,7 +135,7 @@ export default function App() {
         );
       }
 
-      // LOBBY, BOARD, TRANSITION, ADJUDICATE, GAME_OVER
+      // LOBBY, TRANSITION, ADJUDICATE, GAME_OVER (BOARD is handled above)
       default:
         return (
           <IdleScreen

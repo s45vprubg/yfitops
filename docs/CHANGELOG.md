@@ -117,6 +117,28 @@ No backfill: every song's drop point starts unmarked until an admin marks it.
   remember. The admin scrubber feed now also carries `hasDropPoint`/
   `dropPointMs` so the UI can show a marker on the bar and disable "Jump to
   Drop" when nothing's marked, without a separate round-trip.
+- **Player-driven cell picking.** Whoever most recently scored (the same
+  `lastScorer`/`cellPicker` concept Daily Double already used — including a
+  DD payout, so a DD winner becomes the next picker too, no special case)
+  can now pick the next board cell from their own phone instead of the
+  admin always picking. During `KARAOKE` this is one half of an AND-gate
+  with the existing skip-vote/track-end mechanism (`karaokeConditionMet`):
+  whichever of "vote passed or song ended" and "picker picked" resolves
+  second fires the existing 3s `TRANSITION` countdown, which now starts the
+  picked cell directly instead of landing on `BOARD` and waiting for the
+  admin. A Daily Double resolves straight to `BOARD` with no karaoke/vote
+  phase at all, so there the performer picks immediately, same as
+  `admin.select` already does. Admin keeps every existing power — a manual
+  `admin.select` always wins immediately and clears any pending player pick,
+  exactly as it already silently did before this feature existed; no
+  scorer yet (round ended with nobody correct, or the very first pick of
+  the game) falls back to admin-only, unchanged. New local message types
+  (`player.selectCell`, `pickerStatus`, `pickableBoard`) mirror the Daily
+  Double offer/choose pattern (one connection scoped by playerID, a
+  sanitized "who's up" status broadcast to everyone else) — board
+  category/points/exhausted data is not track metadata, so sending it to
+  the picker's phone needs no §4A exception the way Daily Double's song
+  titles did. New `web/mobile` screen `PickCellScreen.tsx`.
 
 ### Changed
 - `server/internal/admin.Track`/`DailyDoubleTrack`: `HasSyncedLyrics *bool`

@@ -210,6 +210,16 @@ type Engine struct {
 
 	cellPicker string // playerID who earns next cell selection ("" = admin only)
 
+	// pendingPick holds the cell e.cellPicker chose during KARAOKE, nil until
+	// they pick. karaokeReady records that the OTHER half of the AND-gate
+	// (skip vote threshold reached, or the track ended naturally) already
+	// fired. Whichever of the two resolves second triggers beginTransition —
+	// see onPlayerSelectCell / karaokeConditionMet. Both are reset whenever a
+	// new selection actually starts (selectCell) and whenever a fresh karaoke
+	// phase begins (enterKaraoke).
+	pendingPick  *cellCoord
+	karaokeReady bool
+
 	// skip voting (§3.8)
 	votingPool map[string]bool // playerIDs eligible to vote this karaoke phase
 	votes      map[string]bool // playerIDs who have voted
@@ -630,6 +640,50 @@ type dailyDoubleOffer struct {
 	candidates       []*Track
 }
 
+// CONTRACT-QUESTION: player-driven cell picking lets whoever last scored
+// (e.cellPicker) choose the next board cell from their own phone instead of
+// the admin always picking. protocol.go has no equivalent message — defined
+// locally per the fixed-contract process; discuss with the project owner for
+// promotion on a version bump; documented in docs/CHANGELOG.md.
+const (
+	// cmsgPlayerSelectCell: {row, col} — the designated picker's own
+	// connection only (e.cellPicker). Legal during KARAOKE (part of the
+	// AND-gate with the skip vote / track-end, see karaokeConditionMet) and
+	// during BOARD (the simpler case right after a Daily Double, which
+	// transitions straight to BOARD with no karaoke/vote phase at all).
+	cmsgPlayerSelectCell protocol.ClientMsgType = "player.selectCell"
+
+	// smsgPickerStatus: {pickerHandle, hasPicked} — sanitized (no board or
+	// track data), broadcast to ALL roles so mobile can show "waiting on
+	// {handle} to pick" and the picker's own device knows when its pick has
+	// registered.
+	smsgPickerStatus protocol.ServerMsgType = "pickerStatus"
+
+	// smsgPickableBoard: the already-§4A-safe BoardData shape (category,
+	// points, exhausted — no track metadata), sent ONLY to the designated
+	// picker's own connection(s) so their phone can render a tappable grid.
+	// No other mobile client ever receives this.
+	smsgPickableBoard protocol.ServerMsgType = "pickableBoard"
+)
+
+// cellCoord is a 1-indexed (row, col) board coordinate — used to hold the
+// picker's chosen cell between onPlayerSelectCell and the AND-gated
+// beginTransition that actually starts it (see pendingPick).
+type cellCoord struct {
+	Row, Col int
+}
+
+type playerSelectCellData struct {
+	Row int `json:"row"`
+	Col int `json:"col"`
+}
+
+type pickerStatusData struct {
+	PickerID     string `json:"pickerID"`
+	PickerHandle string `json:"pickerHandle"`
+	HasPicked    bool   `json:"hasPicked"`
+}
+
 // PushSpotifyToken sends the access token to all connected Stage clients so
 // they can initialize the Web Playback SDK without being in the OAuth loop.
 func (e *Engine) PushSpotifyToken(token string) {
@@ -737,6 +791,8 @@ func (e *Engine) dispatch(connID string, role protocol.Role, env protocol.Client
 		e.onDailyDoubleDecision(connID, env)
 	case cmsgDailyDoubleChoose:
 		e.onDailyDoubleChoose(connID, env)
+	case cmsgPlayerSelectCell:
+		e.onPlayerSelectCell(connID, env)
 
 	// Admin actions — every one validates the admin role on the connection.
 	case protocol.CMsgAdminGrade,
@@ -918,6 +974,18 @@ func (e *Engine) sendFullSync(connID string, role protocol.Role) {
 			}
 		}
 	}
+	// Picker status is sanitized (handle + hasPicked only) — safe for a
+	// reconnecting client of ANY role, mirroring the Daily Double performer
+	// resync above. Covers both the normal karaoke AND-gate window and the
+	// simpler post-Daily-Double BOARD-state picking window. The picker's own
+	// reconnecting connection also gets the board resent so a dropped
+	// connection doesn't lose its ability to pick.
+	if e.cellPicker != "" && (e.state == protocol.StateKaraoke || e.state == protocol.StateBoard) {
+		e.bcast.SendTo(connID, e.envelope(smsgPickerStatus, e.pickerStatusData()))
+		if p := e.reg.playerForConn(connID); p != nil && p.ID == e.cellPicker {
+			e.bcast.SendTo(connID, e.envelope(smsgPickableBoard, boardData(e.board)))
+		}
+	}
 	if protocol.TrustedReveal(role) {
 		e.bcast.SendTo(connID, e.envelope(protocol.SMsgBoard, boardData(e.board)))
 		if e.curTrack != nil {
@@ -964,6 +1032,20 @@ func (e *Engine) selectCell(row, col int) {
 		// is queued by the admin only between rounds.
 		e.sendErrorAll("busy", "round in progress")
 		return
+	}
+	// A new selection is starting — any player-picker state left over from
+	// the karaoke/board phase that just ended is now stale, whether this
+	// call is an admin override pre-empting a pending pick (admin's pick
+	// always wins, immediately) or the auto-continuation using the exact
+	// pick it already captured by value before calling in. Clearing here
+	// means a stale pendingPick can never misfire against a later karaoke
+	// phase, and broadcastPickerStatus below clears any "waiting on X"
+	// UI still showing on other clients.
+	if e.cellPicker != "" || e.pendingPick != nil {
+		e.cellPicker = ""
+		e.pendingPick = nil
+		e.karaokeReady = false
+		e.broadcastPickerStatus()
 	}
 	cell := cellAt(e.board, row, col)
 	if cell == nil {
@@ -1560,6 +1642,14 @@ func (e *Engine) enterKaraoke() {
 	// immediately, rather than only after returning to BOARD — otherwise they
 	// can click a now-empty cell and hit "cell pool exhausted".
 	e.broadcastBoard()
+
+	// Fresh karaoke phase: e.cellPicker was just set (gradeCorrect, right
+	// before this call) to whoever won the round. Open their picking window:
+	// tell everyone who's picking, and send that one player's phone the
+	// board so they can choose. pendingPick/karaokeReady start this phase
+	// clear (selectCell already reset them when THIS round started).
+	e.broadcastPickerStatus()
+	e.sendPickableBoard()
 }
 
 // fetchAndSendLyrics delivers synced lyrics to the stage, sharing the SAME
@@ -1764,13 +1854,14 @@ func (e *Engine) evaluateSkipVotes() {
 		return
 	}
 	if e.haveVotes() >= e.needVotes() {
-		e.beginTransition()
+		e.karaokeConditionMet()
 	}
 }
 
-// beginTransition stops audio, shows the countdown, then the loop returns to
-// the board for the next selection (§3.9). The actual next track is admin-
-// selected from the ready queue; here we just stop + reset to BOARD.
+// beginTransition stops audio, shows the countdown, then either starts the
+// picker's already-chosen cell directly (the normal case, once both AND-gate
+// halves are satisfied — see karaokeConditionMet) or falls back to BOARD and
+// waits for the admin, exactly like before this feature existed.
 func (e *Engine) beginTransition() {
 	_ = e.audio.Pause(context.Background())
 	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{Action: "pause"}))
@@ -1787,8 +1878,27 @@ func (e *Engine) beginTransition() {
 				e.clearReveal()
 				e.curTrack = nil
 				e.curCell = nil
+				pending := e.pendingPick
+				e.pendingPick = nil
 				e.transitionTo(protocol.StateBoard)
 				e.broadcastBoard()
+				if pending != nil {
+					// Re-validate: the cell could in principle have become
+					// invalid in the 3s window (not reachable under normal
+					// play today, but cheap to guard rather than assume).
+					if cell := cellAt(e.board, pending.Row, pending.Col); cell != nil && !cell.Exhausted() {
+						e.selectCell(pending.Row, pending.Col)
+						return
+					}
+				}
+				// No valid pending pick (the fallback path — nobody picked,
+				// shouldn't normally happen given the AND-gate — or the
+				// picked cell turned out invalid). Clear the stale picker
+				// status so clients stop showing "waiting on X"; it's the
+				// admin's turn now, same as before this feature existed.
+				e.cellPicker = ""
+				e.karaokeReady = false
+				e.broadcastPickerStatus()
 			}
 		})
 	}()
@@ -1868,6 +1978,101 @@ func (e *Engine) broadcastDailyDoublePerformer() {
 	e.bcast.BroadcastAll(e.envelope(smsgDailyDoublePerformer, dailyDoublePerformerData{
 		PlayerID: p.ID, Handle: p.Handle, Performing: performing,
 	}))
+}
+
+// pickerStatusData builds the sanitized "who's picking" payload — handle +
+// whether they've picked, no board/track data.
+func (e *Engine) pickerStatusData() pickerStatusData {
+	var id, handle string
+	if p := e.reg.players[e.cellPicker]; p != nil {
+		id, handle = p.ID, p.Handle
+	}
+	return pickerStatusData{PickerID: id, PickerHandle: handle, HasPicked: e.pendingPick != nil}
+}
+
+// broadcastPickerStatus sends the current picker status to every role. Safe
+// for mobile (§4A) — a handle + a bool, nothing else. Called whenever the
+// picker, or whether they've picked, changes (enterKaraoke, a Daily Double
+// resolving straight to BOARD, onPlayerSelectCell, and selectCell's reset).
+func (e *Engine) broadcastPickerStatus() {
+	e.bcast.BroadcastAll(e.envelope(smsgPickerStatus, e.pickerStatusData()))
+}
+
+// sendPickableBoard delivers the board (category/points/exhausted — already
+// §4A-safe, no track metadata) to ONLY the designated picker's own
+// connection(s), so their phone can render a tappable grid. No other mobile
+// client ever receives this message.
+func (e *Engine) sendPickableBoard() {
+	if e.cellPicker == "" {
+		return
+	}
+	env := e.envelope(smsgPickableBoard, boardData(e.board))
+	for _, cid := range e.reg.connIDs(e.cellPicker) {
+		e.bcast.SendTo(cid, env)
+	}
+}
+
+// karaokeConditionMet is called when the "ready to leave karaoke" half of
+// the AND-gate becomes true (skip vote threshold reached, or the track
+// ended naturally — see evaluateSkipVotes / onStagePlayerState). If the
+// picker has already chosen (e.pendingPick != nil), both halves are now
+// satisfied — transition immediately. Otherwise just record this half and
+// wait for onPlayerSelectCell to catch up: whichever of the two resolves
+// second is what actually fires beginTransition.
+func (e *Engine) karaokeConditionMet() {
+	if e.pendingPick != nil {
+		e.beginTransition()
+		return
+	}
+	e.karaokeReady = true
+}
+
+// onPlayerSelectCell lets the designated picker (e.cellPicker) choose the
+// next board cell from their own phone. Only the connection bound to that
+// playerID may act (§4D nonce-gated, mirroring onDailyDoubleChoose's
+// single-connection scoping). Legal in two states:
+//   - StateBoard: right after a Daily Double, which transitions straight to
+//     BOARD with no karaoke/vote phase — pick immediately, exactly like
+//     admin.select already does, since there's no AND-gate to wait on.
+//   - StateKaraoke: the normal post-round flow — record the pick and only
+//     actually start it once karaokeConditionMet's other half has also
+//     fired (see karaokeConditionMet).
+func (e *Engine) onPlayerSelectCell(connID string, env protocol.ClientEnvelope) {
+	if e.state != protocol.StateKaraoke && e.state != protocol.StateBoard {
+		return
+	}
+	if !e.gate.Validate(env.Nonce) { // §4D
+		return
+	}
+	p := e.reg.playerForConn(connID)
+	if p == nil || e.cellPicker == "" || p.ID != e.cellPicker {
+		return
+	}
+	var d playerSelectCellData
+	if err := json.Unmarshal(env.Data, &d); err != nil {
+		e.sendError(connID, "badSelect", err.Error())
+		return
+	}
+	cell := cellAt(e.board, d.Row, d.Col)
+	if cell == nil || cell.Exhausted() {
+		e.sendError(connID, "badCell", "no such cell or exhausted")
+		return
+	}
+	if e.state == protocol.StateBoard {
+		e.selectCell(d.Row, d.Col)
+		return
+	}
+	// StateKaraoke: part of the AND-gate. A double-submit (two taps before
+	// the first's state change is visible) is silently ignored — harmless,
+	// not an error, since the first tap already recorded a valid pick.
+	if e.pendingPick != nil {
+		return
+	}
+	e.pendingPick = &cellCoord{Row: d.Row, Col: d.Col}
+	e.broadcastPickerStatus()
+	if e.karaokeReady {
+		e.beginTransition()
+	}
 }
 
 // onDailyDoubleDecision handles the contestant's accept/decline. Only the
@@ -2166,6 +2371,20 @@ func (e *Engine) finishDailyDouble() {
 	e.ratings = nil
 	e.transitionTo(protocol.StateBoard)
 	e.broadcastBoard()
+
+	// A Daily Double resolves straight to BOARD with no karaoke/vote phase,
+	// so the performer's picking window (same "DD winner becomes next
+	// picker" rule as a normal correct guess, since both go through the
+	// shared award() path) opens here directly via onPlayerSelectCell's
+	// StateBoard branch, instead of waiting on the AND-gate used in
+	// enterKaraoke. e.cellPicker already holds the performer's ID (set in
+	// startDailyDoublePerformance); only clear it if that player somehow no
+	// longer resolves (e.g. a kick mid-performance).
+	if performer == nil {
+		e.cellPicker = ""
+	}
+	e.broadcastPickerStatus()
+	e.sendPickableBoard()
 }
 
 // ---------------------------------------------------------------------------
@@ -2615,7 +2834,7 @@ func (e *Engine) onStagePlayerState(connID string, env protocol.ClientEnvelope) 
 	}
 	switch e.state {
 	case protocol.StateKaraoke:
-		e.beginTransition()
+		e.karaokeConditionMet()
 	case protocol.StateRoundActive:
 		e.endRound()
 	case protocol.StateDailyDouble:

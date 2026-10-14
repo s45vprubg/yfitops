@@ -302,6 +302,13 @@ func (h *harness) selectCell(adminConn string, row, col int) {
 	h.sync(func() {})
 }
 
+// playerSelectCell drives the new player-picker action (cmsgPlayerSelectCell).
+func (h *harness) playerSelectCell(connID string, row, col int) {
+	d, _ := json.Marshal(playerSelectCellData{Row: row, Col: col})
+	h.e.OnMessage(connID, protocol.RoleMobile, protocol.ClientEnvelope{Type: cmsgPlayerSelectCell, Data: d, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+}
+
 func (h *harness) grade(adminConn string, v protocol.GradeVerdict) {
 	d, _ := json.Marshal(protocol.AdminGradeData{Verdict: v})
 	h.e.OnMessage(adminConn, protocol.RoleAdmin, protocol.ClientEnvelope{Type: protocol.CMsgAdminGrade, Data: d, Nonce: h.gate.Current()}, nowMs())
@@ -715,11 +722,20 @@ func TestSkipVote_ThresholdAndDynamicRecalc(t *testing.T) {
 		t.Fatalf("transitioned prematurely after disconnect")
 	}
 
-	// p2 votes -> 2/2 met -> TRANSITION.
+	// p2 votes -> 2/2 met. Player-driven cell picking (AND-gate): the vote
+	// threshold alone is no longer enough while p1 (the winner, now the
+	// designated picker) hasn't chosen the next cell yet.
 	h.e.OnMessage("c2", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgVote, Nonce: h.gate.Current()}, nowMs())
 	h.sync(func() {})
+	if h.state() != protocol.StateKaraoke {
+		t.Fatalf("state = %s, want KARAOKE (vote passed but picker hasn't picked)", h.state())
+	}
+
+	// p1 (the picker) picks the next cell -> both AND-gate halves now
+	// satisfied -> TRANSITION.
+	h.playerSelectCell("c1", 5, 1)
 	if h.state() != protocol.StateTransition {
-		t.Fatalf("state = %s, want TRANSITION after threshold met", h.state())
+		t.Fatalf("state = %s, want TRANSITION after threshold met AND picker picked", h.state())
 	}
 }
 
@@ -753,11 +769,16 @@ func TestSkipVote_HundredPercentRequiresAll(t *testing.T) {
 	if h.state() != protocol.StateKaraoke {
 		t.Fatalf("transitioned at 1/2 with 100%% threshold")
 	}
-	// Second votes: now everyone has -> transition.
+	// Second votes: now everyone has — but the AND-gate still needs the
+	// picker (c1, this round's winner) to also pick before transitioning.
 	h.e.OnMessage("c2", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgVote, Nonce: h.gate.Current()}, nowMs())
 	h.sync(func() {})
+	if h.state() != protocol.StateKaraoke {
+		t.Fatalf("state = %s, want KARAOKE at 2/2 votes but no pick yet", h.state())
+	}
+	h.playerSelectCell("c1", 5, 1)
 	if h.state() != protocol.StateTransition {
-		t.Fatalf("state = %s, want TRANSITION at 2/2", h.state())
+		t.Fatalf("state = %s, want TRANSITION at 2/2 votes AND a pick", h.state())
 	}
 }
 
@@ -911,7 +932,13 @@ func TestEphemeralResume(t *testing.T) {
 }
 
 // TestTransitionReturnsToBoard verifies the countdown returns to BOARD (§3.9).
-func TestTransitionReturnsToBoard(t *testing.T) {
+// TestTransition_PickedCellStartsAfterCountdown: player-driven cell picking
+// changed what the transition countdown lands on. Previously (no picker
+// feature) it always returned to BOARD and waited for the admin; now, once
+// both AND-gate halves are satisfied (vote passed AND the picker picked),
+// the countdown starts the PICKED cell directly — BOARD is only a
+// momentary pass-through, not the resting state.
+func TestTransition_PickedCellStartsAfterCountdown(t *testing.T) {
 	old := TransitionDelay
 	TransitionDelay = 10 * time.Millisecond
 	defer func() { TransitionDelay = old }()
@@ -928,12 +955,65 @@ func TestTransitionReturnsToBoard(t *testing.T) {
 	// 1 active @50% needs 1 vote.
 	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgVote, Nonce: h.gate.Current()}, nowMs())
 	h.sync(func() {})
+	if h.state() != protocol.StateKaraoke {
+		t.Fatalf("state = %s, want KARAOKE (vote passed but picker hasn't picked)", h.state())
+	}
+	h.playerSelectCell("c1", 5, 2)
+	if h.state() != protocol.StateTransition {
+		t.Fatalf("state = %s, want TRANSITION", h.state())
+	}
+	time.Sleep(40 * time.Millisecond)
+	if h.state() != protocol.StateRoundActive {
+		t.Errorf("state = %s, want ROUND_ACTIVE (the picked cell started directly)", h.state())
+	}
+	var row int
+	h.sync(func() { row = h.e.curRow })
+	if row != 5 {
+		t.Errorf("curRow = %d, want 5 (the picked cell, not an admin/random pick)", row)
+	}
+}
+
+// TestTransition_NoValidPickFallsBackToBoard: the defensive fallback in
+// beginTransition's countdown — if the picked cell somehow isn't valid
+// anymore by the time the countdown fires (not reachable in normal play
+// today, but guarded rather than assumed), land on BOARD and clear the
+// stale picker state instead of leaving the game stuck.
+func TestTransition_NoValidPickFallsBackToBoard(t *testing.T) {
+	old := TransitionDelay
+	TransitionDelay = 10 * time.Millisecond
+	defer func() { TransitionDelay = old }()
+
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.join("c1", "fp1", "a")
+	h.selectCell("admin", 1, 1)
+	n := h.gate.Current()
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: n}, nowMs())
+	h.sync(func() {})
+	h.grade("admin", protocol.VerdictCorrect)
+	h.playerSelectCell("c1", 5, 2) // valid pick, recorded but karaokeReady isn't true yet
+	if h.state() != protocol.StateKaraoke {
+		t.Fatalf("state = %s, want KARAOKE (picked but vote hasn't passed)", h.state())
+	}
+	// Manually force into TRANSITION with a now-invalid pending pick, to
+	// exercise the defensive fallback directly (this exact sequence isn't
+	// reachable through the public AND-gate today, by design).
+	h.sync(func() {
+		h.e.pendingPick.Row, h.e.pendingPick.Col = 99, 99 // no such cell
+		h.e.beginTransition()
+	})
 	if h.state() != protocol.StateTransition {
 		t.Fatalf("state = %s, want TRANSITION", h.state())
 	}
 	time.Sleep(40 * time.Millisecond)
 	if h.state() != protocol.StateBoard {
-		t.Errorf("state = %s, want BOARD after countdown", h.state())
+		t.Errorf("state = %s, want BOARD (invalid pick, fell back)", h.state())
+	}
+	var picker string
+	h.sync(func() { picker = h.e.cellPicker })
+	if picker != "" {
+		t.Errorf("cellPicker = %q, want cleared after the invalid-pick fallback", picker)
 	}
 }
 
@@ -1398,5 +1478,227 @@ func TestBroadcastPlaybackPosition_AdminOnly(t *testing.T) {
 	}
 	if got.PositionMs != 5000 || got.DurationMs != 200000 || got.Paused {
 		t.Errorf("playbackPositionData = %+v, want {5000 200000 false}", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Player-driven cell picking: whoever most recently scored (e.cellPicker)
+// can pick the next board cell from their own phone. During KARAOKE this is
+// one half of an AND-gate with the skip vote / track-end (see
+// karaokeConditionMet); after a Daily Double (which goes straight to BOARD,
+// no karaoke phase) it's an immediate pick, same as admin.select.
+// ---------------------------------------------------------------------------
+
+// TestPlayerPicker_PickThenVotePasses: the AND-gate's OTHER ordering (the
+// skip-vote tests above cover vote-passes-then-pick) — the picker picks
+// FIRST, and the transition only fires once the vote threshold is also met.
+func TestPlayerPicker_PickThenVotePasses(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.join("c1", "fp1", "a")
+	h.selectCell("admin", 1, 1)
+	n := h.gate.Current()
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: n}, nowMs())
+	h.sync(func() {})
+	h.grade("admin", protocol.VerdictCorrect)
+	if h.state() != protocol.StateKaraoke {
+		t.Fatalf("state = %s, want KARAOKE", h.state())
+	}
+
+	// Picker picks first — vote hasn't passed yet, must stay in KARAOKE.
+	h.playerSelectCell("c1", 5, 1)
+	if h.state() != protocol.StateKaraoke {
+		t.Fatalf("state = %s, want KARAOKE (picked but vote hasn't passed)", h.state())
+	}
+	var hasPicked bool
+	h.sync(func() { hasPicked = h.e.pendingPick != nil })
+	if !hasPicked {
+		t.Fatalf("pendingPick not recorded after a valid pick")
+	}
+
+	// 1 active @50% needs 1 vote — now both halves are satisfied.
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgVote, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+	if h.state() != protocol.StateTransition {
+		t.Fatalf("state = %s, want TRANSITION after the vote also passed", h.state())
+	}
+}
+
+// TestPlayerPicker_TrackEndedTriggersAndGate: the "ready" half of the
+// AND-gate can also come from the song ending naturally (onStagePlayerState's
+// TrackEnded), not just a passed skip vote.
+func TestPlayerPicker_TrackEndedTriggersAndGate(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.joinStage("stage")
+	h.join("c1", "fp1", "a")
+	h.selectCell("admin", 1, 1)
+	n := h.gate.Current()
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: n}, nowMs())
+	h.sync(func() {})
+	h.grade("admin", protocol.VerdictCorrect)
+
+	h.playerSelectCell("c1", 5, 1)
+	if h.state() != protocol.StateKaraoke {
+		t.Fatalf("state = %s, want KARAOKE (picked, song still playing)", h.state())
+	}
+
+	ps, _ := json.Marshal(protocol.StagePlayerStateData{TrackEnded: true})
+	h.e.OnMessage("stage", protocol.RoleStage, protocol.ClientEnvelope{Type: protocol.CMsgStagePlayerState, Data: ps, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+	if h.state() != protocol.StateTransition {
+		t.Fatalf("state = %s, want TRANSITION after the track ended with a pick already in hand", h.state())
+	}
+}
+
+// TestPlayerPicker_NonPickerRejected: only the connection bound to
+// e.cellPicker may pick — anyone else's player.selectCell is silently
+// ignored, mirroring onDailyDoubleChoose's single-connection scoping.
+func TestPlayerPicker_NonPickerRejected(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.join("c1", "fp1", "winner")
+	h.join("c2", "fp2", "bystander")
+	h.selectCell("admin", 1, 1)
+	n := h.gate.Current()
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: n}, nowMs())
+	h.sync(func() {})
+	h.grade("admin", protocol.VerdictCorrect)
+
+	h.playerSelectCell("c2", 5, 1) // c2 is not the picker (c1 is)
+	var pending *cellCoord
+	h.sync(func() { pending = h.e.pendingPick })
+	if pending != nil {
+		t.Fatalf("non-picker's pick was honored: %+v", pending)
+	}
+	if h.state() != protocol.StateKaraoke {
+		t.Fatalf("state = %s, want KARAOKE (rejected pick must not advance anything)", h.state())
+	}
+}
+
+// TestPlayerPicker_AdminOverrideClearsPending: admin's manual pick always
+// wins immediately, even with a player's pick already pending, and leaves
+// no stale state that could misfire against a later karaoke phase.
+func TestPlayerPicker_AdminOverrideClearsPending(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.join("c1", "fp1", "a")
+	h.selectCell("admin", 1, 1)
+	n := h.gate.Current()
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: n}, nowMs())
+	h.sync(func() {})
+	h.grade("admin", protocol.VerdictCorrect)
+	h.playerSelectCell("c1", 5, 1) // pending pick recorded, vote hasn't passed
+
+	h.selectCell("admin", 5, 2) // admin overrides mid-karaoke with a DIFFERENT cell
+	if h.state() != protocol.StateRoundActive {
+		t.Fatalf("state = %s, want ROUND_ACTIVE (admin override starts immediately)", h.state())
+	}
+	var row, col int
+	var picker string
+	var pending *cellCoord
+	h.sync(func() {
+		row, col = h.e.curRow, h.e.curCell.Col
+		picker = h.e.cellPicker
+		pending = h.e.pendingPick
+	})
+	if row != 5 || col != 2 {
+		t.Errorf("curCell = (%d,%d), want (5,2) — admin's own choice, not the pending pick", row, col)
+	}
+	if picker != "" {
+		t.Errorf("cellPicker = %q, want cleared by the admin override", picker)
+	}
+	if pending != nil {
+		t.Errorf("pendingPick = %+v, want cleared by the admin override", pending)
+	}
+}
+
+// TestPlayerPicker_NoScorerYetAdminOnly: before anyone has scored,
+// e.cellPicker is "" and the mechanism simply doesn't engage — a mobile
+// player's pick is ignored and admin.select works exactly as before this
+// feature existed. This is the explicitly-chosen fallback, not a bug.
+func TestPlayerPicker_NoScorerYetAdminOnly(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.join("c1", "fp1", "a")
+
+	var picker string
+	h.sync(func() { picker = h.e.cellPicker })
+	if picker != "" {
+		t.Fatalf("cellPicker = %q before any round has resolved, want \"\"", picker)
+	}
+
+	stateBefore := h.state()
+	h.playerSelectCell("c1", 1, 1) // nobody is the designated picker yet
+	if h.state() != stateBefore {
+		t.Fatalf("state changed from %s to %s — an unsolicited pick must be a no-op", stateBefore, h.state())
+	}
+
+	h.selectCell("admin", 1, 1) // admin picks exactly as before
+	if h.state() != protocol.StateRoundActive {
+		t.Fatalf("state = %s, want ROUND_ACTIVE (admin.select unaffected)", h.state())
+	}
+}
+
+// TestDailyDouble_WinnerBecomesPicker: a Daily Double payout updates
+// e.cellPicker the same as a normal correct guess (both go through the
+// shared award() path) — the performer can pick the next cell directly from
+// BOARD, with no karaoke/vote phase to wait on.
+func TestDailyDouble_WinnerBecomesPicker(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	performer := h.join("c1", "fp1", "perf")
+	rater := h.join("c2", "fp2", "rater")
+	_ = rater
+
+	h.selectCell("admin", 1, 2)
+	h.sync(func() { h.e.trackStartMs = nowMs() })
+	n := h.gate.Current()
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: n}, nowMs())
+	h.sync(func() {})
+	h.grade("admin", protocol.VerdictCorrect)
+	h.sync(func() {
+		h.e.curTrack = nil
+		h.e.curCell = nil
+		h.e.state = protocol.StateBoard
+	})
+
+	h.selectCell("admin", 1, 2) // 2nd pick on the DD cell -> offer
+	if h.state() != protocol.StateDailyDouble {
+		t.Fatalf("state after 2nd pick = %s, want DAILY_DOUBLE", h.state())
+	}
+	h.ddDecide("c1", true)
+	choices := h.lastDailyDoubleOfferTrackIDs("c1")
+	if len(choices) == 0 {
+		t.Fatalf("contestant received no song choices after accepting")
+	}
+	h.ddChoose("c1", choices[0])
+
+	rd, _ := json.Marshal(protocol.RateData{Stars: 5})
+	h.e.OnMessage("c2", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgRate, Data: rd, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+	if h.state() != protocol.StateBoard {
+		t.Fatalf("state = %s, want BOARD after DD resolves", h.state())
+	}
+	var picker string
+	h.sync(func() { picker = h.e.cellPicker })
+	if picker != performer {
+		t.Fatalf("cellPicker = %q, want the DD performer %q", picker, performer)
+	}
+
+	h.playerSelectCell("c1", 5, 1) // the DD winner picks the next cell directly
+	if h.state() != protocol.StateRoundActive {
+		t.Fatalf("state = %s, want ROUND_ACTIVE (DD winner's pick started it)", h.state())
+	}
+	var row int
+	h.sync(func() { row = h.e.curRow })
+	if row != 5 {
+		t.Errorf("curRow = %d, want 5 (the DD winner's own pick)", row)
 	}
 }

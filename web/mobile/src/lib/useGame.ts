@@ -18,6 +18,9 @@ import type {
   DailyDoubleResultData,
   DailyDoubleDecisionData,
   DailyDoubleChooseData,
+  PickerStatusData,
+  BoardData,
+  PlayerSelectCellData,
 } from "@shared/protocol";
 import { WT_URL, WS_URL } from "./env";
 import { fetchCertHashes } from "./cert";
@@ -69,6 +72,16 @@ export interface GameView {
   // The final average rating + points once a Daily Double resolves. Transient
   // — cleared on the next state change.
   ddResult: DailyDoubleResultData | null;
+  // Sanitized "who's picking the next cell" status (handle + hasPicked), or
+  // null when nobody is the designated picker (admin picks instead — the
+  // original, unchanged behavior). Legal during BOARD (right after a Daily
+  // Double) and KARAOKE (the normal post-round AND-gate with the skip vote).
+  pickerStatus: PickerStatusData | null;
+  // The board (category/points/exhausted — no track metadata, §4A-safe),
+  // populated ONLY on the designated picker's own device so they can render
+  // a tappable grid. Null for everyone else, and cleared once this device's
+  // pick registers or the phase changes.
+  pickableBoard: BoardData | null;
 }
 
 const HEARTBEAT_MS = 2000;
@@ -94,6 +107,8 @@ const INITIAL: GameView = {
   ddPerformer: null,
   ddOffer: null,
   ddResult: null,
+  pickerStatus: null,
+  pickableBoard: null,
 };
 
 export function useGame() {
@@ -211,6 +226,13 @@ export function useGame() {
           if (d.state === "ROUND_ACTIVE" && v.state !== "ADJUDICATE") {
             next.ddResult = null;
           }
+          // Picker status/board are only ever meaningful during BOARD (right
+          // after a Daily Double) or KARAOKE (the normal post-round AND-gate)
+          // — clear both on leaving either, same pattern as ddPerformer/ddOffer.
+          if (d.state !== "BOARD" && d.state !== "KARAOKE") {
+            next.pickerStatus = null;
+            next.pickableBoard = null;
+          }
           return { ...v, ...next };
         });
       });
@@ -292,6 +314,21 @@ export function useGame() {
       c.on("dailyDouble.result", (env: ServerEnvelope) => {
         const d = env.d as DailyDoubleResultData | undefined;
         if (d) patch({ ddResult: d });
+      });
+
+      // Sanitized "who's picking" status (handle + hasPicked) — safe for
+      // every role (§4A). Lets non-pickers show "waiting on {handle}" and
+      // the picker's own device know when its pick has registered.
+      c.on("pickerStatus", (env: ServerEnvelope) => {
+        const d = env.d as PickerStatusData | undefined;
+        if (d) patch({ pickerStatus: d.pickerHandle ? d : null });
+      });
+
+      // THIS DEVICE'S OWN CONNECTION ONLY — see the "pickableBoard" doc
+      // comment in protocol.ts. Category/points/exhausted, no track data.
+      c.on("pickableBoard", (env: ServerEnvelope) => {
+        const d = env.d as BoardData | undefined;
+        if (d) patch({ pickableBoard: d });
       });
 
       c.on("heartbeat", () => {
@@ -499,6 +536,14 @@ export function useGame() {
     void c.send<DailyDoubleChooseData>({ t: "dailyDouble.choose", d: { trackID } });
   }, []);
 
+  // Player-driven cell picking: only honored server-side if this device is
+  // the designated picker (e.cellPicker) — see onPlayerSelectCell.
+  const selectCell = useCallback((row: number, col: number) => {
+    const c = clientRef.current;
+    if (!c) return;
+    void c.send<PlayerSelectCellData>({ t: "player.selectCell", d: { row, col } });
+  }, []);
+
   useEffect(() => {
     return () => {
       unmountedRef.current = true;
@@ -508,5 +553,5 @@ export function useGame() {
     };
   }, []);
 
-  return { view, connect, buzz, vote, rate, ddDecide, ddChoose };
+  return { view, connect, buzz, vote, rate, ddDecide, ddChoose, selectCell };
 }

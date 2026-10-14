@@ -56,6 +56,10 @@ export type ClientMsgType =
   // cmsgAdminJumpToDropPoint in engine.go (CONTRACT-QUESTION).
   | "admin.setDropPoint"
   | "admin.jumpToDropPoint"
+  // player.selectCell: {row, col} — the designated picker's own connection
+  // only (whoever most recently scored). Mirrors cmsgPlayerSelectCell in
+  // engine.go (CONTRACT-QUESTION — not in the fixed protocol.go).
+  | "player.selectCell"
   | "stage.playerState"
   | "stage.deviceReady";
 
@@ -78,6 +82,13 @@ export type ServerMsgType =
   | "telemetry"
   | "adminView"
   | "spotifyToken"
+  // pickerStatus: {pickerHandle, hasPicked} — sanitized (no board/track
+  // data), broadcast to ALL roles. Mirrors smsgPickerStatus in engine.go.
+  | "pickerStatus"
+  // pickableBoard: the same BoardData shape "board" uses (category/points/
+  // exhausted — already §4A-safe), sent ONLY to the designated picker's own
+  // connection. Mirrors smsgPickableBoard in engine.go.
+  | "pickableBoard"
   // partialReveal: stage-only signal to fully reveal one field (artist|song)
   // after a partial guess. Mirrors smsgPartialReveal in server engine.go
   // (a CONTRACT-QUESTION type kept out of the fixed protocol.go).
@@ -224,6 +235,8 @@ export interface BoardCell {
   points: number; exhausted: boolean; tracksLeft: number;
 }
 export interface BoardData { rows: number; cols: number; cells: BoardCell[]; }
+export interface PlayerSelectCellData { row: number; col: number; }
+export interface PickerStatusData { pickerID: string; pickerHandle: string; hasPicked: boolean; }
 export interface AudioData { action: "play" | "pause" | "resume"; trackURI?: string; positionMs?: number; }
 export interface TelemetryConn { id: string; handle: string; rttMs: number; score: number; active: boolean; }
 export interface TelemetryData { connections: TelemetryConn[]; }
