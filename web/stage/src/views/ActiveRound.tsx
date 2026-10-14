@@ -195,7 +195,18 @@ export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHa
   const hintYear = maskedReveal?.year;
 
   return (
-    <div className="flex h-full w-full flex-col items-center justify-center px-12">
+    <div className="relative flex h-full w-full flex-col items-center justify-center px-12">
+      {/* Guesser banner, fixed near the top so the audience always sees who
+          buzzed in first without it getting lost in the centered reveal. */}
+      {lockoutHandle && (
+        <div className="absolute inset-x-0 top-8 flex flex-col items-center">
+          <div className="text-sm uppercase tracking-[0.5em] text-neon-amber/70">now guessing</div>
+          <div className="text-5xl font-extrabold text-neon-amber neon-text animate-winnerPop">
+            {lockoutHandle}
+          </div>
+        </div>
+      )}
+
       {/* Genre hint sits above the points. */}
       {hintGenre && (
         <div className="mb-6 flex items-center gap-4 text-neon-amber/90">
@@ -233,12 +244,6 @@ export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHa
         <Line label="artist" textRef={artistRef} glow={glow} />
         <Line label="song" textRef={songRef} glow={glow} />
       </div>
-
-      {lockoutHandle && (
-        <div className="mt-12 text-3xl font-bold text-neon-magenta neon-cyan animate-winnerPop">
-          🔒 {lockoutHandle} is guessing…
-        </div>
-      )}
     </div>
   );
 }
