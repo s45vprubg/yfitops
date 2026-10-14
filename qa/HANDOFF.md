@@ -751,3 +751,126 @@ this delta — hunters should still look broadly, not just rubber-stamp these)
 Layered: Code -> API -> UI, each validated before the next, per the
 project's standard order. Surfaces below are hunted in parallel within a
 layer; a layer's validators must be green before its fixes are trusted.
+
+# SWEEP 8 (2026-10-13/14) — IN PROGRESS
+
+Re-scoped per the established rule: diff against sweep 7's HEAD (`ad4d026`).
+Scope now covers 3 commits (expanded mid-sweep — two more features landed
+before hunting started): `79abe40` (stage guesser-banner reposition,
+cosmetic CSS only), `841abe2` (player-driven cell picking: a new AND-gate
+state machine in `engine.go` — skip-vote-passed/track-ended ×
+picker-has-chosen — new local message types, a new mobile screen, shared
+protocol additions), and `3c3d508` (Daily Double graceful fade-out + the
+first volume-control capability in this codebase, plus moving the Mixer
+tab's content into the Control Room's board panel as "Audio Settings" and
+deleting the standalone Mixer tab). `git diff --stat ad4d026..HEAD` = 18
+files, ~1650 insertions.
+
+## Baseline (clean, before any sweep-8 hunting)
+Confirmed moments before this sweep started (same session, same working
+tree, after all 3 commits deployed and health-checked on prod): `go
+build/vet/test -race` all green, `tsc --noEmit` clean in all three
+frontends, `qa/smoke.sh` SMOKE OK, `qa/acid.sh` ACID PASSED (43/43),
+`scripts/preflight.sh` PREFLIGHT PASSED.
+
+## Priority watch-list for hunters
+
+**Player-driven cell picking (`841abe2`):**
+- The AND-gate is the highest-value target: two async conditions
+  (vote-threshold-reached / track-ended vs. picker-has-chosen) that can
+  arrive in either order, feeding a shared continuation (`beginTransition`)
+  that used to be unconditional. Look hard for a third ordering/race the
+  implementation didn't consider — concurrent picks, a pick landing exactly
+  as `beginTransition`'s 3s timer fires, a disconnect/reconnect mid-pick,
+  what happens if the picker is kicked/banned while picking is pending.
+- `onPlayerSelectCell`'s connection-to-playerID scoping (mirroring Daily
+  Double's `ddOffer.contestantID` check) — confirm it's actually as tight
+  as DD's, not a weaker approximation.
+- Admin override clearing stale state — confirmed correct in a quick direct
+  read during implementation, but not yet adversarially hunted/validated.
+- Daily-Double-winner-becomes-picker path (`StateBoard` branch of
+  `onPlayerSelectCell`) — this is a second, simpler code path parallel to
+  the karaoke AND-gate; confirm it can't be reached from the wrong state or
+  by the wrong player, and that it doesn't accidentally skip any of the
+  state-reset bookkeeping the karaoke path does.
+
+**Daily Double fade-out + volume control (`3c3d508`):**
+- The restore-after-fade guarantee is the one hard safety requirement from
+  the user: a `defer` registered first-thing inside the fade's completion
+  callback is supposed to make the volume restore structurally unskippable.
+  Confirm this independently — including the race where Force End Round /
+  `admin.skipDailyDouble` (both still instant, by design) lands WHILE a
+  fade is mid-flight, and the two new `SetVolume` call sites (fade-down
+  steps + the restore) interacting with a concurrent `admin.setVolume` from
+  the operator's own slider mid-fade.
+- `e.ddEnding`'s re-entrancy guard — confirm it can't be bypassed by rapid
+  double-clicking "End Daily Double," or by that button firing at the exact
+  moment `checkDailyDoubleComplete`'s automatic path also fires.
+- `spotify.go`'s `doPlayer`/`playerCommand` signature grew an `extra
+  url.Values` param for `SetVolume` — confirm every existing call site
+  (Play/Pause/Resume) still passes `nil` correctly and nothing regressed in
+  the 401-refresh-and-retry path those methods share.
+- The new `admin.endDailyDouble` message — confirm it's rejected outside
+  the exact "performing, track loaded" window (not reachable during the
+  offer/pick sub-phase, not reachable outside `StateDailyDouble` at all).
+
+**Mixer relocation (`3c3d508`, UI-only):** confirm nothing about the
+mixer's actual behavior changed in the move (same clamps, same debounce
+timing, same server echo handling) — "just moved" was the explicit
+requirement, so any behavioral diff here is itself a finding.
+
+## Code layer — DONE
+
+8 findings (7 engine.go + 1 spotify.go), all CONFIRMED (0 refuted), all
+fixed and independently re-verified cold under `-race`, `smoke`/`acid`/
+`preflight` all green. 3 HIGH: a kicked/banned cell-picker could keep
+steering the board (kick never force-disconnects the transport, a known
+pre-existing gap now closed for this specific path); a stale Daily-Double
+fade-ending marker (`ddEnding bool`) wasn't scoped per-performance, so a
+Force-Ended DD's leftover fade could block or misfire against a later,
+unrelated DD (fixed via `ddFadingRoundKey` identity-checked against
+`e.roundKey`); the fade's volume restore used a stale snapshot instead of
+re-reading live state, so a mid-fade `admin.setVolume` got silently
+clobbered (fixed to read fresh at restore time). One LOW (s8eng-06,
+unbounded-submit-on-shutdown) deliberately deferred — pre-existing pattern
+shared by `beginTransition`'s own goroutine, not newly introduced by this
+diff, same precedent as sweep 6's deferred `tracks.go` siblings.
+
+## Separately: a real production bug found via live stress testing
+
+Not from the hunt pipeline — the user ran an actual stress test against
+yfitops.us (up to ~500 concurrent users, added in batches of 25) and got
+booted from the admin panel on every batch. Investigated and fixed with the
+same rigor as a sweep finding:
+
+**Root cause**: `onHello` called `broadcastScoreboard`/`broadcastBoard`/
+`broadcastTelemetry` synchronously and unconditionally on EVERY join — the
+identical O(P^2)-floodable pattern already fixed for `onHeartbeat`
+(`telemetryDirty` + a coalescing ticker), just never applied to the join
+path. A burst of 25 joins meant 25 full population-wide broadcast cycles
+back-to-back on the single Run-loop goroutine that also services admin's
+own messages, worsening as player count climbed toward 500. Fixed by adding
+`scoreboardDirty`/`boardDirty` alongside the existing `telemetryDirty`,
+flushed by the same 1s ticker — a burst of N joins now costs one flush, not
+N. New regression test `TestJoinBurst_CoalescesScoreboardBoardTelemetry`,
+proven to fail against the pre-fix code (75/50/25 synchronous broadcast
+frames for a 25-join burst) and pass with the fix (0, deferred to the
+ticker).
+
+**Likely proximate cause of the actual "booted out" symptom**: separately,
+`web/admin/src/components/TelemetryPanel.tsx` had zero memoization anywhere
+— every broadcast forced a full unmemoized re-render of a list scaling
+toward 500 rows. Most likely sequence: the admin tab visibly froze during
+each batch-add, the operator reloaded, and because the admin secret is
+deliberately never persisted client-side (an earlier intentional security
+fix), any reload presents a fresh login — not a true network disconnect.
+Memoized `TelemetryPanel` itself plus `Row` (with a value-based comparator,
+since the server sends a fresh object graph every broadcast regardless of
+whether a given row's values changed) and the `cheatByID`/count
+computations.
+
+Production logs from the actual stress test were unrecoverable (wiped by
+this session's own later redeploys) — diagnosed from code alone, not log
+forensics. No way to confirm the memoization theory is the *complete*
+explanation vs. the server-side fix alone; both are real, independently
+justified fixes regardless.

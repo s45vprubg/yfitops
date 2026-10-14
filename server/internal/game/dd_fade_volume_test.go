@@ -110,11 +110,13 @@ func TestDailyDoubleFade_AllRatedFadesGracefully(t *testing.T) {
 
 	h.rate(raterConn, 5) // the only eligible rater — completes the pool immediately
 
-	// ddEnding flips synchronously, before the fade's goroutine even starts.
-	var ddEnding bool
-	h.sync(func() { ddEnding = h.e.ddEnding })
-	if !ddEnding {
-		t.Fatal("e.ddEnding = false immediately after the completing rating landed, want true")
+	// ddFadingRoundKey flips synchronously, to this performance's own
+	// e.roundKey, before the fade's goroutine even starts (s8eng-03: it's a
+	// per-performance identity now, not a bare bool).
+	var fadingKey, rk string
+	h.sync(func() { fadingKey = h.e.ddFadingRoundKey; rk = h.e.roundKey })
+	if fadingKey == "" || fadingKey != rk {
+		t.Fatalf("e.ddFadingRoundKey = %q immediately after the completing rating landed, want it to equal e.roundKey (%q)", fadingKey, rk)
 	}
 
 	// Pause must not happen until the fade finishes stepping volume down —
@@ -146,8 +148,8 @@ func TestDailyDoubleFade_AllRatedFadesGracefully(t *testing.T) {
 	}
 
 	h.sync(func() {
-		if h.e.ddEnding {
-			t.Error("e.ddEnding still true after the fade completed, want false")
+		if h.e.ddFadingRoundKey != "" {
+			t.Errorf("e.ddFadingRoundKey = %q after the fade completed, want empty", h.e.ddFadingRoundKey)
 		}
 		if h.e.state != protocol.StateBoard {
 			t.Errorf("state = %s, want BOARD after the fade completes", h.e.state)
@@ -204,15 +206,15 @@ func TestDailyDoubleFade_EndButtonTriggersSameFade(t *testing.T) {
 // TestDailyDoubleFade_DoubleFireGuarded: if somehow both the automatic
 // all-rated completion and a manual admin.endDailyDouble click land for the
 // same performance (e.g. a rating and a button click racing), the second
-// must be a synchronous no-op (e.ddEnding's top-of-function guard), not a
-// second award.
+// must be a synchronous no-op (e.ddFadingRoundKey's top-of-function guard),
+// not a second award.
 func TestDailyDoubleFade_DoubleFireGuarded(t *testing.T) {
 	withFastFade(t)
 	h := newHarness(t)
 	defer h.run()()
 	_, raterConn := setupDDPerformance(t, h)
 
-	h.rate(raterConn, 5) // completes the pool, starts the fade (ddEnding=true)
+	h.rate(raterConn, 5) // completes the pool, starts the fade (ddFadingRoundKey=e.roundKey)
 
 	// Fire the button WHILE the fade is still in flight (volume mid-step,
 	// well inside the 60ms fast-fade window) — must be a no-op, not a
@@ -234,8 +236,8 @@ func TestDailyDoubleFade_DoubleFireGuarded(t *testing.T) {
 		t.Errorf("dailyDouble LogEvent count = %d, want exactly 1 (double award)", n)
 	}
 	h.sync(func() {
-		if h.e.ddEnding {
-			t.Error("e.ddEnding still true, want false")
+		if h.e.ddFadingRoundKey != "" {
+			t.Errorf("e.ddFadingRoundKey = %q, want empty", h.e.ddFadingRoundKey)
 		}
 	})
 }
@@ -257,7 +259,7 @@ func TestDailyDoubleFade_ForceEndRoundWinsRaceAndVolumeStillRestores(t *testing.
 
 	d, _ := json.Marshal(struct{}{})
 	h.e.OnMessage("admin", protocol.RoleAdmin, protocol.ClientEnvelope{Type: cmsgAdminEndDailyDouble, Data: d, Nonce: h.gate.Current()}, nowMs())
-	h.sync(func() {}) // ddEnding is now true; the fade goroutine is sleeping through its 60ms window
+	h.sync(func() {}) // ddFadingRoundKey is now set to e.roundKey; the fade goroutine is sleeping through its 60ms window
 
 	// Force End Round, synchronously on the loop, while the fade is still
 	// in flight. endRound -> skipDailyDouble -> finishDailyDouble directly
@@ -281,11 +283,11 @@ func TestDailyDoubleFade_ForceEndRoundWinsRaceAndVolumeStillRestores(t *testing.
 	// the guaranteed-restore defer firing on the early-bail path, not just
 	// the happy path.
 	if !waitUntil(t, time.Second, func() bool {
-		var ending bool
-		h.sync(func() { ending = h.e.ddEnding })
-		return !ending
+		var ending string
+		h.sync(func() { ending = h.e.ddFadingRoundKey })
+		return ending == ""
 	}) {
-		t.Fatal("timed out waiting for the fade's continuation to land and clear e.ddEnding")
+		t.Fatal("timed out waiting for the fade's continuation to land and clear e.ddFadingRoundKey")
 	}
 	if h.repo.eventCount("dailyDouble") != 1 {
 		t.Errorf("dailyDouble LogEvent count = %d after the fade's continuation also landed, want still exactly 1 (no double award)", h.repo.eventCount("dailyDouble"))
@@ -329,8 +331,8 @@ func TestDailyDoubleFade_RestoreStillAttemptedWhenSetVolumeErrors(t *testing.T) 
 		if h.e.state != protocol.StateBoard {
 			t.Errorf("state = %s, want BOARD even though every SetVolume call errored", h.e.state)
 		}
-		if h.e.ddEnding {
-			t.Error("e.ddEnding still true, want false")
+		if h.e.ddFadingRoundKey != "" {
+			t.Errorf("e.ddFadingRoundKey = %q, want empty", h.e.ddFadingRoundKey)
 		}
 	})
 	if h.repo.eventCount("dailyDouble") != 1 {
@@ -428,5 +430,195 @@ func TestSendFullSync_IncludesVolumeStatus(t *testing.T) {
 	}
 	if !found {
 		t.Error("admin never received a volumeStatus frame on connect")
+	}
+}
+
+// TestDailyDoubleFade_FirstStepIsFullVolumeNoNotch (s8eng-07): the fade's
+// very first SetVolume call must reaffirm the current operating level
+// itself, not an already-stepped-down value — the old `dailyDoubleFadeSteps
+// - 1` start produced an immediate ~17-point drop (100 -> 83 at the default
+// 6 steps) before any time had passed, an audible "notch" at the start of
+// what's supposed to read as a smooth fade.
+func TestDailyDoubleFade_FirstStepIsFullVolumeNoNotch(t *testing.T) {
+	withFastFade(t)
+	h := newHarness(t)
+	defer h.run()()
+	_, raterConn := setupDDPerformance(t, h)
+
+	h.rate(raterConn, 5) // completes the pool, starts the fade
+
+	if !waitUntil(t, time.Second, func() bool { return len(h.audio.ofMethod("pause")) > 0 }) {
+		t.Fatal("timed out waiting for the fade to finish and pause")
+	}
+	vols := h.audio.ofMethod("setVolume")
+	if len(vols) == 0 {
+		t.Fatal("no setVolume calls at all")
+	}
+	if vols[0].vol != 100 {
+		t.Errorf("first setVolume call = %d, want 100 (the current operating level, no notch)", vols[0].vol)
+	}
+}
+
+// TestDailyDoubleFade_MidFadeAdminSetVolumeWinsRestore (s8eng-04): an
+// admin.setVolume issued while a fade is in flight must win the eventual
+// guaranteed restore — the restore must re-read the LIVE e.volumePct at the
+// moment it fires, not reapply the stale value captured when the fade
+// started, otherwise the device silently reverts to the pre-fade level
+// while e.volumePct (and the admin UI driven by it) disagrees.
+func TestDailyDoubleFade_MidFadeAdminSetVolumeWinsRestore(t *testing.T) {
+	withFastFade(t)
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	_, raterConn := setupDDPerformance(t, h)
+
+	h.rate(raterConn, 5) // completes the pool, starts the fade (restoreTo snapshot = 100)
+
+	// Mid-fade: the operator drags the slider to 40. This must be the value
+	// both the device and e.volumePct end up at once the fade's guaranteed
+	// restore fires, not the stale 100 captured at fade-start.
+	d, _ := json.Marshal(adminSetVolumeData{Percent: 40})
+	h.e.OnMessage("admin", protocol.RoleAdmin, protocol.ClientEnvelope{Type: cmsgAdminSetVolume, Data: d, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+
+	if !waitUntil(t, time.Second, func() bool { return len(h.audio.ofMethod("pause")) > 0 }) {
+		t.Fatal("timed out waiting for the fade to finish and pause")
+	}
+	if !waitUntil(t, time.Second, func() bool {
+		last, ok := h.audio.last()
+		return ok && last.method == "setVolume" && last.vol == 40
+	}) {
+		last, _ := h.audio.last()
+		t.Fatalf("final setVolume call = %+v, want the restore to land on 40 (the operator's mid-fade change), not the stale pre-fade 100", last)
+	}
+	h.sync(func() {
+		if h.e.volumePct != 40 {
+			t.Errorf("e.volumePct = %d, want 40", h.e.volumePct)
+		}
+	})
+}
+
+// TestDailyDoubleFade_StaleFadeCannotBlockOrMisfireAgainstNewPerformance
+// (s8eng-03): e.ddFadingRoundKey is a per-performance identity (the
+// performance's own e.roundKey), not a bare bool. A Force End Round that
+// instantly finishes a performance while its OWN graceful fade is still
+// mid-flight must not leave a stale marker that (a) blocks a later,
+// completely unrelated performance's own fade from ever starting, or (b)
+// lets the stale continuation, once it does land, misfire finishDailyDouble
+// against whatever performance happens to be live by then.
+func TestDailyDoubleFade_StaleFadeCannotBlockOrMisfireAgainstNewPerformance(t *testing.T) {
+	withFastFade(t)
+	h := newHarness(t)
+	defer h.run()()
+	performerID, raterConn := setupDDPerformance(t, h)
+	var raterID string
+	h.sync(func() { raterID = h.e.reg.playerForConn(raterConn).ID })
+
+	// Start fade #1 for performance #1 (ddFadingRoundKey = rk1), then Force
+	// End Round immediately — this stays instant and bypasses the fade
+	// entirely (awarding performance #1 right away), but fade #1's own
+	// goroutine is still sleeping through its ~60ms stepped window with a
+	// now-stale ddFadingRoundKey == rk1.
+	h.rate(raterConn, 5)
+	var rk1 string
+	h.sync(func() { rk1 = h.e.roundKey })
+	if rk1 == "" {
+		t.Fatal("roundKey empty for performance #1")
+	}
+	h.sync(func() { h.e.endRound() })
+	if h.state() != protocol.StateBoard {
+		t.Fatalf("state = %s after Force End Round, want BOARD", h.state())
+	}
+	if n := h.repo.eventCount("dailyDouble"); n != 1 {
+		t.Fatalf("dailyDouble LogEvent count = %d after Force End Round, want 1", n)
+	}
+
+	// Start a brand-new, UNRELATED Daily Double performance #2 while fade
+	// #1's stale continuation is still sleeping. Driven via direct state
+	// (a test-only shortcut, mirroring this file's own setupDDPerformance/
+	// other tests' pattern) on a DIFFERENT cell than performance #1's,
+	// since the test board's one DD cell only triggers on its exact
+	// DDTriggerVisit and is already spent.
+	rk2 := rk1 + ":perf2"
+	h.sync(func() {
+		h.e.state = protocol.StateDailyDouble
+		h.e.curCell = h.e.board.Cells[1][1] // (5,2) — unrelated to perf #1's (1,2) cell
+		h.e.curTrack = h.e.curCell.Tracks[0]
+		h.e.curRow = 5
+		h.e.cellPicker = performerID
+		h.e.trackStartMs = nowMs()
+		h.e.roundKey = rk2
+		h.e.ratingPool = map[string]bool{raterID: true}
+		h.e.ratings = map[string]int{}
+	})
+
+	// (a) Performance #2's own fade must NOT be blocked by fade #1's stale
+	// marker (still == rk1 at this point).
+	h.sync(func() { h.e.fadeOutAndFinishDailyDouble() })
+	var fadingKey2 string
+	h.sync(func() { fadingKey2 = h.e.ddFadingRoundKey })
+	if fadingKey2 != rk2 {
+		t.Fatalf("ddFadingRoundKey = %q right after starting fade #2, want %q — performance #2's own fade must not be blocked by the stale marker (%q) left behind by the force-ended performance #1", fadingKey2, rk2, rk1)
+	}
+
+	// (b) Let both continuations land: fade #1's stale one (sleeping since
+	// before Force End Round, so it lands first) must bail without
+	// touching performance #2, and fade #2's own one must finish exactly
+	// performance #2, exactly once.
+	if !waitUntil(t, 2*time.Second, func() bool { return len(h.audio.ofMethod("pause")) >= 2 }) {
+		t.Fatalf("timed out waiting for both performances' pause calls (got %d)", len(h.audio.ofMethod("pause")))
+	}
+	// Give any (incorrect) extra misfire a moment to also land before
+	// asserting a final, settled count.
+	time.Sleep(100 * time.Millisecond)
+	if n := len(h.audio.ofMethod("pause")); n != 2 {
+		t.Errorf("pause call count = %d, want exactly 2 (1 from Force End Round's instant finish, 1 from performance #2's own graceful fade) — a stale fade #1 continuation must not have misfired a 3rd", n)
+	}
+	if n := h.repo.eventCount("dailyDouble"); n != 2 {
+		t.Errorf("dailyDouble LogEvent count = %d, want exactly 2 — a stale continuation from the force-ended performance #1 must not double-award or misfire against performance #2", n)
+	}
+	h.sync(func() {
+		if h.e.state != protocol.StateBoard {
+			t.Errorf("state = %s, want BOARD after performance #2's own fade completes", h.e.state)
+		}
+		if h.e.ddFadingRoundKey != "" {
+			t.Errorf("ddFadingRoundKey = %q after both continuations landed, want empty", h.e.ddFadingRoundKey)
+		}
+	})
+}
+
+// TestVolumeSerialization_AppliesInStrictEnqueueOrderDespiteSlowDevice
+// (s8eng-05): every outbound SetVolume call — admin.setVolume's live-apply,
+// the fade's stepped ramp, and the fade's restore — must be APPLIED to the
+// device in the same order it was issued, even if an earlier call happens
+// to be slower to execute than a later one (simulating real network
+// latency/reordering risk). Before this fix, each call site fired its own
+// ad hoc, independently-scheduled goroutine straight at the device with no
+// ordering guarantee between them.
+func TestVolumeSerialization_AppliesInStrictEnqueueOrderDespiteSlowDevice(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+
+	// The FIRST call is artificially slow (simulating network latency); a
+	// second, faster call is enqueued right after it. Without a single
+	// serializing writer, a bare `go e.audio.SetVolume(...)` per call could
+	// let the second (fast) call's goroutine win the race and get recorded
+	// before the first (slow) one — exactly the s8eng-05 race.
+	h.audio.volumeDelay = 80 * time.Millisecond
+
+	h.sync(func() {
+		h.e.sendVolume(100) // enqueued first — e.g. the fade's own step
+		h.e.sendVolume(40)  // enqueued second — e.g. a concurrent admin.setVolume
+	})
+
+	if !waitUntil(t, time.Second, func() bool { return len(h.audio.ofMethod("setVolume")) >= 2 }) {
+		t.Fatal("timed out waiting for both setVolume calls to be applied")
+	}
+	vols := h.audio.ofMethod("setVolume")
+	if len(vols) != 2 {
+		t.Fatalf("got %d setVolume calls, want exactly 2", len(vols))
+	}
+	if vols[0].vol != 100 || vols[1].vol != 40 {
+		t.Errorf("applied order = [%d, %d], want [100, 40] — a slower first-enqueued call must not let a faster second-enqueued call overtake it", vols[0].vol, vols[1].vol)
 	}
 }

@@ -341,6 +341,67 @@ func TestPlayDoesNotRetryTwice(t *testing.T) {
 	}
 }
 
+// TestSetVolumeRefreshesOn401 mirrors TestPlayRefreshesOn401 but for
+// SetVolume's extra-params path: a 401 on the first attempt must trigger
+// exactly one token refresh and one retry, and critically the retried
+// request must still carry the original volume_percent value — pinning the
+// extra url.Values threading through playerCommand/doPlayer's retry branch
+// (s8spot-001) rather than leaving it true-by-inspection only.
+func TestSetVolumeRefreshesOn401(t *testing.T) {
+	var volumeCalls, refreshCalls int32
+	var firstVolume, secondVolume, secondToken string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/token":
+			atomic.AddInt32(&refreshCalls, 1)
+			json.NewEncoder(w).Encode(tokenResponse{AccessToken: "fresh-token"})
+		case "/v1/me/player/volume":
+			n := atomic.AddInt32(&volumeCalls, 1)
+			if n == 1 {
+				// First attempt: stale token -> 401. Record the volume_percent
+				// sent so we can confirm the retry still carries the same value.
+				firstVolume = r.URL.Query().Get("volume_percent")
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			// Retry should carry the refreshed token AND the original volume.
+			secondToken = r.Header.Get("Authorization")
+			secondVolume = r.URL.Query().Get("volume_percent")
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(testConfig())
+	c.HTTPClient = &http.Client{Transport: rewriteTransport{base: srv.URL}}
+	c.accessToken = "stale-token"
+	c.refreshToken = "ref-token"
+	c.SetDevice("dev-1")
+
+	if err := c.SetVolume(context.Background(), 42); err != nil {
+		t.Fatalf("SetVolume: %v", err)
+	}
+
+	if got := atomic.LoadInt32(&volumeCalls); got != 2 {
+		t.Errorf("volume attempts = %d, want 2 (initial + retry)", got)
+	}
+	if got := atomic.LoadInt32(&refreshCalls); got != 1 {
+		t.Errorf("refresh calls = %d, want 1", got)
+	}
+	if secondToken != "Bearer fresh-token" {
+		t.Errorf("retry authorization = %q, want Bearer fresh-token", secondToken)
+	}
+	if firstVolume != "42" {
+		t.Errorf("initial volume_percent = %q, want 42", firstVolume)
+	}
+	if secondVolume != "42" {
+		t.Errorf("retry volume_percent = %q, want 42 (extra params must survive the retry)", secondVolume)
+	}
+}
+
 func TestPlayWithoutTokenFails(t *testing.T) {
 	c := New(testConfig())
 	if err := c.Play(context.Background(), "spotify:track:z", 0); err == nil {

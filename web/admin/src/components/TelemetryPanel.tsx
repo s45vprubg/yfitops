@@ -1,3 +1,4 @@
+import { memo, useMemo } from "react";
 import type { TelemetryConn, TelemetryData } from "@shared/protocol";
 import type { AdminActions, CheatEntry, CheatReport } from "../useAdmin";
 import { Empty, PanelHead } from "./BoardPanel";
@@ -12,12 +13,25 @@ interface Props {
 // Right column (Telemetry): live connection log with per-user RTT, score,
 // active flag, anti-cheat signals (IP + shared-ip/multi-conn flags), and
 // Kick / Ban quick actions.
-export default function TelemetryPanel({ telemetry, cheat, actions }: Props) {
+//
+// Join-burst fix: this list scales toward 500 rows at a real event, and had
+// no memoization anywhere — every incoming broadcast (even an unrelated one,
+// before the engine-side coalescing fix) forced a full unmemoized re-render
+// of every row. Memoized here as a second layer of defense on top of that
+// server-side fix, since this list will still legitimately update roughly
+// once a second under load even after coalescing.
+function TelemetryPanel({ telemetry, cheat, actions }: Props) {
   const conns = telemetry?.connections ?? [];
-  const activeCount = conns.filter((c) => c.active).length;
-  const cheatByID = new Map<string, CheatEntry>();
-  for (const e of cheat?.players ?? []) cheatByID.set(e.playerId, e);
-  const flaggedCount = (cheat?.players ?? []).filter((e) => e.flags.length > 0).length;
+  const cheatByID = useMemo(() => {
+    const m = new Map<string, CheatEntry>();
+    for (const e of cheat?.players ?? []) m.set(e.playerId, e);
+    return m;
+  }, [cheat]);
+  const activeCount = useMemo(() => conns.filter((c) => c.active).length, [conns]);
+  const flaggedCount = useMemo(
+    () => (cheat?.players ?? []).filter((e) => e.flags.length > 0).length,
+    [cheat],
+  );
 
   return (
     <section className="flex h-full flex-col border-l border-edge bg-panel2">
@@ -50,6 +64,8 @@ export default function TelemetryPanel({ telemetry, cheat, actions }: Props) {
   );
 }
 
+export default memo(TelemetryPanel);
+
 function rttColor(rtt: number): string {
   if (rtt <= 0) return "text-slate-600";
   if (rtt < 60) return "text-emerald-400";
@@ -57,7 +73,27 @@ function rttColor(rtt: number): string {
   return "text-red-400";
 }
 
-function Row({ c, cheat, actions }: { c: TelemetryConn; cheat?: CheatEntry; actions: AdminActions }) {
+type RowProps = { c: TelemetryConn; cheat?: CheatEntry; actions: AdminActions };
+
+function rowPropsEqual(prev: RowProps, next: RowProps): boolean {
+  // The server sends a fresh object graph on every broadcast even when a
+  // given row's actual values haven't changed, so default referential
+  // prop comparison in memo() would never skip anything — compare the
+  // real fields instead.
+  const pc = prev.c, nc = next.c;
+  if (pc.id !== nc.id || pc.handle !== nc.handle || pc.rttMs !== nc.rttMs || pc.score !== nc.score || pc.active !== nc.active) {
+    return false;
+  }
+  const pChe = prev.cheat, nChe = next.cheat;
+  if (!pChe !== !nChe) return false;
+  if (pChe && nChe) {
+    if (pChe.ip !== nChe.ip || pChe.conns !== nChe.conns) return false;
+    if (pChe.flags.length !== nChe.flags.length || pChe.flags.some((f, i) => f !== nChe.flags[i])) return false;
+  }
+  return prev.actions === next.actions;
+}
+
+const Row = memo(function Row({ c, cheat, actions }: RowProps) {
   const { confirm } = useModal();
   const flags = cheat?.flags ?? [];
   return (
@@ -122,4 +158,4 @@ function Row({ c, cheat, actions }: { c: TelemetryConn; cheat?: CheatEntry; acti
       </td>
     </tr>
   );
-}
+}, rowPropsEqual);

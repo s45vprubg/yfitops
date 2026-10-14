@@ -92,6 +92,12 @@ type fakeAudio struct {
 	volumeErr    error // injected failure for SetVolume, to test the restore-is-still-attempted guarantee
 	volumeNow    int
 	volumeNowSet bool
+	// volumeDelay, if set, sleeps for this long on the FIRST SetVolume call
+	// only (then clears itself) — simulates a slow network call to prove
+	// (s8eng-05) that outbound SetVolume calls are APPLIED in strict
+	// enqueue order even when an earlier call is slower to execute than a
+	// later one.
+	volumeDelay time.Duration
 }
 
 func (a *fakeAudio) SetDevice(string) {}
@@ -103,10 +109,15 @@ func (a *fakeAudio) Pause(context.Context) error  { a.add(audioCall{method: "pau
 func (a *fakeAudio) Resume(context.Context) error { a.add(audioCall{method: "resume"}); return nil }
 func (a *fakeAudio) SetVolume(_ context.Context, percent int) error {
 	a.mu.Lock()
+	delay := a.volumeDelay
+	a.volumeDelay = 0 // one-shot: only the first call is slowed
 	a.volumeNow = percent
 	a.volumeNowSet = true
 	err := a.volumeErr
 	a.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
 	a.add(audioCall{method: "setVolume", vol: percent})
 	return err
 }
@@ -336,6 +347,13 @@ func (h *harness) playerSelectCell(connID string, row, col int) {
 func (h *harness) grade(adminConn string, v protocol.GradeVerdict) {
 	d, _ := json.Marshal(protocol.AdminGradeData{Verdict: v})
 	h.e.OnMessage(adminConn, protocol.RoleAdmin, protocol.ClientEnvelope{Type: protocol.CMsgAdminGrade, Data: d, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+}
+
+// kick drives admin.kick (ban or a plain non-banning kick) against playerID.
+func (h *harness) kick(adminConn, playerID string, ban bool) {
+	d, _ := json.Marshal(protocol.AdminKickData{PlayerID: playerID, Ban: ban})
+	h.e.OnMessage(adminConn, protocol.RoleAdmin, protocol.ClientEnvelope{Type: protocol.CMsgAdminKick, Data: d, Nonce: h.gate.Current()}, nowMs())
 	h.sync(func() {})
 }
 
@@ -1676,6 +1694,234 @@ func TestPlayerPicker_NoScorerYetAdminOnly(t *testing.T) {
 	}
 }
 
+// TestPlayerPicker_BannedPickerRejected (s8eng-01): onPlayerSelectCell must
+// reject a banned picker's selection even if e.cellPicker/e.pendingPick were
+// never cleared (e.g. a merely-banned-not-kicked edge case, or to prove the
+// guard itself works independent of onAdminKick's own cleanup). A hostile
+// client that keeps sending player.selectCell on a banned player's stale
+// connection must never have it processed.
+func TestPlayerPicker_BannedPickerRejected(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	p1 := h.join("c1", "fp1", "a")
+	h.selectCell("admin", 1, 1)
+	n := h.gate.Current()
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: n}, nowMs())
+	h.sync(func() {})
+	h.grade("admin", protocol.VerdictCorrect)
+	if h.state() != protocol.StateKaraoke {
+		t.Fatalf("state = %s, want KARAOKE", h.state())
+	}
+	var picker string
+	h.sync(func() { picker = h.e.cellPicker })
+	if picker != p1 {
+		t.Fatalf("cellPicker = %q, want %q", picker, p1)
+	}
+
+	// Ban the picker directly (bypassing onAdminKick) so e.cellPicker stays
+	// set to p1 — isolates onPlayerSelectCell's own p.Banned guard.
+	h.sync(func() { h.e.reg.players[p1].Banned = true })
+
+	h.playerSelectCell("c1", 5, 1)
+	var pending *cellCoord
+	h.sync(func() { pending = h.e.pendingPick })
+	if pending != nil {
+		t.Fatalf("banned picker's selection was honored: %+v", pending)
+	}
+	if h.state() != protocol.StateKaraoke {
+		t.Fatalf("state = %s, want KARAOKE (a banned picker's selection must not advance anything)", h.state())
+	}
+}
+
+// TestOnAdminKick_ClearsCellPicker (s8eng-01): kicking the current
+// cell-picker must clear e.cellPicker/e.pendingPick/e.karaokeReady and
+// broadcast the cleared picker status, instead of leaving the kicked
+// player's picking rights intact.
+func TestOnAdminKick_ClearsCellPicker(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	p1 := h.join("c1", "fp1", "a")
+	h.selectCell("admin", 1, 1)
+	n := h.gate.Current()
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: n}, nowMs())
+	h.sync(func() {})
+	h.grade("admin", protocol.VerdictCorrect)
+	if h.state() != protocol.StateKaraoke {
+		t.Fatalf("state = %s, want KARAOKE", h.state())
+	}
+	var picker string
+	h.sync(func() { picker = h.e.cellPicker })
+	if picker != p1 {
+		t.Fatalf("cellPicker = %q, want %q", picker, p1)
+	}
+	h.bcast.reset()
+
+	h.kick("admin", p1, true)
+
+	var cellPicker string
+	var pending *cellCoord
+	var ready bool
+	var banned bool
+	h.sync(func() {
+		cellPicker = h.e.cellPicker
+		pending = h.e.pendingPick
+		ready = h.e.karaokeReady
+		banned = h.e.reg.players[p1].Banned
+	})
+	if !banned {
+		t.Fatalf("p1.Banned = false after admin.kick(ban:true)")
+	}
+	if cellPicker != "" {
+		t.Errorf("cellPicker = %q after kicking the picker, want cleared", cellPicker)
+	}
+	if pending != nil {
+		t.Errorf("pendingPick = %+v after kicking the picker, want cleared", pending)
+	}
+	if ready {
+		t.Error("karaokeReady = true after kicking the picker, want cleared")
+	}
+
+	// A pickerStatus frame reflecting the clear must have gone out.
+	foundCleared := false
+	h.bcast.mu.Lock()
+	for _, f := range h.bcast.frames {
+		if f.env.Type == smsgPickerStatus {
+			var d pickerStatusData
+			_ = json.Unmarshal(f.env.Data, &d)
+			if d.PickerID == "" {
+				foundCleared = true
+			}
+		}
+	}
+	h.bcast.mu.Unlock()
+	if !foundCleared {
+		t.Error("no pickerStatus broadcast reflecting the cleared picker after kick")
+	}
+
+	// Belt-and-suspenders: the kicked player's hostile client still can't
+	// act even if it kept trying (cellPicker is now "" so the pick is
+	// rejected regardless of which guard catches it).
+	h.playerSelectCell("c1", 5, 1)
+	h.sync(func() { pending = h.e.pendingPick })
+	if pending != nil {
+		t.Errorf("kicked picker's post-kick selection was honored: %+v", pending)
+	}
+}
+
+// TestOnDisconnect_PickerClearsStaleState (s8eng-02): a cell-picker who
+// fully disconnects before the OTHER AND-gate half has fired must have
+// e.cellPicker/e.pendingPick/e.karaokeReady cleared, instead of leaving a
+// "waiting on {handle}" status that can never resolve.
+func TestOnDisconnect_PickerClearsStaleState(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	p1 := h.join("c1", "fp1", "a")
+	h.selectCell("admin", 1, 1)
+	n := h.gate.Current()
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: n}, nowMs())
+	h.sync(func() {})
+	h.grade("admin", protocol.VerdictCorrect)
+	if h.state() != protocol.StateKaraoke {
+		t.Fatalf("state = %s, want KARAOKE", h.state())
+	}
+	var picker string
+	h.sync(func() { picker = h.e.cellPicker })
+	if picker != p1 {
+		t.Fatalf("cellPicker = %q, want %q", picker, p1)
+	}
+
+	h.e.OnDisconnect("c1")
+	h.sync(func() {})
+
+	var cellPicker string
+	var pending *cellCoord
+	var ready bool
+	h.sync(func() {
+		cellPicker = h.e.cellPicker
+		pending = h.e.pendingPick
+		ready = h.e.karaokeReady
+	})
+	if cellPicker != "" {
+		t.Errorf("cellPicker = %q after the picker disconnected, want cleared", cellPicker)
+	}
+	if pending != nil {
+		t.Errorf("pendingPick = %+v after the picker disconnected, want cleared", pending)
+	}
+	if ready {
+		t.Error("karaokeReady = true after the picker disconnected, want cleared")
+	}
+	// karaokeReady was false (the other AND-gate half hadn't fired), so this
+	// must be a simple clear — no transition should have been forced.
+	if h.state() != protocol.StateKaraoke {
+		t.Errorf("state = %s, want still KARAOKE (no AND-gate half had fired yet)", h.state())
+	}
+}
+
+// TestOnDisconnect_PickerDisconnectWithReadyFallsThroughToBoard (s8eng-02):
+// if the OTHER AND-gate half (skip-vote threshold / track-ended) already
+// fired before the picker disconnects, nothing will ever supply a
+// pendingPick again — OnDisconnect must fall through to the same
+// no-valid-pick continuation beginTransition's own stalled-pick handling
+// uses, instead of leaving the round stuck in KARAOKE forever.
+func TestOnDisconnect_PickerDisconnectWithReadyFallsThroughToBoard(t *testing.T) {
+	old := TransitionDelay
+	TransitionDelay = 20 * time.Millisecond
+	t.Cleanup(func() { TransitionDelay = old })
+
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	p1 := h.join("c1", "fp1", "a")
+	h.selectCell("admin", 1, 1)
+	n := h.gate.Current()
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: n}, nowMs())
+	h.sync(func() {})
+	h.grade("admin", protocol.VerdictCorrect)
+	if h.state() != protocol.StateKaraoke {
+		t.Fatalf("state = %s, want KARAOKE", h.state())
+	}
+
+	// Simulate the OTHER AND-gate half already having fired (e.g. the skip
+	// vote threshold was reached) before the picker ever picked.
+	h.sync(func() {
+		if h.e.cellPicker != p1 {
+			t.Fatalf("cellPicker = %q, want %q", h.e.cellPicker, p1)
+		}
+		h.e.karaokeReady = true
+	})
+
+	h.e.OnDisconnect("c1")
+	h.sync(func() {})
+
+	// Must have fallen through to beginTransition immediately — state moves
+	// to TRANSITION right away, picker state cleared right away too.
+	var cellPicker string
+	var pending *cellCoord
+	var ready bool
+	var state protocol.GameState
+	h.sync(func() {
+		cellPicker = h.e.cellPicker
+		pending = h.e.pendingPick
+		ready = h.e.karaokeReady
+		state = h.e.state
+	})
+	if state != protocol.StateTransition {
+		t.Fatalf("state = %s immediately after disconnect, want TRANSITION (fell through to beginTransition)", state)
+	}
+	if cellPicker != "" || pending != nil || ready {
+		t.Errorf("picker state not cleared immediately: cellPicker=%q pending=%+v karaokeReady=%v", cellPicker, pending, ready)
+	}
+
+	// And it must not get stuck there — beginTransition's own no-valid-pick
+	// continuation lands after TransitionDelay and returns to BOARD.
+	if !waitUntil(t, time.Second, func() bool { return h.state() == protocol.StateBoard }) {
+		t.Fatalf("state = %s after waiting out TransitionDelay, want BOARD (must not get stuck in TRANSITION/KARAOKE forever)", h.state())
+	}
+}
+
 // TestDailyDouble_WinnerBecomesPicker: a Daily Double payout updates
 // e.cellPicker the same as a normal correct guess (both go through the
 // shared award() path) — the performer can pick the next cell directly from
@@ -1737,4 +1983,70 @@ func TestDailyDouble_WinnerBecomesPicker(t *testing.T) {
 	if row != 5 {
 		t.Errorf("curRow = %d, want 5 (the DD winner's own pick)", row)
 	}
+}
+
+// TestJoinBurst_CoalescesScoreboardBoardTelemetry is the regression gate for
+// the stress-test finding: onHello used to call broadcastScoreboard/
+// broadcastBoard/broadcastTelemetry synchronously and unconditionally on
+// EVERY join — the identical O(P^2)-floodable pattern already fixed for
+// onHeartbeat (telemetryDirty + a coalescing ticker), just never applied to
+// joins. A burst of N joins (as a scripted load test produces) used to cost
+// N full population-wide broadcasts back-to-back on the single Run-loop
+// goroutine that also services the admin connection, worsening as player
+// count climbed toward the ~500 the user actually tested with.
+func TestJoinBurst_CoalescesScoreboardBoardTelemetry(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin1")
+	h.bcast.mu.Lock()
+	h.bcast.frames = nil // drop admin's own join broadcasts; only count what the burst below produces
+	h.bcast.mu.Unlock()
+
+	const burst = 25
+	for i := 0; i < burst; i++ {
+		h.join(fmt.Sprintf("c%d", i), fmt.Sprintf("fp%d", i), fmt.Sprintf("player%d", i))
+	}
+
+	h.bcast.mu.Lock()
+	var scoreboardFrames, boardFrames, telemetryFrames int
+	for _, f := range h.bcast.frames {
+		// Only count actual Broadcast(role, ...) calls (f.role != "") — the
+		// O(P) fan-out this fix targets. sendFullSync's per-joiner SendTo of
+		// their OWN scoreboard copy (f.connID != "", f.role == "") is a
+		// single-recipient send, not the bug, and is expected once per join.
+		if f.role == "" {
+			continue
+		}
+		switch f.env.Type {
+		case protocol.SMsgScoreboard:
+			scoreboardFrames++
+		case protocol.SMsgBoard:
+			boardFrames++
+		case protocol.SMsgTelemetry:
+			telemetryFrames++
+		}
+	}
+	h.bcast.mu.Unlock()
+
+	if scoreboardFrames != 0 {
+		t.Errorf("scoreboard frames emitted synchronously during the burst = %d, want 0 (should be coalesced via scoreboardDirty, not broadcast inline per join)", scoreboardFrames)
+	}
+	if boardFrames != 0 {
+		t.Errorf("board frames emitted synchronously during the burst = %d, want 0 (should be coalesced via boardDirty)", boardFrames)
+	}
+	if telemetryFrames != 0 {
+		t.Errorf("telemetry frames emitted synchronously during the burst = %d, want 0 (should be coalesced via telemetryDirty)", telemetryFrames)
+	}
+
+	h.sync(func() {
+		if !h.e.scoreboardDirty {
+			t.Error("scoreboardDirty = false after a join burst, want true (so the ticker actually flushes a real update)")
+		}
+		if !h.e.boardDirty {
+			t.Error("boardDirty = false after a join burst, want true")
+		}
+		if !h.e.telemetryDirty {
+			t.Error("telemetryDirty = false after a join burst, want true")
+		}
+	})
 }

@@ -251,14 +251,33 @@ type Engine struct {
 	// Double fade-out restores to once a performance ends — not DD-specific
 	// itself, just introduced alongside that feature.
 	volumePct int
-	// ddEnding guards fadeOutAndFinishDailyDouble against double-firing: set
-	// while a graceful fade-out is in flight (from either the automatic
-	// all-rated completion or the admin.endDailyDouble button), checked
-	// again when the fade's goroutine re-enters the loop so a Force End
-	// Round/admin.skipDailyDouble that already finished the round in the
-	// meantime (both stay instant, untouched by this field) makes the
-	// fade's own continuation a safe no-op instead of double-awarding.
-	ddEnding bool
+	// volumeCmds serializes EVERY outbound AudioDevice.SetVolume call —
+	// admin.setVolume's live-apply, the fade's stepped ramp, and the fade's
+	// final restore — through the single writer goroutine runVolumeWriter
+	// starts (s8eng-05). Before this, each call site fired its own ad hoc
+	// goroutine straight at the live device with no ordering guarantee, so
+	// two in-flight HTTP calls could race and land in the wrong order. A
+	// buffered channel + one consumer gives strict FIFO application that
+	// matches call-site/intent order without needing per-call sequence
+	// numbers.
+	volumeCmds chan int
+	// ddFadingRoundKey guards fadeOutAndFinishDailyDouble against
+	// double-firing AND against a stale fade from an earlier, now-ended
+	// performance blocking or misfiring against a later, unrelated one
+	// (s8eng-03). It holds the e.roundKey of whichever Daily Double
+	// performance currently has a graceful fade-out in flight (from either
+	// the automatic all-rated completion or the admin.endDailyDouble
+	// button), "" when none is in flight. e.roundKey is already minted
+	// fresh per DD performance (startDailyDoublePerformance), so comparing
+	// against the CURRENT e.roundKey — not a bare bool — lets a new
+	// performance's own fade proceed even while an old, already-abandoned
+	// fade's continuation is still pending, and lets that stale
+	// continuation recognize the round has moved on and bail instead of
+	// finishing the wrong performance. A Force End Round/
+	// admin.skipDailyDouble that already finished the round in the
+	// meantime (both stay instant, untouched by this field) still makes
+	// the stale continuation a safe no-op via its own e.roundKey check.
+	ddFadingRoundKey string
 
 	// spotifyAuthed records that the admin completed Spotify OAuth, so a stage
 	// that connects AFTER the OAuth dance still learns to initialize the Web
@@ -290,6 +309,16 @@ type Engine struct {
 	// instead of broadcasting inline (which is O(P^2) on the Run loop and
 	// floodable). A fast ticker flushes it at most once per second. Run-loop-owned.
 	telemetryDirty bool
+	// scoreboardDirty/boardDirty: the same coalescing applied to onHello's
+	// per-join broadcasts (join-burst fix). A stress test adding players in
+	// batches found admin becoming unresponsive — onHello was calling
+	// broadcastScoreboard/broadcastBoard/broadcastTelemetry synchronously and
+	// unconditionally on EVERY join, the identical O(P^2)-floodable pattern
+	// already fixed for heartbeats, just never applied here. Set instead of
+	// broadcast inline; the same 1s ticker that flushes telemetryDirty now
+	// flushes these too, so a burst of N joins costs one flush, not N.
+	scoreboardDirty bool
+	boardDirty      bool
 
 	// lyricCache memoizes LRCLIB results by artist|song|dur so a track's lyrics
 	// are fetched once (prefetched at startTrack) and served instantly at
@@ -361,6 +390,7 @@ func NewEngine(repo GameRepo, lock BuzzLock, audio AudioDevice, lyrics LyricsPro
 		buzzWindowMs:   buzzWindowMs,
 		cellVisits:     map[string]int{},
 		volumePct:      100,
+		volumeCmds:     make(chan int, 64),
 	}
 }
 
@@ -375,6 +405,10 @@ func (e *Engine) Run(ctx context.Context) error {
 		}
 	}
 	_ = e.repo.CreateSession(ctx, e.session)
+	// s8eng-05: one writer owns every outbound SetVolume call for this
+	// engine's lifetime, serializing admin.setVolume / the fade's stepped
+	// ramp / the fade's restore against each other.
+	go e.runVolumeWriter(ctx)
 	telemetryTicker := time.NewTicker(60 * time.Second)
 	defer telemetryTicker.Stop()
 	// Fast ticker flushes coalesced heartbeat telemetry at most once per second
@@ -395,6 +429,14 @@ func (e *Engine) Run(ctx context.Context) error {
 			if e.telemetryDirty {
 				e.telemetryDirty = false
 				e.broadcastTelemetry()
+			}
+			if e.scoreboardDirty {
+				e.scoreboardDirty = false
+				e.broadcastScoreboard()
+			}
+			if e.boardDirty {
+				e.boardDirty = false
+				e.broadcastBoard()
 			}
 		case <-telemetryTicker.C:
 			e.broadcastTelemetry()
@@ -782,6 +824,26 @@ func (e *Engine) OnDisconnect(connID string) {
 					e.checkDailyDoubleComplete()
 				}
 			}
+			// s8eng-02: mirror the DD-contestant-disconnect handling above — a
+			// cell-picker who fully disconnects mid-pick must not leave stale
+			// "waiting on X" state that can never resolve on its own (the only
+			// prior escape valve was an admin noticing and firing admin.select).
+			if playerID == e.cellPicker {
+				wasReady := e.karaokeReady
+				e.cellPicker = ""
+				e.pendingPick = nil
+				e.karaokeReady = false
+				e.broadcastPickerStatus()
+				if wasReady && e.state == protocol.StateKaraoke {
+					// The OTHER AND-gate half had already fired (skip-vote
+					// threshold reached / track ended) before the picker
+					// vanished, so nothing will ever supply a pendingPick again.
+					// Fall through to the same no-valid-pick continuation
+					// beginTransition's own stalled-pick handling uses, instead
+					// of leaving this in limbo until the next admin.select.
+					e.beginTransition()
+				}
+			}
 			e.broadcastTelemetry()
 		}
 	})
@@ -926,10 +988,16 @@ func (e *Engine) onHello(connID string, env protocol.ClientEnvelope) {
 		PlayerID: p.ID, Role: h.Role, Nonce: e.gate.Current(),
 	}))
 	e.sendFullSync(connID, h.Role)
-	e.broadcastScoreboard()
-	e.broadcastBoard()
+	// Join-burst fix: coalesce instead of broadcasting inline, same pattern
+	// as onHeartbeat's telemetryDirty. The joining connection already has
+	// its own current board/scoreboard via sendFullSync above; these flags
+	// only cover updating EVERYONE ELSE's view (e.g. "player count went
+	// up"), which doesn't need to be instant and must not cost O(P) per
+	// join when many joins land in a burst.
+	e.scoreboardDirty = true
+	e.boardDirty = true
 	if h.Role == protocol.RoleAdmin || h.Role == protocol.RoleMobile {
-		e.broadcastTelemetry()
+		e.telemetryDirty = true
 	}
 }
 
@@ -2067,7 +2135,11 @@ func (e *Engine) onPlayerSelectCell(connID string, env protocol.ClientEnvelope) 
 		return
 	}
 	p := e.reg.playerForConn(connID)
-	if p == nil || e.cellPicker == "" || p.ID != e.cellPicker {
+	// s8eng-01: mirror onBuzz's p.Banned check — onAdminKick now also clears
+	// e.cellPicker for the kicked player (see onAdminKick), but a merely-
+	// banned-not-kicked edge case or an ordering race must not let a banned
+	// player's hostile client keep steering the board via a stale connID.
+	if p == nil || p.Banned || e.cellPicker == "" || p.ID != e.cellPicker {
 		return
 	}
 	var d playerSelectCellData
@@ -2712,9 +2784,46 @@ func (e *Engine) onAdminSetVolume(connID string, env protocol.ClientEnvelope) {
 	}
 	e.volumePct = d.Percent
 	e.broadcastVolumeStatus()
-	go func() {
-		_ = e.audio.SetVolume(context.Background(), d.Percent)
-	}()
+	// s8eng-05: route through the single serializing writer instead of an ad
+	// hoc goroutine, so this can never race the fade's own SetVolume calls.
+	e.sendVolume(d.Percent)
+}
+
+// sendVolume enqueues an outbound SetVolume call to the single writer
+// goroutine runVolumeWriter owns (s8eng-05), instead of firing a bare,
+// independently-scheduled goroutine straight at the live device per call
+// site. Every call site (admin.setVolume's live-apply, the fade's stepped
+// ramp, and the fade's restore) goes through here, so the device always
+// applies them in the same order they were issued — closing the
+// network-level reordering race between them. Never call e.audio.SetVolume
+// directly from anywhere else.
+func (e *Engine) sendVolume(pct int) {
+	select {
+	case e.volumeCmds <- pct:
+	default:
+		// Buffer full (64 pending volume changes implies something is
+		// already badly wrong) — drop rather than block whichever goroutine
+		// is calling this (possibly the Run loop itself); a later call will
+		// still land and the device settles on the latest intent either way.
+		log.Printf("[engine] sendVolume: volumeCmds buffer full, dropping percent=%d", pct)
+	}
+}
+
+// runVolumeWriter is the single writer for every outbound AudioDevice.
+// SetVolume call, started by Run alongside the main command loop and
+// running for the engine's lifetime (s8eng-05). Draining one channel with
+// one consumer gives strict FIFO ordering that matches enqueue order,
+// regardless of which goroutine (admin.setVolume's handler, the fade's
+// stepped-ramp goroutine, or the fade's restore) called sendVolume.
+func (e *Engine) runVolumeWriter(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case pct := <-e.volumeCmds:
+			_ = e.audio.SetVolume(context.Background(), pct)
+		}
+	}
 }
 
 // onAdminEndDailyDouble lets the control room end a Daily Double
@@ -2746,33 +2855,59 @@ func (e *Engine) onAdminEndDailyDouble(connID string, _ protocol.ClientEnvelope)
 // while the fade was in flight), or finishDailyDouble's own body does
 // anything unexpected. The volume can never get stuck faded down.
 func (e *Engine) fadeOutAndFinishDailyDouble() {
-	if e.ddEnding || e.state != protocol.StateDailyDouble || e.curTrack == nil {
+	if e.state != protocol.StateDailyDouble || e.curTrack == nil {
 		return
 	}
-	e.ddEnding = true
+	// s8eng-03: identity-check against the CURRENT e.roundKey, not a bare
+	// bool — a fade already in flight for THIS exact performance is a
+	// no-op (double-fire guard), but a stale marker left behind by an
+	// EARLIER, now-ended performance never matches here, since e.roundKey
+	// has already moved on to this (or no) performance.
+	if e.ddFadingRoundKey != "" && e.ddFadingRoundKey == e.roundKey {
+		return
+	}
+	rk := e.roundKey
+	e.ddFadingRoundKey = rk
 	restoreTo := e.volumePct
 
 	go func() {
 		stepDelay := DailyDoubleFadeDuration / dailyDoubleFadeSteps
-		for i := dailyDoubleFadeSteps - 1; i >= 0; i-- {
+		// s8eng-07: start at dailyDoubleFadeSteps (not -1) so the first
+		// computed level equals restoreTo itself — the fade's first
+		// SetVolume call reaffirms the current level before stepping down,
+		// eliminating the audible notch an immediate drop to a
+		// already-stepped-down level produced.
+		for i := dailyDoubleFadeSteps; i >= 0; i-- {
 			level := restoreTo * i / dailyDoubleFadeSteps
-			_ = e.audio.SetVolume(context.Background(), level)
+			e.sendVolume(level) // s8eng-05: through the single serializing writer
 			time.Sleep(stepDelay)
 		}
 		e.submit(func() {
 			defer func() {
-				_ = e.audio.SetVolume(context.Background(), restoreTo)
-				e.ddEnding = false
+				// s8eng-04: re-read the LIVE e.volumePct here instead of
+				// reusing the restoreTo snapshot captured at fade-start, so
+				// a mid-fade admin.setVolume naturally wins the restore —
+				// the device and the admin UI (both driven by this same
+				// value) can never desync.
+				e.sendVolume(e.volumePct)
+				// s8eng-03: only clear the marker if it still belongs to
+				// THIS fade — a stale continuation must not clobber a
+				// different, legitimately in-flight fade's marker (e.g. a
+				// new performance that started its own fade while this
+				// stale one was still sleeping).
+				if e.ddFadingRoundKey == rk {
+					e.ddFadingRoundKey = ""
+				}
 				e.broadcastVolumeStatus()
 			}()
-			// A Force End Round / admin.skipDailyDouble may have already
-			// finished the round (both stay instant, independent of
-			// e.ddEnding) while this fade was mid-flight — in that case the
-			// state has moved on and this must be a safe no-op, not a
-			// double-award. The defer above still restores the volume
-			// regardless, so the brief lower-volume window during the race
-			// never outlives this continuation.
-			if e.state != protocol.StateDailyDouble || e.curTrack == nil {
+			// s8eng-03: a Force End Round/admin.skipDailyDouble may have
+			// already finished THIS round, or an entirely new performance
+			// may have started since (fresh e.roundKey) — either way,
+			// e.roundKey no longer matches the performance this fade was
+			// started for, so bail without finishing (or misfiring
+			// against) whatever is live now. The defer above still
+			// restores the volume regardless.
+			if e.roundKey != rk || e.state != protocol.StateDailyDouble || e.curTrack == nil {
 				return
 			}
 			e.finishDailyDouble()
@@ -2831,6 +2966,17 @@ func (e *Engine) onAdminKick(connID string, env protocol.ClientEnvelope) {
 		} else {
 			e.checkDailyDoubleComplete()
 		}
+	}
+	// s8eng-01: mirror the DD-contestant-kick special case above — a kicked
+	// cell-picker must not retain picking rights (onPlayerSelectCell's own
+	// p.Banned guard closes the hostile-client angle, but e.cellPicker/
+	// e.pendingPick must also be cleared so clients stop showing "waiting
+	// on X" for a player who can never act again).
+	if e.cellPicker == p.ID {
+		e.cellPicker = ""
+		e.pendingPick = nil
+		e.karaokeReady = false
+		e.broadcastPickerStatus()
 	}
 }
 
