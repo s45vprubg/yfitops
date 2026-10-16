@@ -44,7 +44,12 @@ export default function HoldingArea({
   const noLyrics = allTracks.filter(
     (t) => (t.lyricsStatus === "pending" || t.lyricsStatus === "not_found") && !t.lyricsOverride
   ).length;
-  const pendingCount = allTracks.filter((t) => t.lyricsStatus === "pending").length;
+  // Also retries not_found: the LRCLIB near-duplicate fallback (lyrics.go)
+  // can recover a false not_found that an earlier probe missed, so "pending
+  // only" would hide the exact case this button exists to fix.
+  const retryableCount = allTracks.filter(
+    (t) => t.lyricsStatus === "pending" || t.lyricsStatus === "not_found"
+  ).length;
 
   // Surfaces what the backend actually did — previously discarded entirely,
   // which is why a bulk check always looked identical whether it did real
@@ -128,14 +133,14 @@ export default function HoldingArea({
           {noLyrics > 0 ? `⚠ ${noLyrics} without lyrics` : "✓ all tracks have lyrics"}
         </span>
         <div className="flex gap-1">
-          {pendingCount > 0 && (
+          {retryableCount > 0 && (
             <button
               onClick={handleRetryPending}
               disabled={retryingPending || rescanning}
               className="rounded border border-edge px-1.5 py-0.5 font-semibold text-amber-300 hover:text-amber-200 disabled:opacity-40"
-              title="Retry LRCLIB for every track that errored/rate-limited"
+              title="Retry LRCLIB for every unresolved track (errored, rate-limited, or not_found)"
             >
-              {retryingPending ? "retrying…" : `Retry pending (${pendingCount})`}
+              {retryingPending ? "retrying…" : `Retry unresolved (${retryableCount})`}
             </button>
           )}
           <button

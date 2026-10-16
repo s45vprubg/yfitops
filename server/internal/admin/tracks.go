@@ -284,13 +284,17 @@ func (h *Handler) rescanLyrics(w http.ResponseWriter, r *http.Request) {
 }
 
 // requeryPendingLyrics re-probes every board track whose cached lyrics
-// status is 'pending' (a prior attempt errored or hit a rate limit) —
-// unlike rescanLyrics, which only ever probes never-attempted songs, this
-// is the bulk counterpart to the per-track requeryLyrics retry button, for
-// when a batch of probes failed together (e.g. a sustained LRCLIB rate
-// limit) and retrying each one individually via the single-track endpoint
-// would be tedious. Resolved and not_found songs are left untouched, same
-// never-reprobe guarantee as rescanLyrics.
+// status is 'pending' (a prior attempt errored or hit a rate limit) OR
+// 'not_found' — unlike rescanLyrics, which only ever probes never-attempted
+// songs, this is the bulk counterpart to the per-track requeryLyrics retry
+// button, for when a batch of probes failed/came back empty together (e.g.
+// a sustained LRCLIB rate limit, or Probe's duration-tolerance fallback —
+// see lyrics.go — recovering matches a prior attempt missed) and retrying
+// each one individually via the single-track endpoint would be tedious.
+// Only resolved songs are left untouched; that guarantee is enforced at the
+// store layer (UpsertLyrics* never downgrades a resolved row), not by this
+// handler skipping them, so re-probing not_found here can never clobber a
+// confirmed-good result.
 func (h *Handler) requeryPendingLyrics(w http.ResponseWriter, r *http.Request) {
 	if h.lyrics == nil {
 		http.Error(w, "lyrics prober not configured", http.StatusServiceUnavailable)
@@ -319,7 +323,7 @@ func (h *Handler) requeryPendingLyrics(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		rec, ok := existing[t.SpotifyURI]
-		if !ok || rec.Status != "pending" {
+		if !ok || (rec.Status != "pending" && rec.Status != "not_found") {
 			continue
 		}
 		if attempted >= maxRescanTracksPerRequest {
