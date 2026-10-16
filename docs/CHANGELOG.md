@@ -196,6 +196,22 @@ a bulk "Retry pending (N)" action (`POST /api/boards/{id}/requery-pending-
 lyrics`) so a batch of LRCLIB rate-limit failures can be retried in one
 click instead of one ↻ per track.
 
+### Fixed — lyrics tooling and Daily Double bucket were scoped to the wrong track list (2026-10-16)
+The "N without lyrics" count, bulk retry, per-track requery, and manual
+lyrics entry all only ever looked at the unplaced Track Library list — once
+a board was built out and most tracks were placed in cells, this made the
+tooling blind to most of the board (a built board could show "0 missing"
+while a dozen placed tracks sat stuck pending). All four now operate over
+every track on the board regardless of placement; manual lyrics entry (✎)
+and per-track retry (↻) are also now available on tracks already placed in
+a cell, not just the library. Separately, Daily Double bucket tracks were
+one-way: dragging a track in converted it permanently, and the only way out
+was the ✕ button, which deleted the song outright rather than returning it
+anywhere. Bucket tracks are now draggable back out to the Track Library
+(reversing the same move, same non-atomic compensate-on-failure handling as
+the forward direction); ✕ remains a true permanent delete, now labeled as
+such.
+
 ## [Unreleased] — 2026-07-01
 
 ### Added

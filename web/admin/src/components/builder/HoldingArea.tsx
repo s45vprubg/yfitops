@@ -4,7 +4,6 @@ import type { AdminApi, TrackData } from "../../useAdminApi";
 import TrackCard from "./TrackCard";
 import SpotifySearch from "./SpotifySearch";
 import ImportPlaylist from "./ImportPlaylist";
-import LyricsEditorModal from "./LyricsEditorModal";
 import { useModal } from "../Modal";
 
 type SortKey = "none" | "title" | "artist";
@@ -13,27 +12,39 @@ interface Props {
   api: AdminApi;
   boardId: string;
   tracks: TrackData[];
+  // Every track on the board (placed + unplaced) — used only for the lyrics
+  // status count/actions below. `tracks` alone (the library/holding list)
+  // undercounts once a board is built out, since placed tracks leave it: a
+  // "no tracks pending" board can still have a dozen stuck-pending tracks
+  // sitting in cells that this panel would otherwise never see.
+  allTracks: TrackData[];
   onRefresh: () => void;
   onDeleteTrack: (trackId: string) => void;
   onToggleOverride: (trackId: string, override: boolean) => void;
+  // Per-track lyrics actions, lifted to BoardBuilderPage so the same requery
+  // state and manual-lyrics modal are shared with BuilderGrid — a track's
+  // lyrics tooling shouldn't disappear just because it got placed on a cell.
+  requeryingId: string | null;
+  onRequeryLyrics: (trackId: string) => void;
+  onOpenManualLyrics: (track: TrackData) => void;
 }
 
-export default function HoldingArea({ api, boardId, tracks, onRefresh, onDeleteTrack, onToggleOverride }: Props) {
+export default function HoldingArea({
+  api, boardId, tracks, allTracks, onRefresh, onDeleteTrack, onToggleOverride,
+  requeryingId, onRequeryLyrics, onOpenManualLyrics,
+}: Props) {
   const [sortBy, setSortBy] = useState<SortKey>("none");
   const [rescanning, setRescanning] = useState(false);
   const [retryingPending, setRetryingPending] = useState(false);
   const [rescanMsg, setRescanMsg] = useState<string | null>(null);
   const [building, setBuilding] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
-  const [requeryingId, setRequeryingId] = useState<string | null>(null);
-  const [requeryError, setRequeryError] = useState<string | null>(null);
-  const [manualLyricsTrack, setManualLyricsTrack] = useState<TrackData | null>(null);
   const { confirm } = useModal();
 
-  const noLyrics = tracks.filter(
+  const noLyrics = allTracks.filter(
     (t) => (t.lyricsStatus === "pending" || t.lyricsStatus === "not_found") && !t.lyricsOverride
   ).length;
-  const pendingCount = tracks.filter((t) => t.lyricsStatus === "pending").length;
+  const pendingCount = allTracks.filter((t) => t.lyricsStatus === "pending").length;
 
   // Surfaces what the backend actually did — previously discarded entirely,
   // which is why a bulk check always looked identical whether it did real
@@ -68,24 +79,6 @@ export default function HoldingArea({ api, boardId, tracks, onRefresh, onDeleteT
       setRescanMsg(e instanceof Error ? e.message : "Retry failed to run.");
     }
     setRetryingPending(false);
-  };
-
-  const handleRequeryLyrics = async (trackId: string) => {
-    setRequeryingId(trackId);
-    setRequeryError(null);
-    try {
-      await api.requeryLyrics(boardId, trackId);
-      onRefresh();
-    } catch (e) {
-      // uia7-4: this used to be an empty catch with a comment claiming the
-      // error was "surfaced via list refresh" — but onRefresh() only runs on
-      // the success path above, so a failure (expected/recurring per
-      // TrackCard's "pending" status copy) previously produced zero
-      // user-visible feedback. Reuse the same error-display convention
-      // handleAiBuild already uses (aiError) for the requery button.
-      setRequeryError(e instanceof Error ? e.message : "Lyrics requery failed");
-    }
-    setRequeryingId(null);
   };
 
   const handleAiBuild = async () => {
@@ -156,7 +149,6 @@ export default function HoldingArea({ api, boardId, tracks, onRefresh, onDeleteT
         </div>
       </div>
       {rescanMsg && <div className="text-[11px] text-slate-400">{rescanMsg}</div>}
-      {requeryError && <div className="text-[11px] text-red-400">{requeryError}</div>}
 
       <div className="flex items-center justify-between">
         <span className="text-xs text-slate-500">
@@ -193,8 +185,8 @@ export default function HoldingArea({ api, boardId, tracks, onRefresh, onDeleteT
                 index={i}
                 onDelete={onDeleteTrack}
                 onToggleOverride={onToggleOverride}
-                onRequeryLyrics={handleRequeryLyrics}
-                onOpenManualLyrics={setManualLyricsTrack}
+                onRequeryLyrics={onRequeryLyrics}
+                onOpenManualLyrics={onOpenManualLyrics}
                 requeryingLyrics={requeryingId === t.id}
               />
             ))}
@@ -202,16 +194,6 @@ export default function HoldingArea({ api, boardId, tracks, onRefresh, onDeleteT
           </div>
         )}
       </Droppable>
-
-      {manualLyricsTrack && (
-        <LyricsEditorModal
-          api={api}
-          boardId={boardId}
-          track={manualLyricsTrack}
-          onClose={() => setManualLyricsTrack(null)}
-          onSaved={onRefresh}
-        />
-      )}
     </div>
   );
 }

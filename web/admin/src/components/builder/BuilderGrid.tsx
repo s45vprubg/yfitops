@@ -9,9 +9,15 @@ interface Props {
   onRemoveColumn: (col: number) => void;
   onAddColumn: () => void;
   onToggleOverride: (trackId: string, override: boolean) => void;
+  requeryingId: string | null;
+  onRequeryLyrics: (trackId: string) => void;
+  onOpenManualLyrics: (track: TrackData) => void;
 }
 
-export default function BuilderGrid({ cols, cells, onRenameCategory, onRemoveColumn, onAddColumn, onToggleOverride }: Props) {
+export default function BuilderGrid({
+  cols, cells, onRenameCategory, onRemoveColumn, onAddColumn, onToggleOverride,
+  requeryingId, onRequeryLyrics, onOpenManualLyrics,
+}: Props) {
   const getCellTracks = (row: number, col: number): TrackData[] => {
     const cell = cells.find((c) => c.row === row && c.col === col);
     return cell?.tracks ?? [];
@@ -97,7 +103,15 @@ export default function BuilderGrid({ cols, cells, onRenameCategory, onRemoveCol
                       >
                         <div className="flex flex-col gap-1">
                           {cellTracks.map((t, idx) => (
-                            <TrackCard key={t.id} track={t} index={idx} onToggleOverride={onToggleOverride} />
+                            <TrackCard
+                              key={t.id}
+                              track={t}
+                              index={idx}
+                              onToggleOverride={onToggleOverride}
+                              onRequeryLyrics={onRequeryLyrics}
+                              onOpenManualLyrics={onOpenManualLyrics}
+                              requeryingLyrics={requeryingId === t.id}
+                            />
                           ))}
                         </div>
                         {provided.placeholder}

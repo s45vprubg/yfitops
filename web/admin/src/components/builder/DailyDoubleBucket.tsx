@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { Droppable } from "@hello-pangea/dnd";
+import { Draggable, Droppable } from "@hello-pangea/dnd";
 import type { AdminApi, DailyDoubleTrackData, SpotifyResult } from "../../useAdminApi";
 
 interface Props {
@@ -14,9 +14,12 @@ interface Props {
 // library. A valid drop target for tracks dragged from the Track Library or a
 // grid cell (handled in BoardBuilderPage.handleDragEnd) — dropping here is a
 // MOVE: the source track is deleted from board_tracks entirely (cascading out
-// of any cell placement) and re-created here, so a Daily Double track can
-// never appear on the Jeopardy board. Bucket tracks are not themselves
-// draggable back out; remove via the ✕ button. Simpler than HoldingArea in
+// of any cell placement) and re-created here. Dragging a bucket track back
+// out to the Track Library reverses that same move (BoardBuilderPage's
+// handleDragEnd, "dailyDouble" -> "holding" branch) — a Daily Double track
+// isn't stuck here forever, it just can't exist in both places at once.
+// The ✕ button is a true, permanent delete; dragging to the library is the
+// non-destructive way to get a track back. Simpler than HoldingArea in
 // other ways too: no override, no AI build — lyrics are a HARD requirement
 // here (unlike the grid): the server rejects any add whose song doesn't
 // already have resolved lyrics in the cache, so a song must be fetched,
@@ -144,21 +147,32 @@ export default function DailyDoubleBucket({ api, boardId, tracks, onRefresh }: P
                 Drag a track here from the Track Library or a cell to move it into the bucket.
               </div>
             )}
-            {tracks.map((t) => (
-              <div key={t.id} className="flex items-center gap-2 rounded border border-edge bg-panel2 px-2 py-1">
-                {t.albumArt && <img src={t.albumArt} alt="" className="h-8 w-8 rounded" />}
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-xs font-medium text-slate-100">{t.song}</div>
-                  <div className="truncate text-xs text-slate-400">{t.artist}</div>
-                </div>
-                <button
-                  onClick={() => removeTrack(t.id)}
-                  className="shrink-0 rounded px-1.5 py-0.5 text-xs text-slate-500 hover:text-red-400"
-                  title="Remove from bucket"
-                >
-                  ✕
-                </button>
-              </div>
+            {tracks.map((t, idx) => (
+              <Draggable key={t.id} draggableId={t.id} index={idx}>
+                {(dragProvided, dragSnapshot) => (
+                  <div
+                    ref={dragProvided.innerRef}
+                    {...dragProvided.draggableProps}
+                    {...dragProvided.dragHandleProps}
+                    className={`flex items-center gap-2 rounded border px-2 py-1 ${
+                      dragSnapshot.isDragging ? "border-accent bg-accent/10" : "border-edge bg-panel2"
+                    }`}
+                  >
+                    {t.albumArt && <img src={t.albumArt} alt="" className="h-8 w-8 rounded" />}
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-xs font-medium text-slate-100">{t.song}</div>
+                      <div className="truncate text-xs text-slate-400">{t.artist}</div>
+                    </div>
+                    <button
+                      onClick={() => removeTrack(t.id)}
+                      className="shrink-0 rounded px-1.5 py-0.5 text-xs text-slate-500 hover:text-red-400"
+                      title="Permanently delete (drag to the Track Library instead to keep the song)"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )}
+              </Draggable>
             ))}
             {provided.placeholder}
           </div>

@@ -5,6 +5,7 @@ import BoardSelector from "./builder/BoardSelector";
 import HoldingArea from "./builder/HoldingArea";
 import BuilderGrid from "./builder/BuilderGrid";
 import DailyDoubleBucket from "./builder/DailyDoubleBucket";
+import LyricsEditorModal from "./builder/LyricsEditorModal";
 import { useModal } from "./Modal";
 
 interface Props {
@@ -22,8 +23,21 @@ export default function BoardBuilderPage({ secret }: Props) {
   const [cols, setCols] = useState(0);
   const [ddBucket, setDdBucket] = useState<DailyDoubleTrackData[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [requeryingId, setRequeryingId] = useState<string | null>(null);
+  const [requeryError, setRequeryError] = useState<string | null>(null);
+  const [manualLyricsTrack, setManualLyricsTrack] = useState<TrackData | null>(null);
 
   const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+  // Every track on the board regardless of placement — unplaced ∪ every
+  // cell's tracks. The lyrics status tooling (count, bulk retry, per-track
+  // requery/manual-entry) needs this, not just `unplaced`: once a board is
+  // built out most tracks live in cells, and scoping lyrics tooling to the
+  // library alone makes it silently blind to most of the board.
+  const allTracks = useMemo(
+    () => [...unplaced, ...cells.flatMap((c) => c.tracks)],
+    [unplaced, cells],
+  );
 
   const loadBoards = useCallback(async () => {
     try {
@@ -72,6 +86,19 @@ export default function BoardBuilderPage({ secret }: Props) {
     } finally {
       refresh();
     }
+  };
+
+  const handleRequeryLyrics = async (trackId: string) => {
+    if (!selectedId) return;
+    setRequeryingId(trackId);
+    setRequeryError(null);
+    try {
+      await api.requeryLyrics(selectedId, trackId);
+      await refresh();
+    } catch (e) {
+      setRequeryError(errMsg(e));
+    }
+    setRequeryingId(null);
   };
 
   const handleToggleOverride = async (trackId: string, override: boolean) => {
@@ -199,6 +226,34 @@ export default function BoardBuilderPage({ secret }: Props) {
             }
           }
         }
+      } else if (src.droppableId === "dailyDouble" && dst.droppableId === "holding") {
+        // MOVE back out of the bucket into the library — the reverse of the
+        // branch above, same non-atomic compensate-on-failure shape: recreate
+        // as a normal board track, then remove the bucket row.
+        const ddTrack = ddBucket.find((t) => t.id === trackId);
+        if (ddTrack) {
+          const created = await api.addTrack(selectedId, {
+            spotifyUri: ddTrack.spotifyUri,
+            artist: ddTrack.artist,
+            song: ddTrack.song,
+            albumArt: ddTrack.albumArt,
+            durationMs: ddTrack.durationMs,
+          });
+          try {
+            await api.deleteDailyDoubleTrack(selectedId, trackId);
+          } catch (deleteErr) {
+            try {
+              await api.deleteTrack(selectedId, created.id);
+              setError(
+                `Move out of Daily Double failed, nothing changed: ${errMsg(deleteErr)}`,
+              );
+            } catch (compensateErr) {
+              setError(
+                `Move out of Daily Double partially failed: "${ddTrack.song}" now exists in BOTH the Track Library and the Daily Double bucket (${errMsg(deleteErr)}; cleanup also failed: ${errMsg(compensateErr)}). Remove the duplicate manually.`,
+              );
+            }
+          }
+        }
       } else if (src.droppableId === "holding" && dstCell) {
         await api.placeTrack(selectedId, dstCell.row, dstCell.col, trackId, dst.index);
       } else if (srcCell && dst.droppableId === "holding") {
@@ -277,9 +332,13 @@ export default function BoardBuilderPage({ secret }: Props) {
             api={api}
             boardId={selectedId}
             tracks={unplaced}
+            allTracks={allTracks}
             onRefresh={refresh}
             onDeleteTrack={handleDeleteTrack}
             onToggleOverride={handleToggleOverride}
+            requeryingId={requeryingId}
+            onRequeryLyrics={handleRequeryLyrics}
+            onOpenManualLyrics={setManualLyricsTrack}
           />
           <BuilderGrid
             cols={cols}
@@ -288,9 +347,26 @@ export default function BoardBuilderPage({ secret }: Props) {
             onRemoveColumn={handleRemoveColumn}
             onAddColumn={handleAddColumn}
             onToggleOverride={handleToggleOverride}
+            requeryingId={requeryingId}
+            onRequeryLyrics={handleRequeryLyrics}
+            onOpenManualLyrics={setManualLyricsTrack}
           />
           <DailyDoubleBucket api={api} boardId={selectedId} tracks={ddBucket} onRefresh={refresh} />
         </div>
+        {requeryError && (
+          <div className="border-t border-red-900/60 bg-red-950/40 px-4 py-2 text-xs text-red-300">
+            {requeryError}
+          </div>
+        )}
+        {manualLyricsTrack && (
+          <LyricsEditorModal
+            api={api}
+            boardId={selectedId}
+            track={manualLyricsTrack}
+            onClose={() => setManualLyricsTrack(null)}
+            onSaved={refresh}
+          />
+        )}
       </div>
     </DragDropContext>
   );
