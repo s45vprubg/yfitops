@@ -40,6 +40,23 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
     return () => clearTimeout(id);
   }, [thresh, actions]);
 
+  // Volume: server-echoed (volumePct), but local-while-dragging + debounced
+  // the same way thresh/reveal-cfg are above (s8uia-1) — otherwise every
+  // drag tick fires a real Spotify API call (dozens per drag), producing an
+  // audible stuttering ramp and burning requests against Spotify's own rate
+  // limits.
+  const [localVolume, setLocalVolume] = useState(volumePct ?? 100);
+  const volumeTouched = useRef(false);
+  useEffect(() => {
+    if (volumeTouched.current) return;
+    setLocalVolume(volumePct ?? 100);
+  }, [volumePct]);
+  useEffect(() => {
+    if (!volumeTouched.current) return;
+    const id = setTimeout(() => onSetVolume(localVolume), 120);
+    return () => clearTimeout(id);
+  }, [localVolume, onSetVolume]);
+
   // Reveal knobs seed from the server echo until edited.
   const [intervalMs, setIntervalMs] = useState(revealCfg?.intervalMs ?? 3000);
   const [phase1Ms, setPhase1Ms] = useState(revealCfg?.phase1Ms ?? 10000);
@@ -76,13 +93,14 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
 
   const edit = <T,>(setter: (v: T) => void) => (v: T) => { revealTouched.current = true; setter(v); };
 
-  const volume = volumePct ?? 100;
-
   return (
     <div className="border-t border-edge">
       <div className="flex items-baseline justify-between px-3 py-2">
         <h2 className="text-xs font-bold uppercase tracking-[0.25em] text-accent">Audio Settings</h2>
       </div>
+      <p className="px-3 pb-2 text-[10px] text-slate-500">
+        Live game knobs. Reveal channels apply to the next round; skip threshold applies immediately.
+      </p>
 
       {/* Live operating volume — also the level a Daily Double fade-out
           restores to once a performance ends, so this is the baseline, not
@@ -95,12 +113,12 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
           type="range"
           min={0}
           max={100}
-          value={volume}
-          onChange={(e) => onSetVolume(Number(e.target.value))}
+          value={localVolume}
+          onChange={(e) => { volumeTouched.current = true; setLocalVolume(Number(e.target.value)); }}
           className="flex-1 accent-accent"
           aria-label="Playback volume"
         />
-        <span className="tnum w-8 text-right text-[10px] text-slate-500">{volume}%</span>
+        <span className="tnum w-8 text-right text-[10px] text-slate-500">{localVolume}%</span>
       </div>
 
       {/* The desk: channel strips, wrapping to fit this column's width. */}
@@ -109,14 +127,14 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
           <Fader label="Skip" sub="threshold" value={thresh} min={0} max={100} step={5}
             fmt={(v) => `${v}%`} onChange={(v) => { threshTouched.current = true; setThresh(v); }} />
 
-          <Divider label="Hints" />
+          <Divider label="Hints — next round" />
 
           <Fader label="Genre" sub="show after" value={genreDelayMs} min={B.hintDelay[0]} max={B.hintDelay[1]} step={B.hintDelay[2]}
             fmt={(v) => `${(v / 1000).toFixed(1)}s`} onChange={edit(setGenreDelayMs)} />
           <Fader label="Year" sub="after genre" value={yearDelayMs} min={B.hintDelay[0]} max={B.hintDelay[1]} step={B.hintDelay[2]}
             fmt={(v) => `${(v / 1000).toFixed(1)}s`} onChange={edit(setYearDelayMs)} />
 
-          <Divider label="Reveal" />
+          <Divider label="Reveal — next round" />
 
           <Fader label="Interval" sub="per letter" value={intervalMs} min={B.interval[0]} max={B.interval[1]} step={B.interval[2]}
             fmt={(v) => `${(v / 1000).toFixed(2)}s`} onChange={edit(setIntervalMs)} />

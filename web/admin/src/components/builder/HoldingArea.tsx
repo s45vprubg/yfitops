@@ -21,6 +21,8 @@ interface Props {
 export default function HoldingArea({ api, boardId, tracks, onRefresh, onDeleteTrack, onToggleOverride }: Props) {
   const [sortBy, setSortBy] = useState<SortKey>("none");
   const [rescanning, setRescanning] = useState(false);
+  const [retryingPending, setRetryingPending] = useState(false);
+  const [rescanMsg, setRescanMsg] = useState<string | null>(null);
   const [building, setBuilding] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [requeryingId, setRequeryingId] = useState<string | null>(null);
@@ -31,14 +33,41 @@ export default function HoldingArea({ api, boardId, tracks, onRefresh, onDeleteT
   const noLyrics = tracks.filter(
     (t) => (t.lyricsStatus === "pending" || t.lyricsStatus === "not_found") && !t.lyricsOverride
   ).length;
+  const pendingCount = tracks.filter((t) => t.lyricsStatus === "pending").length;
+
+  // Surfaces what the backend actually did — previously discarded entirely,
+  // which is why a bulk check always looked identical whether it did real
+  // work or nothing at all (no new/eligible tracks).
+  const describeResult = (verb: string, res: { attempted: number; resolved: number; truncated: boolean }) => {
+    if (res.attempted === 0) return "Nothing to check — already up to date.";
+    const more = res.truncated ? " More remain — click again." : "";
+    return `${verb} ${res.attempted}, resolved ${res.resolved}.${more}`;
+  };
 
   const handleRescan = async () => {
     setRescanning(true);
+    setRescanMsg(null);
     try {
-      await api.rescanLyrics(boardId);
+      const res = await api.rescanLyrics(boardId);
+      setRescanMsg(describeResult("Checked", res));
       onRefresh();
-    } catch { /* surfaced via list refresh */ }
+    } catch (e) {
+      setRescanMsg(e instanceof Error ? e.message : "Lyrics check failed to run.");
+    }
     setRescanning(false);
+  };
+
+  const handleRetryPending = async () => {
+    setRetryingPending(true);
+    setRescanMsg(null);
+    try {
+      const res = await api.requeryPendingLyrics(boardId);
+      setRescanMsg(describeResult("Retried", res));
+      onRefresh();
+    } catch (e) {
+      setRescanMsg(e instanceof Error ? e.message : "Retry failed to run.");
+    }
+    setRetryingPending(false);
   };
 
   const handleRequeryLyrics = async (trackId: string) => {
@@ -105,15 +134,28 @@ export default function HoldingArea({ api, boardId, tracks, onRefresh, onDeleteT
         <span className={noLyrics > 0 ? "text-amber-400" : "text-slate-500"}>
           {noLyrics > 0 ? `⚠ ${noLyrics} without lyrics` : "✓ all tracks have lyrics"}
         </span>
-        <button
-          onClick={handleRescan}
-          disabled={rescanning}
-          className="rounded border border-edge px-1.5 py-0.5 font-semibold text-slate-300 hover:text-white disabled:opacity-40"
-          title="Re-check LRCLIB for synced lyrics"
-        >
-          {rescanning ? "checking…" : "Check lyrics"}
-        </button>
+        <div className="flex gap-1">
+          {pendingCount > 0 && (
+            <button
+              onClick={handleRetryPending}
+              disabled={retryingPending || rescanning}
+              className="rounded border border-edge px-1.5 py-0.5 font-semibold text-amber-300 hover:text-amber-200 disabled:opacity-40"
+              title="Retry LRCLIB for every track that errored/rate-limited"
+            >
+              {retryingPending ? "retrying…" : `Retry pending (${pendingCount})`}
+            </button>
+          )}
+          <button
+            onClick={handleRescan}
+            disabled={rescanning || retryingPending}
+            className="rounded border border-edge px-1.5 py-0.5 font-semibold text-slate-300 hover:text-white disabled:opacity-40"
+            title="Probe LRCLIB for every never-attempted track"
+          >
+            {rescanning ? "checking…" : "Check lyrics"}
+          </button>
+        </div>
       </div>
+      {rescanMsg && <div className="text-[11px] text-slate-400">{rescanMsg}</div>}
       {requeryError && <div className="text-[11px] text-red-400">{requeryError}</div>}
 
       <div className="flex items-center justify-between">

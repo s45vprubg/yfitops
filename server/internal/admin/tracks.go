@@ -283,6 +283,70 @@ func (h *Handler) rescanLyrics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rescanLyricsResult{Attempted: attempted, Resolved: resolved, Truncated: truncated})
 }
 
+// requeryPendingLyrics re-probes every board track whose cached lyrics
+// status is 'pending' (a prior attempt errored or hit a rate limit) —
+// unlike rescanLyrics, which only ever probes never-attempted songs, this
+// is the bulk counterpart to the per-track requeryLyrics retry button, for
+// when a batch of probes failed together (e.g. a sustained LRCLIB rate
+// limit) and retrying each one individually via the single-track endpoint
+// would be tedious. Resolved and not_found songs are left untouched, same
+// never-reprobe guarantee as rescanLyrics.
+func (h *Handler) requeryPendingLyrics(w http.ResponseWriter, r *http.Request) {
+	if h.lyrics == nil {
+		http.Error(w, "lyrics prober not configured", http.StatusServiceUnavailable)
+		return
+	}
+	boardID := r.PathValue("id")
+	tracks, err := h.store.ListTracks(r.Context(), boardID)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+
+	uris := make([]string, len(tracks))
+	for i, t := range tracks {
+		uris[i] = t.SpotifyURI
+	}
+	existing, err := h.store.GetLyricsStatusesForURIs(r.Context(), uris)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+
+	attempted, resolved, truncated := 0, 0, false
+	for i, t := range tracks {
+		if r.Context().Err() != nil {
+			break
+		}
+		rec, ok := existing[t.SpotifyURI]
+		if !ok || rec.Status != "pending" {
+			continue
+		}
+		if attempted >= maxRescanTracksPerRequest {
+			truncated = true
+			break
+		}
+		text, found, perr := h.lyrics.Probe(r.Context(), t.Artist, t.Song, int(t.DurationMs/1000))
+		attempted++
+		switch {
+		case perr != nil:
+			_ = h.store.UpsertLyricsError(r.Context(), t.SpotifyURI, perr.Error())
+		case !found:
+			_ = h.store.UpsertLyricsNotFound(r.Context(), t.SpotifyURI)
+		default:
+			_ = h.store.UpsertLyricsResolved(r.Context(), t.SpotifyURI, text, "lrclib")
+			resolved++
+		}
+		if i < len(tracks)-1 {
+			select {
+			case <-time.After(lyricsProbeDelay):
+			case <-r.Context().Done():
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, rescanLyricsResult{Attempted: attempted, Resolved: resolved, Truncated: truncated})
+}
+
 // rescanLyricsResult summarizes one rescan-lyrics call. Truncated is true
 // when maxRescanTracksPerRequest was hit with never-attempted tracks still
 // remaining (api7-002) — the admin/frontend should re-run the rescan to pick

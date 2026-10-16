@@ -1,4 +1,4 @@
-import { memo, useMemo } from "react";
+import { memo, useMemo, useState } from "react";
 import type { TelemetryConn, TelemetryData } from "@shared/protocol";
 import type { AdminActions, CheatEntry, CheatReport } from "../useAdmin";
 import { Empty, PanelHead } from "./BoardPanel";
@@ -20,7 +20,10 @@ interface Props {
 // of every row. Memoized here as a second layer of defense on top of that
 // server-side fix, since this list will still legitimately update roughly
 // once a second under load even after coalescing.
+const PAGE_SIZE = 100;
+
 function TelemetryPanel({ telemetry, cheat, actions }: Props) {
+  const [page, setPage] = useState(0);
   const conns = telemetry?.connections ?? [];
   const cheatByID = useMemo(() => {
     const m = new Map<string, CheatEntry>();
@@ -32,6 +35,27 @@ function TelemetryPanel({ telemetry, cheat, actions }: Props) {
     () => (cheat?.players ?? []).filter((e) => e.flags.length > 0).length,
     [cheat],
   );
+
+  // Flagged connections (shared-IP/multi-conn) always sort first — the whole
+  // point of this panel is surfacing who's worth kicking/banning, so burying
+  // them a few pages down at 500 connections defeats that. Within each group,
+  // highest score first; id as a stable tiebreak so row order doesn't jitter
+  // between otherwise-equal entries on every ~1s refresh.
+  const sortedConns = useMemo(() => {
+    const arr = [...conns];
+    arr.sort((a, b) => {
+      const af = (cheatByID.get(a.id)?.flags.length ?? 0) > 0;
+      const bf = (cheatByID.get(b.id)?.flags.length ?? 0) > 0;
+      if (af !== bf) return af ? -1 : 1;
+      if (b.score !== a.score) return b.score - a.score;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
+    return arr;
+  }, [conns, cheatByID]);
+
+  const totalPages = Math.max(1, Math.ceil(sortedConns.length / PAGE_SIZE));
+  const clampedPage = Math.min(page, totalPages - 1);
+  const pageConns = sortedConns.slice(clampedPage * PAGE_SIZE, clampedPage * PAGE_SIZE + PAGE_SIZE);
 
   return (
     <section className="flex h-full flex-col border-l border-edge bg-panel2">
@@ -53,13 +77,34 @@ function TelemetryPanel({ telemetry, cheat, actions }: Props) {
               </tr>
             </thead>
             <tbody>
-              {conns.map((c) => (
+              {pageConns.map((c) => (
                 <Row key={c.id} c={c} cheat={cheatByID.get(c.id)} actions={actions} />
               ))}
             </tbody>
           </table>
         )}
       </div>
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between border-t border-edge px-2 py-1.5 text-[10px] text-slate-400">
+          <button
+            onClick={() => setPage(Math.max(0, clampedPage - 1))}
+            disabled={clampedPage === 0}
+            className="rounded border border-edge px-2 py-0.5 font-semibold uppercase hover:border-accent disabled:opacity-30"
+          >
+            ◀ Prev
+          </button>
+          <span className="tnum">
+            {clampedPage * PAGE_SIZE + 1}–{Math.min((clampedPage + 1) * PAGE_SIZE, sortedConns.length)} of {sortedConns.length}
+          </span>
+          <button
+            onClick={() => setPage(Math.min(totalPages - 1, clampedPage + 1))}
+            disabled={clampedPage >= totalPages - 1}
+            className="rounded border border-edge px-2 py-0.5 font-semibold uppercase hover:border-accent disabled:opacity-30"
+          >
+            Next ▶
+          </button>
+        </div>
+      )}
     </section>
   );
 }

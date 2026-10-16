@@ -82,6 +82,15 @@ export interface ImportResult {
   total: number;
 }
 
+// Result of a rescan-lyrics/requery-pending-lyrics bulk call. truncated means
+// maxRescanTracksPerRequest was hit with more eligible tracks still
+// remaining — the caller should re-run the same action to pick up the rest.
+export interface RescanResult {
+  attempted: number;
+  resolved: number;
+  truncated: boolean;
+}
+
 function api(secret: string) {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${secret}`,
@@ -123,7 +132,11 @@ function api(secret: string) {
     // Probes only never-attempted songs; known-resolved/not_found songs are
     // left untouched (see server/internal/admin/tracks.go rescanLyrics).
     rescanLyrics: (boardId: string) =>
-      req<{ attempted: number; resolved: number }>("POST", `/api/boards/${boardId}/rescan-lyrics`),
+      req<RescanResult>("POST", `/api/boards/${boardId}/rescan-lyrics`),
+    // Bulk-retries every track still stuck 'pending' (errored/rate-limited).
+    // Resolved/not_found tracks are left untouched, same as rescanLyrics.
+    requeryPendingLyrics: (boardId: string) =>
+      req<RescanResult>("POST", `/api/boards/${boardId}/requery-pending-lyrics`),
     // Retries LRCLIB for one track regardless of its current lyrics status.
     requeryLyrics: (boardId: string, trackId: string) =>
       req<LyricsRecord>("POST", `/api/boards/${boardId}/tracks/${trackId}/requery-lyrics`),

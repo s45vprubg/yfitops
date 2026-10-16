@@ -16,6 +16,7 @@ import type {
   DailyDoubleResultData,
   ErrorData,
   GameState,
+  PickerStatusData,
   ScoreboardData,
   ServerEnvelope,
   TelemetryData,
@@ -86,6 +87,11 @@ export interface AdminState {
   // (the existing Force End Round finishes it).
   ddPerformer?: DailyDoublePerformerData;
   ddResult?: DailyDoubleResultData; // transient — last resolved payout
+  // Who's designated to pick the next board cell, and whether they've
+  // picked yet (sanitized: handle only, no board/track data). Broadcast to
+  // all roles; the admin had no visibility into this before (s8uim-01) even
+  // though admin.select is a real manual override for a stuck picker.
+  pickerStatus?: PickerStatusData;
   // Operating playback volume (0-100), echoed from the server so the
   // slider reflects truth on connect/reconnect rather than assuming a
   // default. Also the level the Daily Double fade-out restores to.
@@ -191,6 +197,9 @@ export function useAdmin(): [AdminState, AdminActions] {
       });
       client.on("volumeStatus", (env: ServerEnvelope) => {
         patch({ volumePct: (env.d as { percent: number }).percent });
+      });
+      client.on("pickerStatus", (env: ServerEnvelope) => {
+        patch({ pickerStatus: env.d as PickerStatusData });
       });
       client.on("scoreboard", (env: ServerEnvelope) => {
         patch({ scoreboard: env.d as ScoreboardData });

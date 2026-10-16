@@ -165,6 +165,37 @@ No backfill: every song's drop point starts unmarked until an admin marks it.
   Postgres), and now also a `DropPointStore` parameter (same nilable
   contract, disables Mark/Jump Drop Point without Postgres).
 
+### Fixed — QA sweep 8 (code + UI layers), plus a live stress-test finding
+Full report: `docs/security/qa-sweep-8.md`. 15 findings across the
+cell-picker and Daily Double fade/volume features (3 high, 4 medium, 8 low),
+all confirmed, all fixed and verified cold. Highlights: a kicked/banned
+cell-picker could keep steering the board (kick never force-disconnects the
+transport); the Daily Double fade's end-guard wasn't scoped per-performance,
+so a Force-Ended DD's leftover fade could misfire against a later, unrelated
+one; the fade's volume restore used a stale snapshot instead of live state,
+so a mid-fade `admin.setVolume` got silently clobbered; a mobile player's
+cell pick had no recovery timeout, so a lost/rejected pick could lock their
+screen and stall karaoke for everyone with zero visibility anywhere that the
+game was stuck (admin now sees a "waiting on {handle}" banner). Also fixed,
+separately, a real bug found via an actual stress test against production:
+joining players in bursts was flooding the game loop with unthrottled
+per-join broadcasts (the identical O(P^2) pattern already fixed once for
+heartbeats, never applied to joins) and the admin telemetry list had no
+memoization despite scaling toward 500 rows — together, likely why the
+admin tab was freezing and getting reloaded during the test. Telemetry list
+also gained pagination (100/page, flagged connections pinned to the top).
+
+### Added — bulk "retry pending lyrics" + visible rescan results (2026-10-14)
+"Check lyrics" silently discarded the `{attempted, resolved, truncated}`
+result the server already returned on every click, so there was no way to
+tell "nothing left to check" from "still working" — every click looked
+identical, which is what made a long first-time scan of a freshly-populated
+board feel like it was re-scanning everything from scratch on every press.
+The admin board builder now shows that result after each click. Also added
+a bulk "Retry pending (N)" action (`POST /api/boards/{id}/requery-pending-
+lyrics`) so a batch of LRCLIB rate-limit failures can be retried in one
+click instead of one ↻ per track.
+
 ## [Unreleased] — 2026-07-01
 
 ### Added

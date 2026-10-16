@@ -108,6 +108,7 @@ export default function App() {
               adminView={state.adminView}
               ddPerformer={state.ddPerformer}
               ddResult={state.ddResult}
+              pickerStatus={state.pickerStatus}
               actions={actions}
               status={state.status}
               connected={state.connected}

@@ -752,7 +752,20 @@ Layered: Code -> API -> UI, each validated before the next, per the
 project's standard order. Surfaces below are hunted in parallel within a
 layer; a layer's validators must be green before its fixes are trusted.
 
-# SWEEP 8 (2026-10-13/14) — IN PROGRESS
+# SWEEP 8 (2026-10-13/14) — DONE
+
+Full writeup: `docs/security/qa-sweep-8.md`. Outcome: **15 findings, 15
+CONFIRMED, 0 REFUTED. 3 HIGH, 4 MEDIUM, 8 LOW, 0 CRITICAL. 14 fixed and
+verified cold; 1 LOW (s8eng-06) deliberately deferred** (pre-existing
+unbounded-submit-on-shutdown pattern shared by `beginTransition`'s own
+goroutine, not introduced by this diff — same scoping precedent as sweep
+6's deferred `tracks.go` siblings). `acid.sh` stays at 43/43 (this sweep's
+one new Go regression test, `TestJoinBurst_CoalescesScoreboardBoardTelemetry`,
+is covered by acid's existing "cold go test" gate, not a new named gate).
+Also fixed, separately and outside the hunt pipeline: a real production bug
+found via live stress testing (admin booted during batched joins toward
+~500 concurrent) — see below. Gotchas and the full breakdown are in the
+writeup; nothing new added here to avoid duplicating it.
 
 Re-scoped per the established rule: diff against sweep 7's HEAD (`ad4d026`).
 Scope now covers 3 commits (expanded mid-sweep — two more features landed
@@ -874,3 +887,62 @@ this session's own later redeploys) — diagnosed from code alone, not log
 forensics. No way to confirm the memoization theory is the *complete*
 explanation vs. the server-side fix alone; both are real, independently
 justified fixes regardless.
+
+## UI layer — DONE
+
+Scope: `web/admin/src/{App.tsx, components/BoardPanel.tsx,
+components/EvaluationPanel.tsx, components/AudioSettingsPanel.tsx,
+useAdmin.ts, components/TelemetryPanel.tsx}`, `web/mobile/src/{App.tsx,
+lib/useGame.ts, screens/PickCellScreen.tsx}`,
+`web/stage/src/views/ActiveRound.tsx`, `web/shared/protocol.ts` — the full
+UI delta since sweep 7 (`ad4d026..HEAD`), PLUS the telemetry pagination work
+sitting in the working tree (flagged-first, score-sorted, 100/page) on top
+of it. This was the last layer; Code (engine.go/spotify.go) already
+converged above.
+
+Baseline confirmed clean immediately before this layer: `go build/vet/test
+-race` green, `tsc --noEmit` clean in all three frontends, `preflight.sh`
+PASSED, prod deployed and healthy at commit `81168fe` + the uncommitted
+pagination diff verified separately.
+
+7 findings (3 admin, 2 mobile, 2 stage/shared-protocol), all CONFIRMED, all
+fixed and independently re-verified: `tsc --noEmit` clean across all three
+frontends, production builds clean. No automated regression gate exists
+for any of the 7 (no frontend test runner in this repo, unchanged
+structural gap since sweep 4) — verified via typecheck + build + hand-traced
+React state/effect logic, same posture as every prior sweep that touched
+frontend code. Full per-finding breakdown in `docs/security/qa-sweep-8.md`.
+
+## Sweep 8 outcome
+
+**15 total findings (8 code-layer + 7 UI-layer): 15 CONFIRMED, 0 REFUTED.**
+14 fixed and verified cold; 1 LOW (s8eng-06) deliberately deferred (see
+above). Plus the separately-diagnosed join-burst production fix and the
+telemetry pagination feature, both shipped in the same pass. Full writeup:
+`docs/security/qa-sweep-8.md`.
+
+## Still open after sweep 8
+
+Unchanged from sweep 7, not re-litigated: no frontend test runner (now 5
+sweeps running), the `client.ts` locked-contract question, `uimobile-4`
+(server-side ban enforcement design), `adminapi-5` (CORS hardening), the
+3x-duplicated section 7 decay curve, s8eng-06 (deferred this sweep, see
+above).
+
+## Sweep 9 recommendation
+
+Low-to-moderate urgency — see `docs/security/qa-sweep-8.md` for the full
+rationale. Re-scope again per the established rule if more features land:
+diff against this sweep's HEAD first.
+
+## Resume checklist for whoever picks this up next
+
+- All sweep-8 code + UI fixes, the join-burst fix, and telemetry pagination
+  are complete and verified but **not yet committed/pushed/deployed** as of
+  the end of this session — confirm current `git status` before assuming
+  otherwise.
+- Backlog items raised during this session but explicitly deferred (open
+  questions noted for each — see memory `project_backlog_cell_display.md`):
+  show last-picked cell on admin (and optionally stage, placement TBD), a
+  "Karaoke" admin tab after Board Builder (content TBD), and a fix to the
+  Audio Settings UI (nothing specific reported yet — ask before touching).

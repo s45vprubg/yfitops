@@ -4,6 +4,7 @@ import type {
   DailyDoublePerformerData,
   DailyDoubleResultData,
   GameState,
+  PickerStatusData,
 } from "@shared/protocol";
 import type { AdminActions, ConnStatus, PlaybackPosition } from "../useAdmin";
 import GameControls from "./GameControls";
@@ -13,6 +14,7 @@ interface Props {
   adminView?: AdminViewData;
   ddPerformer?: DailyDoublePerformerData;
   ddResult?: DailyDoubleResultData;
+  pickerStatus?: PickerStatusData;
   actions: AdminActions;
   // Game-control-bar props (this panel's header IS the control bar now).
   status: ConnStatus;
@@ -51,11 +53,18 @@ function isRoundActive(s?: GameState): boolean {
 }
 
 export default function EvaluationPanel({
-  gameState, adminView, ddPerformer, ddResult, actions,
+  gameState, adminView, ddPerformer, ddResult, pickerStatus, actions,
   status, connected, nonce, adminSecret, spotifyConnected, playback,
 }: Props) {
   const phase = derivePhase(gameState, adminView);
   const ddAwaitingResponse = gameState === "DAILY_DOUBLE" && !!ddPerformer && !ddPerformer.performing;
+  // s8uim-01: a designated picker's cell-pick can get silently stuck on
+  // mobile with no cue anywhere in the admin UI that anything is waiting —
+  // the admin.select override already exists as a real escape hatch, but
+  // nobody knew to use it. pickerStatus is broadcast to all roles already;
+  // surface it whenever a pick is outstanding (handle assigned, not yet
+  // picked) so the admin can see it and intervene.
+  const pickerWaiting = !!pickerStatus?.pickerHandle && !pickerStatus.hasPicked;
   // Mirrors ddAwaitingResponse's complement exactly — the modal below is
   // mounted (not just visually hidden) only while a track is actually
   // playing, so it can never fire a stale end once performing flips false.
@@ -83,6 +92,7 @@ export default function EvaluationPanel({
           <DailyDoubleOfferCard actions={actions} performer={ddPerformer} />
         )}
         {ddResult && <DailyDoubleResultBanner result={ddResult} />}
+        {pickerWaiting && <PickerStatusBanner handle={pickerStatus!.pickerHandle} />}
         <Overrides actions={actions} roundActive={isRoundActive(gameState)} />
       </div>
       {ddPerforming && ddPerformer && (
@@ -261,6 +271,23 @@ function DailyDoubleResultBanner({ result }: { result: DailyDoubleResultData }) 
           {result.points > 0 ? "+" : ""}
           {result.points} pts
         </span>
+      </div>
+    </div>
+  );
+}
+
+// PickerStatusBanner — a visible cue that the game is waiting on a specific
+// mobile player to pick a cell. Mirrors DailyDoubleOfferCard's visual
+// pattern (amber-bordered status card) since both communicate "we're
+// stalled on a mobile player's action." admin.select (via Overrides/the
+// board) is the manual escape hatch for a stuck pick; this banner is what
+// tells the admin they need it.
+function PickerStatusBanner({ handle }: { handle: string }) {
+  return (
+    <div className="rounded-lg border border-amber-600 bg-amber-950/30 p-3">
+      <div className="text-[10px] uppercase tracking-wide text-amber-400">Waiting on cell pick</div>
+      <div className="mt-1 text-sm font-semibold text-white">
+        waiting on <span className="text-amber-300">{handle}</span> to pick a cell
       </div>
     </div>
   );

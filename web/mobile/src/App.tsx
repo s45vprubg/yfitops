@@ -34,6 +34,15 @@ export default function App() {
     </div>
   );
 
+  // s8uim-02: neutral stand-in for the brief pickerSettling window, same
+  // visual language as PickCellScreen's own "Loading the board…" state so
+  // it doesn't look like a new/different kind of screen.
+  const settlingPlaceholder = (
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center animate-fadeIn">
+      <div className="text-sm uppercase tracking-[0.3em] text-yellow-400">one sec</div>
+    </div>
+  );
+
   const renderScreen = () => {
     switch (view.state) {
       case "ROUND_ACTIVE":
@@ -74,9 +83,17 @@ export default function App() {
         // transition once BOTH have happened, in either order), so
         // non-pickers are never blocked from voting while a pick is
         // pending.
+        //
+        // s8uim-02: `state` -> KARAOKE arrives before the trailing
+        // pickerStatus broadcast. During that brief gap pickerSettling is
+        // true, so render a neutral placeholder instead of defaulting to
+        // VoteScreen — which would otherwise flash on the eventual picker's
+        // own device for an instant before flipping to PickCellScreen.
         return (
           <div className="flex flex-1 flex-col">
-            {stillPicking ? (
+            {view.pickerSettling ? (
+              settlingPlaceholder
+            ) : stillPicking ? (
               <PickCellScreen board={view.pickableBoard} onSelect={selectCell} />
             ) : (
               <VoteScreen vote={view.vote} onVote={vote} />
@@ -90,6 +107,16 @@ export default function App() {
         // exception: right after a Daily Double, which goes straight to
         // BOARD with no karaoke phase, the performer becomes the picker —
         // same rule as a normal correct guess — with no vote to wait on.
+        //
+        // s8uim-02: same trailing-message gap as KARAOKE above (finishDaily
+        // Double transitions to BOARD before broadcasting pickerStatus).
+        // This also fires on an ordinary admin-picks BOARD entry where no
+        // pickerStatus is ever coming — pickerSettling's own fallback timer
+        // (useGame.ts, PICKER_SETTLE_MS) bounds that to a brief, one-time
+        // placeholder rather than a lasting change to the idle screen.
+        if (view.pickerSettling) {
+          return settlingPlaceholder;
+        }
         if (view.pickerStatus && !view.pickerStatus.hasPicked) {
           return stillPicking ? (
             <PickCellScreen board={view.pickableBoard} onSelect={selectCell} />

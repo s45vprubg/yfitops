@@ -82,12 +82,30 @@ export interface GameView {
   // a tappable grid. Null for everyone else, and cleared once this device's
   // pick registers or the phase changes.
   pickableBoard: BoardData | null;
+  // s8uim-02: true for a brief window right after `state` transitions into
+  // KARAOKE or BOARD, until the trailing pickerStatus/pickableBoard
+  // broadcasts land (or a short fallback timer expires, whichever first).
+  // The server sends `state` before those trailing messages (several other
+  // broadcasts are interleaved in between — see verdict s8uim-02), so
+  // without this flag the picker's own device would, for that instant,
+  // compute pickerStatus as still null and briefly render the wrong
+  // (non-picker) screen. App.tsx renders a neutral loading state instead
+  // while this is true.
+  pickerSettling: boolean;
 }
 
 const HEARTBEAT_MS = 2000;
 // Auto-reconnect backoff: doubles from base up to the cap (§3.2 resume).
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 8000;
+// s8uim-02: grace window for the `state` -> pickerStatus/pickableBoard gap.
+// Deliberately short — real-world gap is a handful of broadcasts over the
+// same already-open reliable stream, likely single-digit-to-low-double-digit
+// ms, not hundreds. Kept short because this window also fires on every
+// ordinary BOARD entry where NO picker status is ever coming (the common
+// admin-picks path) — too long a window would trade a rare cosmetic flash
+// for a routine, visible loading blip on every round instead.
+const PICKER_SETTLE_MS = 150;
 
 const INITIAL: GameView = {
   conn: "idle",
@@ -109,6 +127,7 @@ const INITIAL: GameView = {
   ddResult: null,
   pickerStatus: null,
   pickableBoard: null,
+  pickerSettling: false,
 };
 
 export function useGame() {
@@ -119,6 +138,10 @@ export function useGame() {
   const pendingPing = useRef<number | null>(null);
   // True between sending a buzz and receiving the buzzResult response.
   const awaitingBuzzResult = useRef(false);
+  // s8uim-02: fallback timer that clears pickerSettling if the trailing
+  // pickerStatus broadcast never arrives (e.g. a normal admin-picks BOARD
+  // entry, where no such broadcast is ever sent at all).
+  const pickerSettleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Reconnect bookkeeping (§3.2 resume). We keep the handle + deviceFP stable
   // across drops so the server re-attaches this device to its saved score.
   const unmountedRef = useRef(false);
@@ -233,8 +256,24 @@ export function useGame() {
             next.pickerStatus = null;
             next.pickableBoard = null;
           }
+          // s8uim-02: entering BOARD/KARAOKE opens the settling window;
+          // leaving either closes it immediately (nothing to bridge).
+          next.pickerSettling = d.state === "BOARD" || d.state === "KARAOKE";
           return { ...v, ...next };
         });
+        // Always replace any pending settle timer with a fresh decision for
+        // the NEW state — a rapid state-to-state hop must not let a stale
+        // timer from the previous phase clear pickerSettling late.
+        if (pickerSettleTimerRef.current) {
+          clearTimeout(pickerSettleTimerRef.current);
+          pickerSettleTimerRef.current = null;
+        }
+        if (d.state === "BOARD" || d.state === "KARAOKE") {
+          pickerSettleTimerRef.current = setTimeout(() => {
+            pickerSettleTimerRef.current = null;
+            patch({ pickerSettling: false });
+          }, PICKER_SETTLE_MS);
+        }
       });
 
       c.on("lockout", (env: ServerEnvelope) => {
@@ -321,7 +360,14 @@ export function useGame() {
       // the picker's own device know when its pick has registered.
       c.on("pickerStatus", (env: ServerEnvelope) => {
         const d = env.d as PickerStatusData | undefined;
-        if (d) patch({ pickerStatus: d.pickerHandle ? d : null });
+        if (!d) return;
+        // s8uim-02: the trailing message has landed — close the settling
+        // window right away rather than waiting out PICKER_SETTLE_MS.
+        if (pickerSettleTimerRef.current) {
+          clearTimeout(pickerSettleTimerRef.current);
+          pickerSettleTimerRef.current = null;
+        }
+        patch({ pickerStatus: d.pickerHandle ? d : null, pickerSettling: false });
       });
 
       // THIS DEVICE'S OWN CONNECTION ONLY — see the "pickableBoard" doc
@@ -538,17 +584,32 @@ export function useGame() {
 
   // Player-driven cell picking: only honored server-side if this device is
   // the designated picker (e.cellPicker) — see onPlayerSelectCell.
-  const selectCell = useCallback((row: number, col: number) => {
-    const c = clientRef.current;
-    if (!c) return;
-    void c.send<PlayerSelectCellData>({ t: "player.selectCell", d: { row, col } });
-  }, []);
+  //
+  // s8uim-01: unlike the other fire-and-forget sends above, a dropped write
+  // here is uniquely bad — it silently strands PickCellScreen's local
+  // pickedRef lock with nothing to recover it except its own blind timeout
+  // (no retry, no visible error). A `.catch` can't retry a send on a dead
+  // stream either, but surfacing the failure immediately (rather than
+  // waiting out PickCellScreen's full recovery window) at least gives the
+  // player an on-screen signal that something went wrong instead of a
+  // silent hang.
+  const selectCell = useCallback(
+    (row: number, col: number) => {
+      const c = clientRef.current;
+      if (!c) return;
+      c.send<PlayerSelectCellData>({ t: "player.selectCell", d: { row, col } }).catch((e) => {
+        patch({ error: e instanceof Error ? e.message : "Pick failed to send" });
+      });
+    },
+    [patch],
+  );
 
   useEffect(() => {
     return () => {
       unmountedRef.current = true;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (heartbeatRef.current) clearInterval(heartbeatRef.current);
+      if (pickerSettleTimerRef.current) clearTimeout(pickerSettleTimerRef.current);
       void clientRef.current?.close();
     };
   }, []);

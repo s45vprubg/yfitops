@@ -195,54 +195,62 @@ export default function ActiveRound({ trackStart, timer, maskedReveal, lockoutHa
   const hintYear = maskedReveal?.year;
 
   return (
-    <div className="relative flex h-full w-full flex-col items-center justify-center px-12">
-      {/* Guesser banner, fixed near the top so the audience always sees who
-          buzzed in first without it getting lost in the centered reveal. */}
-      {lockoutHandle && (
-        <div className="absolute inset-x-0 top-8 flex flex-col items-center">
-          <div className="text-sm uppercase tracking-[0.5em] text-neon-amber/70">now guessing</div>
-          <div className="text-5xl font-extrabold text-neon-amber neon-text animate-winnerPop">
-            {lockoutHandle}
-          </div>
-        </div>
-      )}
-
-      {/* Genre hint sits above the points. */}
-      {hintGenre && (
-        <div className="mb-6 flex items-center gap-4 text-neon-amber/90">
-          <span className="rounded-full border border-neon-amber/40 px-4 py-1 text-2xl font-semibold uppercase tracking-widest">
-            {hintGenre}
-          </span>
-        </div>
-      )}
-
-      {/* Point timer */}
-      <div className="mb-6 flex flex-col items-center">
-        <div className="mb-1 text-sm uppercase tracking-[0.5em] text-neon-cyan/60">
-          {frozen ? "locked" : "points available"}
-        </div>
-        <div
-          ref={pointsRef}
-          className={[
-            "tnum text-[10rem] font-extrabold leading-none transition-opacity duration-150",
-            frozen ? "text-neon-magenta opacity-30 blur-[1px]" : "text-neon-green neon-text animate-pulseGlow",
-          ].join(" ")}
-        >
-          {currentPointsFromPool(timer.maxPoints, timer.basePoints, Math.max(0, Date.now() - timer.startTime))}
-        </div>
+    <div className="flex h-full w-full flex-col">
+      {/* Guesser banner, in-flow at the top (matches Karaoke.tsx's actual
+          structure — a plain in-flow div, not an absolute overlay) so it
+          reserves real layout space and can never overlap the centered
+          reveal content below it, regardless of viewport height. The row
+          keeps a fixed min-height even when empty so the content block
+          below doesn't reflow when the banner toggles on/off. */}
+      <div className="flex min-h-[7rem] flex-col items-center pt-8">
+        {lockoutHandle && (
+          <>
+            <div className="text-sm uppercase tracking-[0.5em] text-neon-amber/70">now guessing</div>
+            <div className="text-5xl font-extrabold text-neon-amber neon-text animate-winnerPop">
+              {lockoutHandle}
+            </div>
+          </>
+        )}
       </div>
 
-      {/* Year hint sits under the points, above the artist. */}
-      {hintYear ? (
-        <div className="mb-6 rounded-full border border-neon-amber/40 px-4 py-1 text-2xl font-semibold tracking-widest text-neon-amber/90">
-          {hintYear}
-        </div>
-      ) : null}
+      <div className="flex flex-1 flex-col items-center justify-center px-12">
+        {/* Genre hint sits above the points. */}
+        {hintGenre && (
+          <div className="mb-6 flex items-center gap-4 text-neon-amber/90">
+            <span className="rounded-full border border-neon-amber/40 px-4 py-1 text-2xl font-semibold uppercase tracking-widest">
+              {hintGenre}
+            </span>
+          </div>
+        )}
 
-      {/* Decryption lines */}
-      <div className="flex w-full max-w-[90vw] flex-col items-center gap-8">
-        <Line label="artist" textRef={artistRef} glow={glow} />
-        <Line label="song" textRef={songRef} glow={glow} />
+        {/* Point timer */}
+        <div className="mb-6 flex flex-col items-center">
+          <div className="mb-1 text-sm uppercase tracking-[0.5em] text-neon-cyan/60">
+            {frozen ? "locked" : "points available"}
+          </div>
+          <div
+            ref={pointsRef}
+            className={[
+              "tnum text-[10rem] font-extrabold leading-none transition-opacity duration-150",
+              frozen ? "text-neon-magenta opacity-30 blur-[1px]" : "text-neon-green neon-text animate-pulseGlow",
+            ].join(" ")}
+          >
+            {currentPointsFromPool(timer.maxPoints, timer.basePoints, Math.max(0, Date.now() - timer.startTime))}
+          </div>
+        </div>
+
+        {/* Year hint sits under the points, above the artist. */}
+        {hintYear ? (
+          <div className="mb-6 rounded-full border border-neon-amber/40 px-4 py-1 text-2xl font-semibold tracking-widest text-neon-amber/90">
+            {hintYear}
+          </div>
+        ) : null}
+
+        {/* Decryption lines */}
+        <div className="flex w-full max-w-[90vw] flex-col items-center gap-8">
+          <Line label="artist" textRef={artistRef} glow={glow} />
+          <Line label="song" textRef={songRef} glow={glow} />
+        </div>
       </div>
     </div>
   );

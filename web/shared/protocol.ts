@@ -89,8 +89,9 @@ export type ServerMsgType =
   | "telemetry"
   | "adminView"
   | "spotifyToken"
-  // pickerStatus: {pickerHandle, hasPicked} — sanitized (no board/track
-  // data), broadcast to ALL roles. Mirrors smsgPickerStatus in engine.go.
+  // pickerStatus: {pickerID, pickerHandle, hasPicked} — sanitized (no
+  // board/track data), broadcast to ALL roles. Mirrors smsgPickerStatus in
+  // engine.go.
   | "pickerStatus"
   // pickableBoard: the same BoardData shape "board" uses (category/points/
   // exhausted — already §4A-safe), sent ONLY to the designated picker's own

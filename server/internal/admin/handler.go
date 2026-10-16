@@ -63,6 +63,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("PATCH /api/boards/{id}/tracks/{trackId}/override", wrap(h.setTrackOverride))
 	// Probe LRCLIB for every never-attempted track on a board.
 	mux.Handle("POST /api/boards/{id}/rescan-lyrics", wrap(h.rescanLyrics))
+	// Bulk-retry every track still stuck 'pending' (errored/rate-limited).
+	mux.Handle("POST /api/boards/{id}/requery-pending-lyrics", wrap(h.requeryPendingLyrics))
 	// Retry LRCLIB for one track regardless of its current lyrics status.
 	mux.Handle("POST /api/boards/{id}/tracks/{trackId}/requery-lyrics", wrap(h.requeryLyrics))
 	// Admin-pasted LRC text for a track whose song auto-fetch can't find.
