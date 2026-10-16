@@ -117,7 +117,9 @@ func (c *LRCLIBClient) Fetch(ctx context.Context, artist, title string, duration
 // Probe fetches raw LRC text for a track and classifies the result per
 // LRCLIB's documented status codes:
 //   - found=false, err=nil: LRCLIB confirmed no lyrics exist (404 TrackNotFound,
-//     or a match with an empty syncedLyrics field).
+//     or a match with an empty syncedLyrics field) AND no near-duplicate
+//     submission within lrclibDurationToleranceSec has synced lyrics either
+//     (see searchForSyncedWithinTolerance).
 //   - err is a *RateLimitError: rate limited (429) or temporarily overloaded
 //     (503). Probe already waited out one Retry-After and retried once before
 //     returning this, so callers that still see it should back off further
@@ -126,21 +128,104 @@ func (c *LRCLIBClient) Fetch(ctx context.Context, artist, title string, duration
 //     malformed response body — a genuine, non-retried-here failure.
 func (c *LRCLIBClient) Probe(ctx context.Context, artist, song string, durationSec int) (lrcText string, found bool, err error) {
 	text, found, err := c.probeOnce(ctx, artist, song, durationSec)
-	var rle *RateLimitError
-	if !errors.As(err, &rle) {
-		return text, found, err
+	if rle, ok := asRateLimitError(err); ok {
+		wait := rle.RetryAfter
+		if wait > maxRetryWait {
+			wait = maxRetryWait
+		}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return "", false, fmt.Errorf("lyrics: retry wait: %w", ctx.Err())
+		}
+		text, found, err = c.probeOnce(ctx, artist, song, durationSec)
 	}
 
-	wait := rle.RetryAfter
-	if wait > maxRetryWait {
-		wait = maxRetryWait
+	// LRCLIB carries duplicate submissions of the same recording that can
+	// report a duration a second or so apart (rounding, re-encodes), and
+	// /api/get's own disambiguation among those duplicates sometimes returns
+	// one with no synced lyrics over a near-identical one that has them
+	// (confirmed by hand: real different edits/remixes differ by tens of
+	// seconds, not ~1s — this fallback is scoped tight enough to stay clear
+	// of those). Only tried when the primary call cleanly found nothing;
+	// never overrides an error, and never introduces a new one of its own.
+	if err == nil && !found {
+		if searchText, searchFound := c.searchForSyncedWithinTolerance(ctx, artist, song, durationSec); searchFound {
+			return searchText, true, nil
+		}
 	}
-	select {
-	case <-time.After(wait):
-	case <-ctx.Done():
-		return "", false, fmt.Errorf("lyrics: retry wait: %w", ctx.Err())
+	return text, found, err
+}
+
+func asRateLimitError(err error) (*RateLimitError, bool) {
+	var rle *RateLimitError
+	return rle, errors.As(err, &rle)
+}
+
+// lrclibDurationToleranceSec bounds searchForSyncedWithinTolerance. See
+// Probe's doc comment for why this is safe at a narrow ~1s window.
+const lrclibDurationToleranceSec = 1.0
+
+// lrclibSearchResult is the subset of an /api/search result item we need.
+type lrclibSearchResult struct {
+	Duration     float64 `json:"duration"`
+	SyncedLyrics string  `json:"syncedLyrics"`
+}
+
+// searchForSyncedWithinTolerance is a best-effort fallback for when /api/get
+// found no synced lyrics: /api/search returns every submission for the
+// artist+track regardless of duration, which can surface a near-duplicate
+// submission (same recording, slightly different reported length) that DOES
+// have synced lyrics. Any failure here (network, bad JSON, non-200) is
+// swallowed — this only ever adds a result on top of the primary not-found
+// answer, never turns a clean "not found" into a different kind of failure.
+func (c *LRCLIBClient) searchForSyncedWithinTolerance(ctx context.Context, artist, song string, durationSec int) (string, bool) {
+	q := url.Values{}
+	q.Set("artist_name", artist)
+	q.Set("track_name", song)
+	endpoint := c.baseURL + "/api/search?" + q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", false
 	}
-	return c.probeOnce(ctx, artist, song, durationSec)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", userAgent)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", false
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxLyricsBytes))
+	if err != nil {
+		return "", false
+	}
+	var results []lrclibSearchResult
+	if err := json.Unmarshal(body, &results); err != nil {
+		return "", false
+	}
+
+	target := float64(durationSec)
+	bestText, bestDiff, found := "", lrclibDurationToleranceSec, false
+	for _, r := range results {
+		text := strings.TrimSpace(r.SyncedLyrics)
+		if text == "" {
+			continue
+		}
+		diff := r.Duration - target
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff <= bestDiff {
+			bestDiff, bestText, found = diff, text, true
+		}
+	}
+	return bestText, found
 }
 
 // probeOnce makes a single /api/get request with no retry logic.

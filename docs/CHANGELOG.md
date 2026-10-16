@@ -212,6 +212,19 @@ anywhere. Bucket tracks are now draggable back out to the Track Library
 the forward direction); ✕ remains a true permanent delete, now labeled as
 such.
 
+### Added — LRCLIB near-duplicate fallback for lyrics matching (2026-10-16)
+A real chunk of tracks coming back `not_found` turned out to have synced
+lyrics on LRCLIB after all — LRCLIB carries duplicate submissions of the
+same recording that report a duration a second or so apart (rounding,
+re-encodes), and `/api/get`'s own disambiguation among those duplicates can
+return the one submission with no synced lyrics over a near-identical one
+that has them. When `/api/get` finds nothing synced, the prober now also
+checks `/api/search` for a same-artist/track submission within ±1s of the
+real duration and uses that if found. Deliberately narrow: a genuinely
+different edit/remix (verified by hand — compilation/radio edits of the
+same songs differ by tens of seconds, not ~1s) is never picked up by this,
+so it can't desync a karaoke overlay against a shorter/different cut.
+
 ## [Unreleased] — 2026-07-01
 
 ### Added

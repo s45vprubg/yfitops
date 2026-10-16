@@ -336,6 +336,89 @@ func TestProbe_GivesUpAfterSecondRateLimit(t *testing.T) {
 	}
 }
 
+// TestProbe_FallsBackToSearchWithinTolerance covers the real-world case this
+// fallback exists for: LRCLIB has a duplicate submission of the same
+// recording (duration reported ~1s off) that DOES carry synced lyrics, while
+// the one /api/get happens to return does not.
+func TestProbe_FallsBackToSearchWithinTolerance(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/get":
+			_, _ = w.Write([]byte(`{"plainLyrics":"text only","syncedLyrics":""}`))
+		case "/api/search":
+			_, _ = w.Write([]byte(`[
+				{"duration":245,"syncedLyrics":""},
+				{"duration":279,"syncedLyrics":"[00:00.00]near-duplicate match"}
+			]`))
+		default:
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv.URL)
+	text, found, err := c.Probe(context.Background(), "a", "b", 278)
+	if err != nil {
+		t.Fatalf("Probe error: %v", err)
+	}
+	if !found {
+		t.Fatal("found = false, want true via the search fallback")
+	}
+	if text != "[00:00.00]near-duplicate match" {
+		t.Fatalf("text = %q, want the near-duplicate's synced lyrics", text)
+	}
+}
+
+// TestProbe_FallbackRejectsDistantDuration proves the fallback does NOT
+// widen matching to a genuinely different edit/remix — only to near-duplicate
+// submissions of the same recording. A candidate well outside the tolerance
+// (here 40s off, same shape as a real shortened radio/compilation edit) must
+// be ignored even though it has synced lyrics.
+func TestProbe_FallbackRejectsDistantDuration(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/get":
+			_, _ = w.Write([]byte(`{"syncedLyrics":""}`))
+		case "/api/search":
+			_, _ = w.Write([]byte(`[{"duration":239,"syncedLyrics":"[00:00.00]different edit, do not use"}]`))
+		}
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv.URL)
+	_, found, err := c.Probe(context.Background(), "a", "b", 278)
+	if err != nil {
+		t.Fatalf("Probe error: %v", err)
+	}
+	if found {
+		t.Fatal("found = true, want false — the only candidate is 39s off, well outside tolerance")
+	}
+}
+
+// TestProbe_SkipsFallbackWhenPrimaryAlreadyFound proves the fallback never
+// fires (and so never spends a second request) once /api/get already
+// resolved synced lyrics directly — it only ever supplements a clean
+// not-found, never second-guesses a hit.
+func TestProbe_SkipsFallbackWhenPrimaryAlreadyFound(t *testing.T) {
+	searchCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/search" {
+			searchCalls++
+		}
+		_, _ = w.Write([]byte(`{"syncedLyrics":"[00:00.00]primary hit"}`))
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv.URL)
+	text, found, err := c.Probe(context.Background(), "a", "b", 278)
+	if err != nil || !found || text != "[00:00.00]primary hit" {
+		t.Fatalf("text=%q found=%v err=%v, want the primary result unchanged", text, found, err)
+	}
+	if searchCalls != 0 {
+		t.Fatalf("search fallback called %d times, want 0", searchCalls)
+	}
+}
+
 func TestParseRetryAfter(t *testing.T) {
 	tests := []struct {
 		name string
