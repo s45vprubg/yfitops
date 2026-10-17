@@ -29,6 +29,47 @@ column drops) for the new Mark/Jump Drop Point feature. Run
 `cd deploy && make migrate` before starting the new server/gameserver image.
 No backfill: every song's drop point starts unmarked until an admin marks it.
 
+## [Unreleased] — 2026-10-17
+
+### Removed — Points silently halved on a fully-correct guess (one-field-first gate)
+- `server/internal/game/engine.go` / `reveal.go`: Removed the "one field
+  revealed ahead of the other" halve gate — if the artist's or song's hidden
+  letters dropped to the lockout threshold while the other field still had
+  more hidden, the server quietly scaled a subsequent **fully correct**
+  guess's payout by 0.5 (`pointFactor`/`halvePoints`, `revealTick`'s
+  one-field-first check). This contradicted the scoring rule that a fully
+  correct guess always earns 100% of the live decayed pool, and was reported
+  as "points look halved" — it has nothing to do with who selected the cell
+  (admin vs. the round winner both go through the identical `selectCell` →
+  `startTrack` path); it simply correlated with longer-running rounds, which
+  gave the gate more time to fire before anyone buzzed. `roundPool()` (now
+  the single pool accessor, replacing `livePool()`) is unaffected — the
+  partial-guess floor-drop-to-50 behavior is unchanged. The separate
+  lockout gate (zeroes points and closes buzzing once both fields are nearly
+  fully revealed) is a distinct mechanic and was not touched.
+- `server/internal/game/pool_test.go`: removed the halve-gate test cases and
+  the `forceHalveGate` helper; added a `"partial then correct"` case pinning
+  that a fully correct guess after a partial still pays the full
+  (unhalved) live pool.
+
+### Fixed — Backgrounded tab could permanently miss its "pick a cell" prompt
+- `web/mobile/src/lib/useGame.ts`, `web/stage/src/net/useGame.ts`,
+  `web/admin/src/useAdmin.ts`: the server tells a client "you're the
+  picker" via `pickerStatus`/`pickableBoard`, broadcast once at the moment
+  of grading. If that connection wasn't live at that exact instant
+  (background-tab timer throttling, a brief idle-timeout drop, or the
+  browser suspending a hidden tab), the message was lost permanently — the
+  player fell through to a legitimate-looking `VoteScreen` with no
+  indication anything was wrong, and nothing re-requested the missed state.
+  The server already replays `pickerStatus`/`pickableBoard` correctly on an
+  explicit `resync`, but nothing anywhere listened for `visibilitychange`.
+  All three frontends now send `{t: "resync"}` the moment a backgrounded
+  tab becomes visible again (if still connected); mobile and stage
+  additionally cancel a stalled reconnect-backoff timer and retry
+  immediately rather than waiting out a possibly-throttled delay. Admin has
+  no auto-reconnect by design (a drop requires manually re-entering the
+  secret), so only the resync-while-connected half applies there.
+
 ## [Unreleased] — 2026-10-13
 
 ### Added

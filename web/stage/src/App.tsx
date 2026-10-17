@@ -143,7 +143,7 @@ export default function StageApp() {
 
 function ConnDot({ connected }: { connected: boolean }) {
   return (
-    <div className="fixed top-4 right-4 z-40 flex items-center gap-2 text-xs text-neon-cyan/60">
+    <div className="fixed bottom-4 left-4 z-40 flex items-center gap-2 text-xs text-neon-cyan/60">
       <span
         className={[
           "inline-block h-2.5 w-2.5 rounded-full",

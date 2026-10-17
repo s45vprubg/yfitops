@@ -1092,3 +1092,79 @@ pass before Solo Karaoke sees heavy concurrent-admin-tab use at an event.
 Moderate value specifically around the unverified store-layer fix if Solo
 Karaoke sees real concurrent-admin-tab use. Otherwise low urgency — re-scope
 again per the established rule if more features land.
+
+# SWEEP 11 (2026-10-17) — DONE
+
+Full writeup: `docs/security/qa-sweep-11.md`. Scope: a small, two-feature
+session delta (removal of a scoring halve-gate bug + a visibility-triggered
+resync fix for a missed cell-picker prompt, plus a trivial stage CSS corner
+move), not yet committed when the sweep started. `git diff --stat HEAD` = 10
+files, 154 insertions, 166 deletions.
+
+## Outcome
+
+**5 findings across 2 surfaces: 5 CONFIRMED, 0 REFUTED. 1 HIGH-reported
+(downgraded to MEDIUM on independent re-verification), 2 MEDIUM, 2 LOW. 4
+fixed and verified cold, 1 LOW deferred** (s11fe-03, inert handshake-timing
+race, no reachable bad outcome).
+
+## Fixed & verified
+
+- **s11-engine-delta-01 (MEDIUM)**: removing the halve gate also removed the
+  only test exercising `revealTick` with an asymmetric reveal — a
+  reintroduction would pass `go test` undetected. Two new tests added:
+  `TestPool_AsymmetricRevealDoesNotHalve`, `TestPool_LockoutGateStillFiresWithoutHalveGate`.
+  Proven non-vacuous via a temporary `pts/2` probe in `gradeCorrect` (red,
+  then reverted clean).
+- **s11-engine-delta-02 (LOW)**: `gofmt` drift in `engine.go`/`reveal.go`
+  from the deletions. Fixed with `gofmt -w`.
+- **s11fe-01 (reported HIGH, re-verified as MEDIUM)**: a visibility-triggered
+  resync can re-deliver the SAME `"state"` with no real transition. Mobile's
+  `"state"` handler inferred "fresh round" from "previous state wasn't
+  ADJUDICATE" — also true for a same-value ROUND_ACTIVE repeat, wiping
+  `judgedThisRound`/`buzzedAndLost`/`lastVerdict` for an already-judged
+  player on nothing more than a tab background/refocus. Independently traced
+  `addContender` (`engine.go:1524`): `GuessedThisTrack` is enforced
+  server-side regardless of client UI state, so this is a confusing-UI bug,
+  not a re-buzz/fairness exploit — downgraded HIGH->MEDIUM on that basis.
+  Stage's own `"state"` handler confirmed NOT to share this bug class
+  (idempotent on repeats) — mobile-only. Fixed: the "fresh round" branch now
+  requires `v.state !== "ROUND_ACTIVE"`.
+- **s11fe-02 (MEDIUM)**: same file/root cause — `pickerSettling` and its
+  150ms timer re-armed on every same-phase resync repeat, flashing a loading
+  state on every tab refocus during BOARD/KARAOKE. Fixed: gated on an actual
+  phase change via the same previous-state snapshot s11fe-01 needed.
+
+## Deferred
+
+- **s11fe-03 (LOW)**: narrow, currently-inert handshake-timing race in the
+  new resync handlers (`clientRef.current` can read truthy slightly before
+  the stream writer exists) — no crash, no spam, no double-connect. Not
+  fixed this sweep.
+
+## Verification (cold)
+
+`RACE=1 qa/acid.sh` -> ACID PASSED (43/43, before AND after fixes).
+`scripts/preflight.sh` -> PREFLIGHT PASSED. One transient `go test` failure
+(`TestDailyDoubleFade_RestoreStillAttemptedWhenSetVolumeErrors`) on the first
+preflight run was investigated and ruled a flake (5/5 isolated + 3/3
+full-package reruns clean, a second full preflight run clean) — not a
+regression; this sweep's delta never touches Daily Double fade/volume code.
+
+## Still open after sweep 11
+
+Unchanged from sweep 10, not re-litigated. New: s11fe-03 (deferred above).
+
+## Resume checklist
+
+- Sweep 11's fixes, and the pre-existing session delta underneath them, are
+  verified but **not yet committed/pushed/deployed** as of the end of this
+  sweep — check `git status` before assuming otherwise.
+- If any future sweep touches `useGame.ts`/`useAdmin.ts` again, re-check any
+  OTHER "previous state"-keyed reset logic for the same resync-repeat
+  vulnerability class found in s11fe-01/02.
+
+## Sweep 12 recommendation
+
+Low urgency on a hunt basis. Re-scope again per the established rule if more
+features land.

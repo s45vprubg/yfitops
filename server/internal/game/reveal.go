@@ -56,11 +56,11 @@ const smsgCheatReport protocol.ServerMsgType = "cheatReport"
 
 // cheatEntry is one player's anti-cheat snapshot for the admin panel.
 type cheatEntry struct {
-	PlayerID  string   `json:"playerId"`
-	Handle    string   `json:"handle"`
-	IP        string   `json:"ip"`
-	Conns     int      `json:"conns"`  // live connection count for this player
-	Flags     []string `json:"flags"`  // e.g. "shared-ip", "multi-conn"
+	PlayerID string   `json:"playerId"`
+	Handle   string   `json:"handle"`
+	IP       string   `json:"ip"`
+	Conns    int      `json:"conns"` // live connection count for this player
+	Flags    []string `json:"flags"` // e.g. "shared-ip", "multi-conn"
 }
 
 type cheatReportData struct {
@@ -104,15 +104,15 @@ const (
 // mutated by the admin handler; snapshotted into revealClock at startTrack so a
 // mid-round change applies to the next round, not the running ticker.
 type revealConfig struct {
-	IntervalMs   int  // ms between revealed letters
-	Phase1Ms     int  // time before letters start streaming
-	BlockMs      int  // hide the real length behind a fixed-width block until this time (0 = off)
-	EaseMs       int  // char-drop morph duration when the block collapses to the real length
-	LockoutChars int  // lock buzzing + zero points when <= this many hidden letters remain (total across artist+song)
-	AutoKaraokeMs int // after the reveal fully completes, delay this long then auto-enter karaoke (0 = off)
-	GenreDelayMs int  // show the genre hint this long after the round starts
-	YearDelayMs  int  // show the year hint this long after the genre hint
-	Alternate    bool // true: one field per tick (artist,song,artist,...); false: one from each per tick
+	IntervalMs    int  // ms between revealed letters
+	Phase1Ms      int  // time before letters start streaming
+	BlockMs       int  // hide the real length behind a fixed-width block until this time (0 = off)
+	EaseMs        int  // char-drop morph duration when the block collapses to the real length
+	LockoutChars  int  // lock buzzing + zero points when <= this many hidden letters remain (total across artist+song)
+	AutoKaraokeMs int  // after the reveal fully completes, delay this long then auto-enter karaoke (0 = off)
+	GenreDelayMs  int  // show the genre hint this long after the round starts
+	YearDelayMs   int  // show the year hint this long after the genre hint
+	Alternate     bool // true: one field per tick (artist,song,artist,...); false: one from each per tick
 }
 
 // defaultRevealConfig returns the built-in defaults.
@@ -177,8 +177,8 @@ type revealClock struct {
 	active   bool   // a reveal is armed for the current round
 	roundKey string // e.roundKey this clock belongs to (staleness guard)
 
-	artist string // uppercased answer text — SERVER-SIDE ONLY, never in a frame
-	song   string
+	artist      string // uppercased answer text — SERVER-SIDE ONLY, never in a frame
+	song        string
 	artistOrder []int // random reveal order of non-space indices in artist
 	songOrder   []int // random reveal order of non-space indices in song
 
@@ -188,9 +188,8 @@ type revealClock struct {
 	phase      int  // revealPhase*
 	phase1Done bool // the noise one-shot has fired
 	finalizing bool // a final (KARAOKE/daily-double) full reveal is in flight
-	nextField   int  // 0 = artist's turn, 1 = song's turn (alternation cursor)
-	lockedOut   bool // the total-lockout gate already fired this round (fire-once)
-	fieldHalved bool // the "one field revealed first" halve already fired (fire-once)
+	nextField  int  // 0 = artist's turn, 1 = song's turn (alternation cursor)
+	lockedOut  bool // the total-lockout gate already fired this round (fire-once)
 
 	// Pre-reveal hints (not worth points). Values are server-side; the flags
 	// gate when each becomes visible in the mask (genre first, then year).
@@ -357,21 +356,6 @@ func (rc *revealClock) remainingHidden() int {
 		rem = 0
 	}
 	return rem
-}
-
-// artistRemaining / songRemaining are the still-hidden letter counts per field
-// (drives the "one field revealed first -> halve points" gate).
-func (rc *revealClock) artistRemaining() int {
-	if r := len(rc.artistOrder) - rc.artistRevealed; r > 0 {
-		return r
-	}
-	return 0
-}
-func (rc *revealClock) songRemaining() int {
-	if r := len(rc.songOrder) - rc.songRevealed; r > 0 {
-		return r
-	}
-	return 0
 }
 
 // revealOneLetter advances the reveal by a single letter, honoring the

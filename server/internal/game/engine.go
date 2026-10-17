@@ -120,10 +120,12 @@ func currentPointsFromPool(maxP, baseP int, elapsedMs int64) int {
 	}
 }
 
-// roundPool returns the round's awardable (ceiling, floor) BEFORE pointFactor:
-// the post-partial pool once a partial has taken its 50, otherwise the row's.
-// gradeCorrect awards from THIS pool and then applies pointFactor itself, so
-// the factor must not be folded in here (that would double-apply it).
+// roundPool returns the round's awardable (ceiling, floor): the post-partial
+// pool once a partial has taken its 50, otherwise the row's. It is the single
+// source of truth for every pool we put on the wire (trackStart) or show the
+// admin, so the number the stage projects at 60fps is the number gradeCorrect
+// pays (§5 / BUILD_CONTRACT hard rule 6). Deriving a pool from the row instead
+// is what made the stage show 190 and pay 70.
 func (e *Engine) roundPool() (maxP, baseP int) {
 	if e.partial.active {
 		// A prior partial shifted the decay pool: the remaining ceiling with
@@ -133,32 +135,7 @@ func (e *Engine) roundPool() (maxP, baseP int) {
 		maxP, baseP = MaxPointsForRow(e.curRow), BaseValue
 	}
 	if baseP > maxP {
-		baseP = maxP // defensive: never invert the pool (see livePool)
-	}
-	return maxP, baseP
-}
-
-// livePool is roundPool with pointFactor applied to BOTH ends. It is the single
-// source of truth for every pool we put on the wire (trackStart) or show the
-// admin, so the number the stage projects at 60fps is the number gradeCorrect
-// pays (§5 / BUILD_CONTRACT hard rule 6). Deriving a pool from the row instead
-// is what made the stage show 190 and pay 70.
-//
-// Both ends are floored, and floor(floor(x)/2) == floor(x/2), so for an even
-// bonus the projected value is EXACTLY the awarded one. An odd bonus (rows 2
-// and 4 with no partial: 25 and 75) can project 1 point low, which is the
-// closest an integer wire pool can get; low, never overstated.
-//
-// baseP is clamped to maxP because web/shared/scoring.ts computes
-// bonus = max - base and would decay upward from a negative bonus.
-func (e *Engine) livePool() (maxP, baseP int) {
-	maxP, baseP = e.roundPool()
-	if e.pointFactor > 0 && e.pointFactor < 1 {
-		maxP = int(math.Floor(float64(maxP) * e.pointFactor))
-		baseP = int(math.Floor(float64(baseP) * e.pointFactor))
-	}
-	if baseP > maxP {
-		baseP = maxP
+		baseP = maxP // defensive: never invert the pool
 	}
 	return maxP, baseP
 }
@@ -293,9 +270,6 @@ type Engine struct {
 	// revealLocked: the reveal got close enough to complete that buzzing is
 	// closed and points are zeroed for the rest of this round. Reset each track.
 	revealLocked bool
-	// pointFactor scales the awardable points for the current round (1.0 normal,
-	// 0.5 after one field revealed ahead of the other). Reset each track.
-	pointFactor float64
 	// roundWinner is the handle of whoever guessed correctly this round ("" =
 	// nobody won). Set in gradeCorrect, cleared at startTrack; drives the
 	// karaoke winner banner (so it never defaults to the scoreboard leader).
@@ -391,7 +365,6 @@ func NewEngine(repo GameRepo, lock BuzzLock, audio AudioDevice, lyrics LyricsPro
 		session:        &Session{ID: cfg.SessionID, SkipThresholdPct: cfg.SkipThresholdPct, State: string(protocol.StateLobby)},
 		revealCfg:      revCfg.clamp(),
 		connIP:         map[string]string{},
-		pointFactor:    1.0,
 		lyricCache:     map[string]*lyricEntry{},
 		buzzWindowMs:   buzzWindowMs,
 		cellVisits:     map[string]int{},
@@ -1407,8 +1380,8 @@ func (e *Engine) trackStartEnvelope() protocol.ServerEnvelope {
 		artistLen, songLen = len(e.curTrack.Artist), len(e.curTrack.Song)
 	}
 	// The LIVE pool, not the row's: a mid-round resume/reconnect must not hand
-	// the stage back points a partial or the halve gate already took away.
-	maxP, baseP := e.livePool()
+	// the stage back points a partial already took away.
+	maxP, baseP := e.roundPool()
 	return e.envelope(protocol.SMsgTrackStart, protocol.TrackStartData{
 		MaxPoints:  maxP,
 		BasePoints: baseP,
@@ -1664,11 +1637,6 @@ func (e *Engine) gradeCorrect(winner *Player, elapsed int64) {
 	// elapsed is relative to trackStartMs, which a partial re-anchors.
 	maxP, baseP := e.roundPool()
 	pts := currentPointsFromPool(maxP, baseP, elapsed)
-	// Halve if one field revealed ahead of the other this round. Applied here
-	// and NOT inside roundPool, so it is applied exactly once.
-	if e.pointFactor > 0 && e.pointFactor < 1 {
-		pts = int(float64(pts) * e.pointFactor)
-	}
 	e.award(winner, pts)
 	e.cellPicker = winner.ID
 	e.roundWinner = winner.Handle // the real winner for the karaoke banner
@@ -1725,8 +1693,8 @@ func (e *Engine) gradePartial(winner *Player, elapsed int64, kind string) {
 	// Re-anchor timer with the reduced pool. Start 5001ms in the past so the
 	// hold period is already elapsed and decay begins immediately.
 	e.trackStartMs = nowMs() - 5001
-	// e.partial is already set above, so trackStartEnvelope's livePool() carries
-	// the reduced (and, if the halve gate already fired, halved) pool.
+	// e.partial is already set above, so trackStartEnvelope's roundPool()
+	// carries the reduced pool.
 	e.bcast.Broadcast(protocol.RoleStage, e.trackStartEnvelope())
 
 	// Force the graded field fully revealed on BOTH surfaces via the mask
@@ -2419,12 +2387,11 @@ func (e *Engine) startDailyDoublePerformance(performer *Player, track *Track) {
 	// checks against THIS performance's round, not the one that just ended.
 	e.refreshCurDropPoint()
 	e.ddOffer = nil
-	// trackStartEnvelope now derives its pool from livePool() (roundPool() +
-	// pointFactor), same as startTrack — reset both here for the same reason
-	// startTrack does: a stale partial/halve-gate from the round immediately
-	// before this Daily Double must not leak a wrong pool into its trackStart.
+	// trackStartEnvelope derives its pool from roundPool(), same as startTrack
+	// — reset here for the same reason startTrack does: a stale partial from
+	// the round immediately before this Daily Double must not leak a wrong
+	// pool into its trackStart.
 	e.partial = pendingPartial{}
-	e.pointFactor = 1.0
 
 	e.revealTo(protocol.RoleStage)
 	e.revealTo(protocol.RoleAdmin)
@@ -2549,13 +2516,12 @@ func (e *Engine) checkDailyDoubleComplete() {
 // returns straight to BOARD — no karaoke phase follows.
 //
 // Deliberately computes from the raw MaxPointsForRow(e.curRow), NOT through
-// roundPool()/livePool() — this is not a site the sweep-4 accessor refactor
-// missed. The crowd-rating bonus is a separate performance-multiplier
-// mechanic (scoring.go's locked doc comment: DailyDoubleMultiplier "maps an
-// average crowd star rating to the performance bonus multiplier applied to
-// the max track value"), and it is never broadcast as a projected decaying
-// pool, so there is no display-vs-award divergence for livePool to guard
-// against here.
+// roundPool() — this is not a site the sweep-4 accessor refactor missed. The
+// crowd-rating bonus is a separate performance-multiplier mechanic
+// (scoring.go's locked doc comment: DailyDoubleMultiplier "maps an average
+// crowd star rating to the performance bonus multiplier applied to the max
+// track value"), and it is never broadcast as a projected decaying pool, so
+// there is no display-vs-award divergence to guard against here.
 func (e *Engine) finishDailyDouble() {
 	performer := e.reg.players[e.cellPicker]
 	if performer != nil {
@@ -3337,7 +3303,6 @@ func (e *Engine) startReveal() {
 	}
 	e.stopRevealTimer()
 	e.revealLocked = false // fresh round: buzzing open, points live
-	e.pointFactor = 1.0    // full points until a field reveals early
 	cfg := e.revealCfg.clamp()
 	// Start in the fixed-width block phase if the block knob is set (hides the
 	// real answer length until it collapses); otherwise show the real-length
@@ -3454,17 +3419,6 @@ func (e *Engine) revealTick(rk string) {
 		e.broadcastMask()
 	}
 
-	// One-field-first gate: if EITHER field crosses its reveal gate while the
-	// OTHER is still hidden, halve the available points once — that field is
-	// essentially given away, so a guess is worth less (fire once).
-	gate := e.rc.cfg.LockoutChars
-	aGated := e.rc.artistRemaining() <= gate
-	sGated := e.rc.songRemaining() <= gate
-	if !e.rc.fieldHalved && (aGated != sGated) {
-		e.rc.fieldHalved = true
-		e.halvePoints()
-	}
-
 	// Lockout gate: once few enough letters remain hidden across BOTH fields the
 	// answer is effectively shown — close buzzing and zero the points (fire once).
 	if !e.rc.lockedOut && e.rc.remainingHidden() <= e.rc.cfg.LockoutChars {
@@ -3507,20 +3461,6 @@ func (e *Engine) lockOutReveal() {
 			e.bcast.SendTo(cid, e.envelope(protocol.SMsgBuzzResult, protocol.BuzzResultData{Won: false}))
 		}
 	}
-}
-
-// halvePoints scales the round's awardable points by 0.5 (fires once, when one
-// field reveals ahead of the other) and re-broadcasts a halved-pool trackStart
-// so the stage point timer reflects it. Does not touch buzzing — players can
-// still guess, just for half the value.
-func (e *Engine) halvePoints() {
-	if e.revealLocked {
-		return // already zeroed by the full lockout; nothing to halve
-	}
-	e.pointFactor = 0.5
-	// Halve the LIVE pool via trackStartEnvelope/livePool, not the row's: after a
-	// partial the row pool is stale and the stage would project more than we pay.
-	e.bcast.Broadcast(protocol.RoleStage, e.trackStartEnvelope())
 }
 
 // scheduleAutoKaraoke waits cfg.AutoKaraokeMs after the reveal fully completes,
@@ -3627,7 +3567,7 @@ func (e *Engine) adminViewEnvelope() protocol.ServerEnvelope {
 		av.CorrectSong = e.curTrack.Song
 		// From the live pool, so the grader sees what CORRECT will actually pay
 		// rather than the un-reduced row value.
-		maxP, baseP := e.livePool()
+		maxP, baseP := e.roundPool()
 		av.CurrentPoints = currentPointsFromPool(maxP, baseP, e.pausedAtMs)
 	}
 	if w := e.reg.players[e.buzzWinner]; w != nil {

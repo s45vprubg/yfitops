@@ -207,7 +207,17 @@ export function useGame() {
       c.on("state", (env: ServerEnvelope) => {
         const d = env.d as StateData | undefined;
         if (!d) return;
+        // s11fe-01: a visibility-triggered resync re-delivers the CURRENT state
+        // verbatim, with no real transition. The ROUND_ACTIVE branch below used
+        // to infer "fresh round" from "previous state wasn't ADJUDICATE" — true
+        // for a genuine BOARD/TRANSITION->ROUND_ACTIVE transition, but ALSO true
+        // for a same-value ROUND_ACTIVE->ROUND_ACTIVE resync repeat, which wiped
+        // judgedThisRound/buzzedAndLost for a player already locked out this
+        // round just for backgrounding and refocusing their tab. Captured here
+        // so the repeat can be told apart from a real transition below.
+        let wasAlreadySameState = false;
         setView((v) => {
+          wasAlreadySameState = v.state === d.state;
           const next: Partial<GameView> = { state: d.state };
           if (d.state === "ROUND_ACTIVE") {
             if (v.state === "ADJUDICATE" && v.wonBuzzThisRound) {
@@ -220,7 +230,7 @@ export function useGame() {
               next.buzzedAndLost = false;
               next.lockedBy = null;
               next.wonBuzzThisRound = false;
-            } else {
+            } else if (v.state !== "ROUND_ACTIVE") {
               // Fresh round (from BOARD/TRANSITION) — reset everything.
               next.buzzedAndLost = false;
               next.judgedThisRound = false;
@@ -231,6 +241,9 @@ export function useGame() {
               // buzzedAndLost now (uimobile-5).
               awaitingBuzzResult.current = false;
             }
+            // else: v.state was already ROUND_ACTIVE (resync repeat, no real
+            // transition) — leave judgedThisRound/buzzedAndLost/lockedBy/
+            // lastVerdict exactly as they are.
           }
           if (d.state === "BOARD" || d.state === "LOBBY" || d.state === "TRANSITION") {
             next.buzzedAndLost = false;
@@ -265,17 +278,25 @@ export function useGame() {
           }
           // s8uim-02: entering BOARD/KARAOKE opens the settling window;
           // leaving either closes it immediately (nothing to bridge).
-          next.pickerSettling = d.state === "BOARD" || d.state === "KARAOKE";
+          // s11fe-02: a resync repeat of the SAME BOARD/KARAOKE phase must not
+          // re-open it — that re-triggers the settling flash (and the timer
+          // rearm below) on every tab refocus with nothing having changed.
+          if (d.state === "BOARD" || d.state === "KARAOKE") {
+            if (!wasAlreadySameState) next.pickerSettling = true;
+          } else {
+            next.pickerSettling = false;
+          }
           return { ...v, ...next };
         });
         // Always replace any pending settle timer with a fresh decision for
         // the NEW state — a rapid state-to-state hop must not let a stale
-        // timer from the previous phase clear pickerSettling late.
+        // timer from the previous phase clear pickerSettling late. Skipped on
+        // a resync repeat of the same phase (s11fe-02) — nothing to bridge.
         if (pickerSettleTimerRef.current) {
           clearTimeout(pickerSettleTimerRef.current);
           pickerSettleTimerRef.current = null;
         }
-        if (d.state === "BOARD" || d.state === "KARAOKE") {
+        if ((d.state === "BOARD" || d.state === "KARAOKE") && !wasAlreadySameState) {
           pickerSettleTimerRef.current = setTimeout(() => {
             pickerSettleTimerRef.current = null;
             patch({ pickerSettling: false });
@@ -626,6 +647,28 @@ export function useGame() {
       if (pickerSettleTimerRef.current) clearTimeout(pickerSettleTimerRef.current);
       void clientRef.current?.close();
     };
+  }, []);
+
+  // Returning to a backgrounded tab never otherwise triggers a resync: a
+  // live connection can sit through a one-shot broadcast (e.g. pickerStatus)
+  // while hidden/throttled and never notice it missed anything, and a
+  // stalled reconnect backoff timer is subject to the same background-tab
+  // throttling. Force a resync (if connected) or an immediate reconnect
+  // attempt (if a backoff is pending) the moment the tab becomes visible.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      const c = clientRef.current;
+      if (c) {
+        void c.send({ t: "resync" }).catch(() => {});
+      } else if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+        establishRef.current(handleRef.current, true);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
   }, []);
 
   return { view, connect, buzz, vote, rate, ddDecide, ddChoose, selectCell };

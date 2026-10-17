@@ -352,6 +352,19 @@ export function useAdmin(): [AdminState, AdminActions] {
     c.send({ t, d }).catch(() => {});
   }, []);
 
+  // Returning to a backgrounded tab never otherwise triggers a resync: a
+  // live connection can sit through a one-shot broadcast while hidden/
+  // throttled and never notice it missed anything. Admin has no
+  // auto-reconnect (a drop requires manually re-entering the secret, by
+  // design), so this only covers the still-connected case.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === "visible") sendAction("resync");
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [sendAction]);
+
   const actions: AdminActions = {
     login,
     logout,

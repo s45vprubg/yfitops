@@ -31,7 +31,7 @@ export function useQrDataUrl(text: string, size: number) {
 export default function CornerJoin() {
   const qr = useQrDataUrl(JOIN_URL, 160);
   return (
-    <div className="fixed bottom-5 right-5 z-40 flex items-center gap-3 rounded-lg border border-neon-green/30 bg-panel/80 p-2 backdrop-blur">
+    <div className="fixed top-5 right-5 z-40 flex items-center gap-3 rounded-lg border border-neon-green/30 bg-panel/80 p-2 backdrop-blur">
       {qr ? (
         <img src={qr} alt="join QR" className="h-16 w-16 rounded" />
       ) : (

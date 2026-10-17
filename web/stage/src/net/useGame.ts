@@ -512,10 +512,29 @@ export function useGame() {
       }
     };
 
+    // Returning to a backgrounded tab never otherwise triggers a resync: a
+    // live connection can sit through a one-shot broadcast while hidden/
+    // throttled and never notice it missed anything, and a stalled
+    // reconnect backoff timer is subject to the same background-tab
+    // throttling. Force a resync (if connected) or an immediate reconnect
+    // attempt (if a backoff is pending) the moment the tab becomes visible.
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      if (connectedRef.current) {
+        safeSend({ t: "resync" });
+      } else if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+        void establish();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+
     void establish();
 
     return () => {
       disposed = true;
+      document.removeEventListener("visibilitychange", onVisible);
       if (reconnectTimer !== null) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;

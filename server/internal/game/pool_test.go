@@ -7,12 +7,11 @@ import (
 	"github.com/s45vprubg/yfitops/server/internal/protocol"
 )
 
-// pool_test.go pins the QA-sweep4 fix for s4-se-1 / s4-se-new-1 / s4-se-new-2 /
-// s4-se-new-3: the pool we put on the wire (or show the admin) must be the LIVE
-// pool — partial-aware and pointFactor-aware — so the number the stage projects
-// at 60fps is the number gradeCorrect actually pays (§5, BUILD_CONTRACT rule 6).
-// Every case here FAILS with the old row-derived pools (95/140/190 projected
-// against 70/70/140 awarded).
+// pool_test.go pins the QA-sweep4 fix for s4-se-1 / s4-se-new-2 / s4-se-new-3:
+// the pool we put on the wire (or show the admin) must be the LIVE, partial-
+// aware pool, so the number the stage projects at 60fps is the number
+// gradeCorrect actually pays (§5, BUILD_CONTRACT rule 6). Every case here
+// FAILS with the old row-derived pools.
 
 // poolElapsedMs is the guess time every scenario grades at: 10s past the
 // (re-anchored) trackStart, i.e. well into the decay ramp.
@@ -88,23 +87,9 @@ func (h *harness) gradePartialKind(adminConn, kind string) {
 	h.sync(func() {})
 }
 
-// forceHalveGate fully reveals the artist and ticks once, which trips the
-// one-field-first gate (revealTick -> halvePoints, pointFactor 0.5).
-func (h *harness) forceHalveGate(t *testing.T) {
-	t.Helper()
-	h.sync(func() {
-		h.e.rc.artistRevealed = len(h.e.rc.artistOrder)
-		h.e.revealTick(h.e.rc.roundKey)
-		if !h.e.rc.fieldHalved || h.e.pointFactor != 0.5 {
-			t.Fatalf("halve gate did not fire: fieldHalved=%v pointFactor=%v", h.e.rc.fieldHalved, h.e.pointFactor)
-		}
-	})
-}
-
-// TestPool_ProjectedMatchesAwarded drives the real engine through each ordering
-// of the two pool reducers (partial, one-field-first halve) on row 5 (max 200,
-// base 100) and asserts that the stage's last trackStart pool projects EXACTLY
-// the points gradeCorrect then awards.
+// TestPool_ProjectedMatchesAwarded drives the real engine through the partial
+// pool reducer on row 5 (max 200, base 100) and asserts that the stage's last
+// trackStart pool projects EXACTLY the points gradeCorrect then awards.
 func TestPool_ProjectedMatchesAwarded(t *testing.T) {
 	cases := []struct {
 		name string
@@ -117,32 +102,6 @@ func TestPool_ProjectedMatchesAwarded(t *testing.T) {
 		wantAwarded   int
 	}{
 		{
-			// s4-se-1: partial takes 50 (pool 150/50), then the halve gate
-			// fires. Old code broadcast the ROW halved (100/50) -> projected 95.
-			name: "partial then halve",
-			arrange: func(t *testing.T, h *harness) {
-				h.buzzMobile("c1")
-				h.gradePartialKind("admin", "artist")
-				h.forceHalveGate(t)
-			},
-			wantMax: 75, wantBase: 25, wantProjected: 70, wantAwarded: 70,
-		},
-		{
-			// s4-se-new-1(i): halve gate first, then a partial. Old code
-			// broadcast the UN-halved post-partial pool (150/50) -> projected
-			// 140, and the displayed pool visibly jumped UP after the partial.
-			name: "halve then partial",
-			arrange: func(t *testing.T, h *harness) {
-				h.forceHalveGate(t)
-				if ts := lastStageTrackStart(t, h.bcast); ts.MaxPoints != 100 || ts.BasePoints != 50 {
-					t.Fatalf("halved row pool = {%d,%d}, want {100,50}", ts.MaxPoints, ts.BasePoints)
-				}
-				h.buzzMobile("c1")
-				h.gradePartialKind("admin", "song")
-			},
-			wantMax: 75, wantBase: 25, wantProjected: 70, wantAwarded: 70,
-		},
-		{
 			// s4-se-new-2: a partial, then any INCORRECT guess. gradeIncorrect
 			// -> resumeAudio -> trackStartEnvelope used to hand the FULL row
 			// pool back (200/100) -> projected 190 against an award of 140.
@@ -152,6 +111,19 @@ func TestPool_ProjectedMatchesAwarded(t *testing.T) {
 				h.gradePartialKind("admin", "artist")
 				h.buzzMobile("c2")
 				h.grade("admin", protocol.VerdictIncorrect)
+			},
+			wantMax: 150, wantBase: 50, wantProjected: 140, wantAwarded: 140,
+		},
+		{
+			// A fully correct guess after a partial must pay the FULL
+			// (unhalved) live pool: the one-field-first halve gate was
+			// removed (it silently paid 50% of a fully correct guess,
+			// contradicting the "fully correct earns all available points"
+			// rule) and must not resurface here.
+			name: "partial then correct",
+			arrange: func(t *testing.T, h *harness) {
+				h.buzzMobile("c1")
+				h.gradePartialKind("admin", "artist")
 			},
 			wantMax: 150, wantBase: 50, wantProjected: 140, wantAwarded: 140,
 		},
@@ -265,38 +237,108 @@ func TestPool_AdminReadoutMatchesAward(t *testing.T) {
 	}
 }
 
-// TestPool_LivePoolNeverInverts: livePool must never return base > max, because
-// web/shared/scoring.ts computes bonus = max - base and would ramp UP from a
-// negative bonus. Not reachable today (a post-partial remaining is >= 50 = the
-// post-partial base, and both ends scale by the same factor) — this pins the
-// clamp so a future reducer cannot leak an inverted pool onto the wire.
+// TestPool_LivePoolNeverInverts: roundPool must never return base > max,
+// because web/shared/scoring.ts computes bonus = max - base and would ramp UP
+// from a negative bonus. Not reachable today (a post-partial remaining is
+// always >= 50 = the post-partial base) — this pins the clamp so a future
+// reducer cannot leak an inverted pool onto the wire.
 func TestPool_LivePoolNeverInverts(t *testing.T) {
 	cases := []struct {
 		name    string
 		row     int
 		partial pendingPartial
-		factor  float64
 		wantMax int
 		wantBse int
 	}{
-		{"row 1 fresh", 1, pendingPartial{}, 1.0, 100, 100},
-		{"row 5 fresh", 5, pendingPartial{}, 1.0, 200, 100},
-		{"row 5 halved", 5, pendingPartial{}, 0.5, 100, 50},
-		{"row 5 post-partial", 5, pendingPartial{active: true, remaining: 150}, 1.0, 150, 50},
-		{"row 5 post-partial halved", 5, pendingPartial{active: true, remaining: 150}, 0.5, 75, 25},
-		{"drained pool clamps base", 5, pendingPartial{active: true, remaining: 0}, 1.0, 0, 0},
-		{"drained pool clamps base, halved", 5, pendingPartial{active: true, remaining: 10}, 0.5, 5, 5},
+		{"row 1 fresh", 1, pendingPartial{}, 100, 100},
+		{"row 5 fresh", 5, pendingPartial{}, 200, 100},
+		{"row 5 post-partial", 5, pendingPartial{active: true, remaining: 150}, 150, 50},
+		{"drained pool clamps base", 5, pendingPartial{active: true, remaining: 0}, 0, 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			e := &Engine{curRow: c.row, partial: c.partial, pointFactor: c.factor}
-			maxP, baseP := e.livePool()
+			e := &Engine{curRow: c.row, partial: c.partial}
+			maxP, baseP := e.roundPool()
 			if maxP != c.wantMax || baseP != c.wantBse {
-				t.Errorf("livePool() = (%d, %d), want (%d, %d)", maxP, baseP, c.wantMax, c.wantBse)
+				t.Errorf("roundPool() = (%d, %d), want (%d, %d)", maxP, baseP, c.wantMax, c.wantBse)
 			}
 			if baseP > maxP {
 				t.Errorf("inverted pool: base %d > max %d", baseP, maxP)
 			}
 		})
+	}
+}
+
+// TestPool_AsymmetricRevealDoesNotHalve: s11-engine-delta-01. The one-field-
+// first halve gate (pointFactor) was removed from revealTick because it
+// silently paid half of a fully-correct guess, contradicting "fully correct
+// earns all available points." This drives the exact asymmetric-reveal
+// condition that used to trip it (artist fully revealed, song still mostly
+// hidden) and pins that the pool, and the final payout, are unaffected.
+func TestPool_AsymmetricRevealDoesNotHalve(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.joinStage("stage")
+	p1 := h.join("c1", "fp1", "alice")
+	h.selectCell("admin", 5, 1) // row 5: max 200, base 100
+	h.sync(func() { h.e.trackStartMs = nowMs() })
+
+	h.sync(func() {
+		h.e.rc.artistRevealed = len(h.e.rc.artistOrder)
+		h.e.revealTick(h.e.rc.roundKey)
+	})
+
+	// The lockout gate must NOT have fired: the song is still almost fully
+	// hidden, so remainingHidden() is far above LockoutChars.
+	h.sync(func() {
+		if h.e.revealLocked {
+			t.Fatalf("lockout gate fired on a one-sided reveal; song still mostly hidden")
+		}
+	})
+
+	ts := lastStageTrackStart(t, h.bcast)
+	if ts.MaxPoints != 200 || ts.BasePoints != 100 {
+		t.Errorf("pool after one-sided reveal = {max:%d base:%d}, want {max:200 base:100} (no halving)",
+			ts.MaxPoints, ts.BasePoints)
+	}
+
+	h.sync(func() { h.e.trackStartMs = nowMs() - poolElapsedMs })
+	h.buzzMobile("c1")
+	h.grade("admin", protocol.VerdictCorrect)
+	wantAwarded := currentPointsFromPool(200, 100, poolElapsedMs)
+	if awarded := h.score(p1); awarded != wantAwarded {
+		t.Errorf("awarded = %d, want %d (full pool, no halving)", awarded, wantAwarded)
+	}
+}
+
+// TestPool_LockoutGateStillFiresWithoutHalveGate: s11-engine-delta-01. The
+// lockout gate sits in the same function as the deleted halve gate; confirm
+// it still fires on its own, unrelated trigger condition (both fields nearly
+// fully revealed) now that its neighbor is gone.
+func TestPool_LockoutGateStillFiresWithoutHalveGate(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.joinStage("stage")
+	h.join("c1", "fp1", "alice")
+	h.selectCell("admin", 5, 1)
+	h.sync(func() { h.e.trackStartMs = nowMs() })
+
+	h.sync(func() {
+		h.e.rc.artistRevealed = len(h.e.rc.artistOrder)
+		h.e.rc.songRevealed = len(h.e.rc.songOrder)
+		h.e.revealTick(h.e.rc.roundKey)
+	})
+
+	h.sync(func() {
+		if !h.e.revealLocked {
+			t.Fatalf("lockout gate did not fire with both fields fully revealed")
+		}
+	})
+
+	ts := lastStageTrackStart(t, h.bcast)
+	if ts.MaxPoints != 0 || ts.BasePoints != 0 {
+		t.Errorf("post-lockout pool = {max:%d base:%d}, want {0,0}", ts.MaxPoints, ts.BasePoints)
 	}
 }

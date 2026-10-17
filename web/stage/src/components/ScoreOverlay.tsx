@@ -1,5 +1,5 @@
 // ScoreOverlay — a compact persistent standings panel for the projector,
-// pinned bottom-left. Shown during the board/round flow so the room always sees
+// pinned top-left. Shown during the board/round flow so the room always sees
 // scores without waiting for GAME_OVER. Handles + scores only.
 
 import type { ScoreboardData } from "@shared/protocol";
@@ -9,7 +9,7 @@ export default function ScoreOverlay({ scoreboard }: { scoreboard: ScoreboardDat
   if (players.length === 0) return null;
 
   return (
-    <div className="fixed bottom-4 left-4 z-30 w-64 rounded-lg border border-neon-cyan/25 bg-panel/80 p-3 backdrop-blur-sm">
+    <div className="fixed top-4 left-4 z-30 w-64 rounded-lg border border-neon-cyan/25 bg-panel/80 p-3 backdrop-blur-sm">
       <div className="mb-2 text-center text-[10px] uppercase tracking-[0.4em] text-neon-cyan/50">
         scores
       </div>
