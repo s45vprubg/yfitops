@@ -17,6 +17,12 @@ export const HTTP_URL = import.meta.env.VITE_HTTP_URL ?? `http://${host}:8777`;
 export async function fetchCertHash(): Promise<
   { algorithm: "sha-256"; value: Uint8Array }[] | undefined
 > {
+  // The server deliberately never registers /cert-hash when running a real
+  // CA cert (main.go: pinning via serverCertificateHashes requires a <=14-day
+  // cert, which a 90+ day CA cert fails) — only the dev self-signed cert ever
+  // needs this. Skip the request entirely once talking to an https backend,
+  // instead of eating a guaranteed 404 on every single login.
+  if (HTTP_URL.startsWith("https://")) return undefined;
   try {
     const res = await fetch(`${HTTP_URL}/cert-hash`, { cache: "no-store" });
     if (!res.ok) return undefined;
