@@ -12,6 +12,7 @@ import ActiveRound from "./views/ActiveRound";
 import Karaoke from "./views/Karaoke";
 import DailyDoublePerformance from "./views/DailyDoublePerformance";
 import DailyDoubleWaiting from "./views/DailyDoubleWaiting";
+import SoloKaraokeView from "./views/SoloKaraokeView";
 
 // States where the persistent corner scoreboard is shown. Excludes LOBBY
 // (its own big view), KARAOKE and GAME_OVER (which show scores prominently).
@@ -63,6 +64,21 @@ export default function StageApp() {
   );
 
   function renderView() {
+    // Solo Karaoke is a second, independent mode orthogonal to the trivia
+    // GameState machine — the server's mode-lock keeps `state` pinned on
+    // LOBBY/GAME_OVER for as long as it's active, so this check must come
+    // ahead of (not as a case inside) the GameState switch below.
+    if (view.soloKaraokeActive) {
+      return (
+        <SoloKaraokeView
+          nowPlaying={view.soloKaraokeNowPlaying}
+          lyrics={view.lyrics}
+          lyricsStatus={view.soloKaraokeLyricsStatus}
+          audio={audio}
+        />
+      );
+    }
+
     switch (view.state) {
       case "LOBBY":
         return <Lobby scoreboard={view.scoreboard} />;

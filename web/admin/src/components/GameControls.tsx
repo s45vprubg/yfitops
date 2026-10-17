@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { GameState } from "@shared/protocol";
+import type { GameState, ModeLockData } from "@shared/protocol";
 import type { AdminActions, ConnStatus, PlaybackPosition } from "../useAdmin";
 import { PLAYING_STATES } from "../useAdmin";
 import { createAdminApi } from "../useAdminApi";
@@ -15,6 +15,11 @@ interface Props {
   adminSecret: string;
   spotifyConnected: boolean;
   playback?: PlaybackPosition;
+  // "none" | "trivia" | "solo_karaoke" — Start Game is rejected server-side
+  // (and disabled here) while Solo Karaoke owns the lock. Not local/per-tab
+  // state: multiple admin tabs can be open at once and must stay in sync
+  // purely off this broadcast.
+  modeLock?: ModeLockData["owner"];
 }
 
 function formatMs(ms: number): string {
@@ -37,8 +42,12 @@ function interpolatePosition(playback: PlaybackPosition): number {
 // server's discrete playbackPosition snapshots (positionMs + receivedAtMs)
 // the same way ActiveRound.tsx's point timer interpolates from a startTime
 // anchor via requestAnimationFrame, rather than storing a continuously
-// ticking number in state.
-function Scrubber({
+// ticking number in state. Exported: Solo Karaoke's Player reuses this
+// unmodified (the same "playbackPosition" broadcast feeds both modes —
+// engine.go's broadcastPlaybackPosition branches internally on
+// soloKaraoke.active but emits the identical shape either way), wired to
+// actions.soloKaraokeSeek instead of actions.seek.
+export function Scrubber({
   playback,
   onSeek,
 }: {
@@ -132,6 +141,7 @@ export default function GameControls({
   adminSecret,
   spotifyConnected,
   playback,
+  modeLock,
 }: Props) {
   const { confirm } = useModal();
   const api = useMemo(() => createAdminApi(adminSecret), [adminSecret]);
@@ -283,8 +293,14 @@ export default function GameControls({
       ) : gameState === "LOBBY" ? (
         <button
           onClick={handleStartGame}
-          disabled={!spotifyConnected}
-          title={spotifyConnected ? undefined : "Connect Spotify before starting"}
+          disabled={!spotifyConnected || modeLock === "solo_karaoke"}
+          title={
+            modeLock === "solo_karaoke"
+              ? "Solo Karaoke is active — stop it from the Karaoke tab first"
+              : spotifyConnected
+                ? undefined
+                : "Connect Spotify before starting"
+          }
           className="rounded border border-green-600 bg-green-950/50 px-3 py-1.5 text-xs font-bold uppercase text-green-300 hover:bg-green-900/60 disabled:pointer-events-none disabled:opacity-30"
         >
           Start Game

@@ -16,9 +16,15 @@ import type {
   DailyDoubleResultData,
   ErrorData,
   GameState,
+  ModeLockData,
   PickerStatusData,
   ScoreboardData,
   ServerEnvelope,
+  SoloKaraokeNowPlayingData,
+  SoloKaraokePlayData,
+  SoloKaraokeSeekData,
+  SoloKaraokeSetRepeatData,
+  SoloKaraokeSetShuffleData,
   TelemetryData,
   WelcomeData,
 } from "@shared/protocol";
@@ -96,6 +102,14 @@ export interface AdminState {
   // slider reflects truth on connect/reconnect rather than assuming a
   // default. Also the level the Daily Double fade-out restores to.
   volumePct?: number;
+  // Which mode currently owns playback — "none" | "trivia" | "solo_karaoke".
+  // Every open /admin tab's Start Game button AND the Karaoke tab's Play
+  // button must disable off this server broadcast, not local/per-tab state
+  // (navigation/tab close is not a reliable release signal).
+  modeLock?: ModeLockData["owner"];
+  // Full Solo Karaoke now-playing metadata (admin isn't sanitization-gated).
+  // index === -1 means nothing is loaded.
+  soloKaraokeNowPlaying?: SoloKaraokeNowPlayingData;
   nonce: number;
 }
 
@@ -119,6 +133,17 @@ export interface AdminActions {
   setThresh: (percent: number) => void;
   setRevealCfg: (cfg: AdminSetRevealCfgData) => void;
   endGame: () => void;
+  // Solo Karaoke transport. setVolume above is reused unmodified (one
+  // physical volume knob shared by both modes) — not duplicated here.
+  soloKaraokePlay: (trackId?: string) => void;
+  soloKaraokePause: () => void;
+  soloKaraokeResume: () => void;
+  soloKaraokeStop: () => void;
+  soloKaraokeNext: () => void;
+  soloKaraokePrev: () => void;
+  soloKaraokeSeek: (positionMs: number) => void;
+  soloKaraokeSetShuffle: (shuffle: boolean) => void;
+  soloKaraokeSetRepeat: (repeat: SoloKaraokeSetRepeatData["repeat"]) => void;
 }
 
 const initial: AdminState = {
@@ -197,6 +222,12 @@ export function useAdmin(): [AdminState, AdminActions] {
       });
       client.on("volumeStatus", (env: ServerEnvelope) => {
         patch({ volumePct: (env.d as { percent: number }).percent });
+      });
+      client.on("modeLock", (env: ServerEnvelope) => {
+        patch({ modeLock: (env.d as ModeLockData).owner });
+      });
+      client.on("soloKaraokeNowPlaying", (env: ServerEnvelope) => {
+        patch({ soloKaraokeNowPlaying: env.d as SoloKaraokeNowPlayingData });
       });
       client.on("pickerStatus", (env: ServerEnvelope) => {
         patch({ pickerStatus: env.d as PickerStatusData });
@@ -338,6 +369,20 @@ export function useAdmin(): [AdminState, AdminActions] {
     setRevealCfg: (cfg) =>
       sendAction<AdminSetRevealCfgData>("admin.setRevealCfg", cfg),
     endGame: () => sendAction("admin.endGame"),
+    // "" = play current/first (SoloKaraokePlayData.trackId; see protocol.ts).
+    soloKaraokePlay: (trackId) =>
+      sendAction<SoloKaraokePlayData>("admin.soloKaraoke.play", { trackId: trackId ?? "" }),
+    soloKaraokePause: () => sendAction("admin.soloKaraoke.pause"),
+    soloKaraokeResume: () => sendAction("admin.soloKaraoke.resume"),
+    soloKaraokeStop: () => sendAction("admin.soloKaraoke.stop"),
+    soloKaraokeNext: () => sendAction("admin.soloKaraoke.next"),
+    soloKaraokePrev: () => sendAction("admin.soloKaraoke.prev"),
+    soloKaraokeSeek: (positionMs) =>
+      sendAction<SoloKaraokeSeekData>("admin.soloKaraoke.seek", { positionMs }),
+    soloKaraokeSetShuffle: (shuffle) =>
+      sendAction<SoloKaraokeSetShuffleData>("admin.soloKaraoke.setShuffle", { shuffle }),
+    soloKaraokeSetRepeat: (repeat) =>
+      sendAction<SoloKaraokeSetRepeatData>("admin.soloKaraoke.setRepeat", { repeat }),
   };
 
   return [state, actions];

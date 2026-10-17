@@ -24,9 +24,24 @@ interface Props {
   // Daily Double performance view, which reuses this component's lyric-sync
   // engine wholesale.
   label?: string;
+  // Suppresses the winner/guesser banner entirely — used by Solo Karaoke,
+  // which has no buzzing/winner concept at all (unlike Daily Double, which
+  // still has a performer to label via `label`). Defaults to false, which
+  // preserves the exact trivia-karaoke rendering.
+  hideBanner?: boolean;
 }
 
-export default function Karaoke({ reveal, lyrics, lyricsStatus, lockoutHandle, roundWinner, gameState, audio, label }: Props) {
+export default function Karaoke({
+  reveal,
+  lyrics,
+  lyricsStatus,
+  lockoutHandle,
+  roundWinner,
+  gameState,
+  audio,
+  label,
+  hideBanner,
+}: Props) {
   const [activeIdx, setActiveIdx] = useState(-1);
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -85,7 +100,7 @@ export default function Karaoke({ reveal, lyrics, lyricsStatus, lockoutHandle, r
   return (
     <div className="flex h-full w-full flex-col">
       {/* Guesser/Winner banner */}
-      {(bannerName || nobodyWon) && (
+      {!hideBanner && (bannerName || nobodyWon) && (
         <div className="flex flex-col items-center pt-8">
           <div className="text-sm uppercase tracking-[0.5em] text-neon-amber/70">
             {label ?? (isAdjudicating ? "now guessing" : "winner")}

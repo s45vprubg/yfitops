@@ -263,7 +263,8 @@ func main() {
 	if pr, ok := repo.(*store.PostgresRepo); ok {
 		spotifyAdapter := &admin.SpotifyAdapter{Client: audio}
 		adminHandler := admin.NewHandler(pr, spotifyAdapter, eng, cfg.AdminSecret)
-		adminHandler.SetLyricsProber(lyr) // probe synced-lyric availability on add/import
+		adminHandler.SetLyricsProber(lyr)        // probe synced-lyric availability on add/import
+		adminHandler.SetSoloKaraokeReloader(eng) // keep the engine's live SK queue in sync with Postgres
 		// Optional AI board builder (Gemini). Disabled if GEMINI_API_KEY absent.
 		if gc := ai.New(os.Getenv("GEMINI_API_KEY"), os.Getenv("GEMINI_MODEL")); gc != nil {
 			adminHandler.SetCategorizer(&geminiAdapter{c: gc})

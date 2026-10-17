@@ -1,13 +1,33 @@
 import { Draggable } from "@hello-pangea/dnd";
-import type { TrackData } from "../../useAdminApi";
+import type { LyricsStatus } from "../../useAdminApi";
 
-interface Props {
-  track: TrackData;
+// Generalized to any track carrying the lyrics-flagging fields — used by
+// both Board Builder (TrackData, which has a real admin override) and Solo
+// Karaoke (SoloKaraokeTrack, which has no override concept since its lyrics
+// gating is purely informational/soft — see solokaraoke_types.go). Structural
+// typing means both existing concrete types satisfy this without changes.
+export interface LyricsFlaggedTrack {
+  id: string;
+  song: string;
+  artist: string;
+  albumArt: string;
+  lyricsStatus: LyricsStatus;
+  lyricsOverride?: boolean;
+}
+
+// Generic over the concrete track type (rather than widening every caller's
+// callback to accept a bare LyricsFlaggedTrack) so a Board Builder call site
+// still gets a TrackData back in onOpenManualLyrics, and a Solo Karaoke call
+// site gets a SoloKaraokeTrack back — avoids a strictFunctionTypes
+// contravariance error on the callback props that a single non-generic
+// LyricsFlaggedTrack parameter type would otherwise cause.
+interface Props<T extends LyricsFlaggedTrack> {
+  track: T;
   index: number;
   onDelete?: (trackId: string) => void;
   onToggleOverride?: (trackId: string, override: boolean) => void;
   onRequeryLyrics?: (trackId: string) => void;
-  onOpenManualLyrics?: (track: TrackData) => void;
+  onOpenManualLyrics?: (track: T) => void;
   requeryingLyrics?: boolean;
 }
 
@@ -15,23 +35,23 @@ interface Props {
 // lyrics AND the admin hasn't overridden it. lyricsStatus === "" means never
 // attempted (treated as playable until a check is run); "pending"/"not_found"
 // means a check WAS run and came back without usable lyrics.
-function needsLyrics(t: TrackData): boolean {
+function needsLyrics(t: LyricsFlaggedTrack): boolean {
   return t.lyricsStatus === "pending" || t.lyricsStatus === "not_found";
 }
 
-function statusLabel(t: TrackData): string {
+function statusLabel(t: LyricsFlaggedTrack): string {
   if (t.lyricsStatus === "pending") return "⏳ check failed";
   if (t.lyricsStatus === "not_found") return "⚠ no lyrics";
   return "";
 }
 
-function statusTitle(t: TrackData): string | undefined {
+function statusTitle(t: LyricsFlaggedTrack): string | undefined {
   if (t.lyricsStatus === "pending") return "The last lyrics check errored (timeout/rate limit) — use Requery to try again.";
   if (t.lyricsStatus === "not_found") return "No synced lyrics — won't play unless overridden";
   return undefined;
 }
 
-export default function TrackCard({
+export default function TrackCard<T extends LyricsFlaggedTrack>({
   track,
   index,
   onDelete,
@@ -39,7 +59,7 @@ export default function TrackCard({
   onRequeryLyrics,
   onOpenManualLyrics,
   requeryingLyrics,
-}: Props) {
+}: Props<T>) {
   const lyricLess = needsLyrics(track);
   const dimmed = lyricLess && !track.lyricsOverride;
 
@@ -67,21 +87,34 @@ export default function TrackCard({
 
           {lyricLess && (
             <div className="flex shrink-0 items-center gap-1">
-              <button
-                onClick={(e) => { e.stopPropagation(); onToggleOverride?.(track.id, !track.lyricsOverride); }}
-                className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
-                  track.lyricsOverride
-                    ? "bg-amber-500/20 text-amber-300"
-                    : "border border-amber-700/60 text-amber-400/80 hover:bg-amber-950/40"
-                }`}
-                title={
-                  track.lyricsOverride
-                    ? "Playing despite no lyrics — click to disable"
-                    : "No synced lyrics. Click to allow playing anyway (no karaoke)."
-                }
-              >
-                {track.lyricsOverride ? "♪ playing" : statusLabel(track)}
-              </button>
+              {/* Override toggle only exists where the caller wires it
+                  (Board Builder's TrackData has a real admin-override field).
+                  Solo Karaoke's gating is soft with no override concept, so
+                  this renders as a plain non-interactive status badge there. */}
+              {onToggleOverride ? (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onToggleOverride(track.id, !track.lyricsOverride); }}
+                  className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase ${
+                    track.lyricsOverride
+                      ? "bg-amber-500/20 text-amber-300"
+                      : "border border-amber-700/60 text-amber-400/80 hover:bg-amber-950/40"
+                  }`}
+                  title={
+                    track.lyricsOverride
+                      ? "Playing despite no lyrics — click to disable"
+                      : "No synced lyrics. Click to allow playing anyway (no karaoke)."
+                  }
+                >
+                  {track.lyricsOverride ? "♪ playing" : statusLabel(track)}
+                </button>
+              ) : (
+                <span
+                  className="rounded border border-amber-700/60 px-1.5 py-0.5 text-[10px] font-bold uppercase text-amber-400/80"
+                  title={statusTitle(track)}
+                >
+                  {statusLabel(track)}
+                </span>
+              )}
               {onRequeryLyrics && (
                 <button
                   onClick={(e) => { e.stopPropagation(); onRequeryLyrics(track.id); }}

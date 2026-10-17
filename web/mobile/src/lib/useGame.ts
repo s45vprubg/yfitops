@@ -21,6 +21,7 @@ import type {
   PickerStatusData,
   BoardData,
   PlayerSelectCellData,
+  SoloKaraokeActiveData,
 } from "@shared/protocol";
 import { WT_URL, WS_URL } from "./env";
 import { fetchCertHashes } from "./cert";
@@ -92,6 +93,11 @@ export interface GameView {
   // (non-picker) screen. App.tsx renders a neutral loading state instead
   // while this is true.
   pickerSettling: boolean;
+  // Solo Karaoke mode-lock flag (§4A): the ONLY Solo Karaoke signal mobile
+  // ever receives is this bare boolean — no track title/artist/uri/lyrics.
+  // When true, App.tsx short-circuits to the idle screen before the
+  // GameState switch runs.
+  soloKaraoke: boolean;
 }
 
 const HEARTBEAT_MS = 2000;
@@ -128,6 +134,7 @@ const INITIAL: GameView = {
   pickerStatus: null,
   pickableBoard: null,
   pickerSettling: false,
+  soloKaraoke: false,
 };
 
 export function useGame() {
@@ -375,6 +382,13 @@ export function useGame() {
       c.on("pickableBoard", (env: ServerEnvelope) => {
         const d = env.d as BoardData | undefined;
         if (d) patch({ pickableBoard: d });
+      });
+
+      // Solo Karaoke mode-lock flag (§4A) — a bare boolean, zero track
+      // metadata. This is the only Solo Karaoke broadcast mobile listens for.
+      c.on("soloKaraokeActive", (env: ServerEnvelope) => {
+        const d = env.d as SoloKaraokeActiveData | undefined;
+        if (d) patch({ soloKaraoke: d.active });
       });
 
       c.on("heartbeat", () => {

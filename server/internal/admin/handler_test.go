@@ -13,11 +13,13 @@ import (
 
 // mockStore is a minimal AdminStore for handler tests.
 type mockStore struct {
-	boards   []Board
-	tracks   []Track
-	ddTracks []DailyDoubleTrack
-	layout   *Layout
-	created  []string
+	boards     []Board
+	tracks     []Track
+	ddTracks   []DailyDoubleTrack
+	skLibrary  []SoloKaraokeTrack
+	skPlaylist []SoloKaraokeTrack
+	layout     *Layout
+	created    []string
 	// lyrics is the mock's global lyrics cache, keyed by spotifyUri — mirrors
 	// the real track_lyrics table closely enough for handler-level tests.
 	lyrics map[string]LyricsRecord
@@ -28,7 +30,7 @@ func (m *mockStore) CreateBoard(_ context.Context, id, name string) error {
 	m.boards = append(m.boards, Board{ID: id, Name: name, Cols: 1})
 	return nil
 }
-func (m *mockStore) ListBoards(_ context.Context) ([]Board, error)   { return m.boards, nil }
+func (m *mockStore) ListBoards(_ context.Context) ([]Board, error) { return m.boards, nil }
 func (m *mockStore) GetBoard(_ context.Context, id string) (*Board, error) {
 	for i := range m.boards {
 		if m.boards[i].ID == id {
@@ -37,10 +39,11 @@ func (m *mockStore) GetBoard(_ context.Context, id string) (*Board, error) {
 	}
 	return nil, nil
 }
-func (m *mockStore) RenameBoard(_ context.Context, _, _ string) error  { return nil }
-func (m *mockStore) DeleteBoard(_ context.Context, _ string) error     { return nil }
-func (m *mockStore) UpdateBoardCols(_ context.Context, _ string, _ int) error { return nil }
+func (m *mockStore) RenameBoard(_ context.Context, _, _ string) error             { return nil }
+func (m *mockStore) DeleteBoard(_ context.Context, _ string) error                { return nil }
+func (m *mockStore) UpdateBoardCols(_ context.Context, _ string, _ int) error     { return nil }
 func (m *mockStore) SetDailyDoubleCount(_ context.Context, _ string, _ int) error { return nil }
+
 // AddDailyDoubleTrack mirrors the fixed Postgres behavior: a duplicate
 // (boardID, spotifyUri) pair is a no-op that reports ErrDailyDoubleTrackExists
 // instead of silently appending a second, unpersisted-looking row (dd-api-1).
@@ -148,14 +151,14 @@ func (m *mockStore) UpsertLyricsError(_ context.Context, spotifyURI, errMsg stri
 	m.lyrics[spotifyURI] = rec
 	return nil
 }
-func (m *mockStore) AddColumn(_ context.Context, _ string, _ int, _ string) error { return nil }
-func (m *mockStore) RemoveColumn(_ context.Context, _ string, _ int) error { return nil }
+func (m *mockStore) AddColumn(_ context.Context, _ string, _ int, _ string) error      { return nil }
+func (m *mockStore) RemoveColumn(_ context.Context, _ string, _ int) error             { return nil }
 func (m *mockStore) RenameCategory(_ context.Context, _ string, _ int, _ string) error { return nil }
 func (m *mockStore) PlaceTrack(_ context.Context, _ string, _, _ int, _ string, _ int) error {
 	return nil
 }
 func (m *mockStore) UnplaceTrack(_ context.Context, _ string, _, _ int, _ string) error { return nil }
-func (m *mockStore) GetLayout(_ context.Context, _ string) (*Layout, error) { return m.layout, nil }
+func (m *mockStore) GetLayout(_ context.Context, _ string) (*Layout, error)             { return m.layout, nil }
 func (m *mockStore) RebuildLayout(_ context.Context, _ string, _ int, _ []LayoutColumn) error {
 	return nil
 }
@@ -164,11 +167,88 @@ func (m *mockStore) LoadBoardByID(_ context.Context, _ string) (*game.Board, err
 }
 func (m *mockStore) AttachBoard(_ context.Context, _, _ string) error { return nil }
 
+// Solo Karaoke Library/Playlist mocks mirror ddTracks' shape above
+// (dd-api-1/dd-api-2-equivalent exists/not-found semantics).
+func (m *mockStore) AddSoloKaraokeLibraryTrack(_ context.Context, t *SoloKaraokeTrack) error {
+	for _, existing := range m.skLibrary {
+		if existing.SpotifyURI == t.SpotifyURI {
+			return ErrSoloKaraokeLibraryTrackExists
+		}
+	}
+	m.skLibrary = append(m.skLibrary, *t)
+	return nil
+}
+func (m *mockStore) ListSoloKaraokeLibraryTracks(_ context.Context) ([]SoloKaraokeTrack, error) {
+	return m.skLibrary, nil
+}
+func (m *mockStore) RemoveSoloKaraokeLibraryTrack(_ context.Context, trackID string) error {
+	for i, t := range m.skLibrary {
+		if t.ID == trackID {
+			m.skLibrary = append(m.skLibrary[:i], m.skLibrary[i+1:]...)
+			return nil
+		}
+	}
+	return ErrSoloKaraokeLibraryTrackNotFound
+}
+func (m *mockStore) AddSoloKaraokePlaylistTrack(_ context.Context, t *SoloKaraokeTrack) error {
+	for _, existing := range m.skPlaylist {
+		if existing.SpotifyURI == t.SpotifyURI {
+			return ErrSoloKaraokePlaylistTrackExists
+		}
+	}
+	t.Position = len(m.skPlaylist)
+	m.skPlaylist = append(m.skPlaylist, *t)
+	return nil
+}
+func (m *mockStore) ListSoloKaraokePlaylistTracks(_ context.Context) ([]SoloKaraokeTrack, error) {
+	return m.skPlaylist, nil
+}
+func (m *mockStore) RemoveSoloKaraokePlaylistTrack(_ context.Context, trackID string) error {
+	for i, t := range m.skPlaylist {
+		if t.ID == trackID {
+			m.skPlaylist = append(m.skPlaylist[:i], m.skPlaylist[i+1:]...)
+			return nil
+		}
+	}
+	return ErrSoloKaraokePlaylistTrackNotFound
+}
+func (m *mockStore) ReorderSoloKaraokePlaylist(_ context.Context, orderedIDs []string) error {
+	byID := map[string]SoloKaraokeTrack{}
+	for _, t := range m.skPlaylist {
+		byID[t.ID] = t
+	}
+	for i, id := range orderedIDs {
+		if t, ok := byID[id]; ok {
+			t.Position = i
+			byID[id] = t
+		}
+	}
+	for i := range m.skPlaylist {
+		if t, ok := byID[m.skPlaylist[i].ID]; ok {
+			m.skPlaylist[i] = t
+		}
+	}
+	return nil
+}
+func (m *mockStore) GetSoloKaraokeTrack(_ context.Context, trackID string) (*SoloKaraokeTrack, error) {
+	for i := range m.skLibrary {
+		if m.skLibrary[i].ID == trackID {
+			return &m.skLibrary[i], nil
+		}
+	}
+	for i := range m.skPlaylist {
+		if m.skPlaylist[i].ID == trackID {
+			return &m.skPlaylist[i], nil
+		}
+	}
+	return nil, nil
+}
+
 type mockEngine struct{ reloaded bool }
 
 func (m *mockEngine) ReloadBoard(_ *game.Board) { m.reloaded = true }
-func (m *mockEngine) StartGame() error           { return nil }
-func (m *mockEngine) ResetToLobby() error        { return nil }
+func (m *mockEngine) StartGame() error          { return nil }
+func (m *mockEngine) ResetToLobby() error       { return nil }
 
 func newTestHandler() (*Handler, *http.ServeMux) {
 	store := &mockStore{

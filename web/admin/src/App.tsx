@@ -7,6 +7,7 @@ import EvaluationPanel from "./components/EvaluationPanel";
 import TelemetryPanel from "./components/TelemetryPanel";
 import ScorePanel from "./components/ScorePanel";
 import BoardBuilderPage from "./components/BoardBuilderPage";
+import SoloKaraokePage from "./components/SoloKaraokePage";
 import { HTTP_URL } from "./config";
 
 const ACTIVE_GAME_STATES: GameState[] = [
@@ -14,7 +15,7 @@ const ACTIVE_GAME_STATES: GameState[] = [
   "KARAOKE", "DAILY_DOUBLE", "TRANSITION",
 ];
 
-type Page = "control" | "builder";
+type Page = "control" | "builder" | "karaoke";
 
 export default function App() {
   const [state, actions] = useAdmin();
@@ -62,6 +63,7 @@ export default function App() {
         {([
           ["control", "Control Room"],
           ["builder", "Board Builder"],
+          ["karaoke", "Karaoke"],
         ] as [Page, string][]).map(([id, label]) => (
           <button
             key={id}
@@ -116,6 +118,7 @@ export default function App() {
               adminSecret={secret}
               spotifyConnected={spotifyConnected}
               playback={state.playback}
+              modeLock={state.modeLock}
             />
             {/* Right column split: live telemetry on top, ranked scoreboard below. */}
             <div className="grid min-h-0 grid-rows-[1.4fr_1fr]">
@@ -132,36 +135,53 @@ export default function App() {
               </div>
             </div>
           )}
-
-          {/* Transient operational notice (e.g. "busy: round in progress").
-              Does NOT log the admin out — just informs and can be dismissed. */}
-          {state.notice && (
-            <div className="pointer-events-none fixed inset-x-0 bottom-0 flex justify-center p-3">
-              <div className="pointer-events-auto rounded border border-amber-700 bg-amber-950/85 px-4 py-2 text-sm text-amber-100 shadow-xl">
-                {state.notice}
-                <button onClick={actions.clearNotice} className="ml-3 underline">
-                  Dismiss
-                </button>
-              </div>
-            </div>
-          )}
-
-          {!state.connected && (
-            <div className="pointer-events-none fixed inset-x-0 bottom-0 flex justify-center p-3">
-              <div className="pointer-events-auto rounded border border-red-800 bg-red-950/80 px-4 py-2 text-sm text-red-200 shadow-xl">
-                Connection lost — re-authenticate to resync.{" "}
-                <button onClick={actions.logout} className="ml-2 underline">
-                  Re-login
-                </button>
-              </div>
-            </div>
-          )}
         </>
       )}
 
       {page === "builder" && (
         <div className="min-h-0 flex-1">
           <BoardBuilderPage secret={secret} />
+        </div>
+      )}
+
+      {page === "karaoke" && (
+        <div className="min-h-0 flex-1">
+          <SoloKaraokePage
+            secret={secret}
+            gameState={state.gameState}
+            modeLock={state.modeLock}
+            nowPlaying={state.soloKaraokeNowPlaying}
+            playback={state.playback}
+            volumePct={state.volumePct}
+            actions={actions}
+          />
+        </div>
+      )}
+
+      {/* Transient operational notice (e.g. "busy: round in progress", or a
+          rejected admin.soloKaraoke.play while trivia is active). Does NOT
+          log the admin out — just informs and can be dismissed. Rendered
+          regardless of which tab is open, since the admin may act from
+          Control Room or Karaoke. */}
+      {state.notice && (
+        <div className="pointer-events-none fixed inset-x-0 bottom-0 flex justify-center p-3">
+          <div className="pointer-events-auto rounded border border-amber-700 bg-amber-950/85 px-4 py-2 text-sm text-amber-100 shadow-xl">
+            {state.notice}
+            <button onClick={actions.clearNotice} className="ml-3 underline">
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!state.connected && (
+        <div className="pointer-events-none fixed inset-x-0 bottom-0 flex justify-center p-3">
+          <div className="pointer-events-auto rounded border border-red-800 bg-red-950/80 px-4 py-2 text-sm text-red-200 shadow-xl">
+            Connection lost — re-authenticate to resync.{" "}
+            <button onClick={actions.logout} className="ml-2 underline">
+              Re-login
+            </button>
+          </div>
         </div>
       )}
     </div>

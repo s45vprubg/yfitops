@@ -4,6 +4,7 @@ import type {
   DailyDoublePerformerData,
   DailyDoubleResultData,
   GameState,
+  ModeLockData,
   PickerStatusData,
 } from "@shared/protocol";
 import type { AdminActions, ConnStatus, PlaybackPosition } from "../useAdmin";
@@ -23,6 +24,9 @@ interface Props {
   adminSecret: string;
   spotifyConnected: boolean;
   playback?: PlaybackPosition;
+  // "none" | "trivia" | "solo_karaoke" — Start Game disables while Solo
+  // Karaoke owns the lock.
+  modeLock?: ModeLockData["owner"];
 }
 
 type Phase = "waiting" | "round" | "buzzed";
@@ -54,7 +58,7 @@ function isRoundActive(s?: GameState): boolean {
 
 export default function EvaluationPanel({
   gameState, adminView, ddPerformer, ddResult, pickerStatus, actions,
-  status, connected, nonce, adminSecret, spotifyConnected, playback,
+  status, connected, nonce, adminSecret, spotifyConnected, playback, modeLock,
 }: Props) {
   const phase = derivePhase(gameState, adminView);
   const ddAwaitingResponse = gameState === "DAILY_DOUBLE" && !!ddPerformer && !ddPerformer.performing;
@@ -83,6 +87,7 @@ export default function EvaluationPanel({
         adminSecret={adminSecret}
         spotifyConnected={spotifyConnected}
         playback={playback}
+        modeLock={modeLock}
       />
       <div className="flex flex-1 flex-col gap-3 overflow-auto p-4">
         <PhaseBanner phase={phase} />

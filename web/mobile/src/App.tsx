@@ -26,6 +26,19 @@ export default function App() {
     );
   }
 
+  // Solo Karaoke short-circuit (§4A): the server-side mode-lock means trivia
+  // and Solo Karaoke are mutually exclusive, so a bare boolean is enough to
+  // route here — before the GameState switch below, which stays untouched
+  // and keeps rendering the trivia game exactly as it does today.
+  if (view.soloKaraoke) {
+    return (
+      <>
+        <StatusBar conn={view.conn} rttMs={view.rttMs} />
+        <IdleScreen state={view.state} soloKaraoke me={getSavedHandle()} />
+      </>
+    );
+  }
+
   // The streaming decrypt reveal band, shown while a round is live and at
   // karaoke. Renders the exact same server mask as the projector (§4A ext).
   const revealBand = (

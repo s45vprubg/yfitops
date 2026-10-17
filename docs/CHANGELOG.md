@@ -156,6 +156,157 @@ No backfill: every song's drop point starts unmarked until an admin marks it.
   (under the Board panel) that applies immediately and is the level the
   fade restores to — not just a one-off mechanism for this feature.
 
+- **Solo Karaoke mode — a second, independent game mode.** Straight
+  playback, no guessing/scoring, reachable as a third "Karaoke" admin tab.
+  Admin builds a Library (holding pool) and a Playlist (ordered queue) from
+  the exact same Spotify search/playlist-import and lyrics infrastructure
+  the Board Builder already uses, then the engine plays the Playlist back
+  with full transport control (play/pause/resume/stop/next/prev/seek/
+  shuffle/repeat/volume), lyrics synced on the stage screen exactly like
+  trivia's existing karaoke phase.
+  - **Mutually exclusive with trivia via a server-side mode-lock**, not a
+    client navigation hook (admin can have several `/admin` tabs open at
+    once, so "leaving a tab" isn't a reliable release signal): starting
+    trivia (`StartGame`) is rejected while Solo Karaoke is active;
+    starting/playing Solo Karaoke is rejected while a trivia game is active
+    (state not `LOBBY`/`GAME_OVER`). Every open admin tab reflects the same
+    lock via a new `modeLock` broadcast (`"none" | "trivia" |
+    "solo_karaoke"`), including on `sendFullSync` for a newly-opened tab.
+  - **Auto-advance on track end** (not stop-and-wait), with `repeat="one"`
+    (replay the current track), `repeat="all"` (wrap to the start), and
+    `shuffle` (a fresh random pick per advance, excluding the current
+    track — not a persisted permutation). Queue exhaustion with no repeat
+    deactivates the mode and releases the lock automatically.
+  - **Lyrics gating is soft** for both the Library and Playlist buckets
+    (unlike Daily Double's hard 412 reject): a track lacking resolved
+    lyrics may still be added; status is reported for the UI to flag it,
+    never to block the add.
+  - **Sanitization (§4A):** the new `soloKaraokeNowPlaying` broadcast
+    (full track metadata) goes out via `Broadcast(RoleStage, ...)`/
+    `Broadcast(RoleAdmin, ...)` only, never `BroadcastAll`. The only Solo
+    Karaoke signal mobile ever receives is the bare boolean
+    `soloKaraokeActive`, carrying zero track metadata — mobile shows an
+    idle "sing along at the stage" screen.
+  - New DB migration `deploy/migrations/0010_solo_karaoke.sql`:
+    `solo_karaoke_library_tracks` / `solo_karaoke_playlist_tracks`, two
+    standalone global tables (not board-scoped, no FK to `boards`).
+  - New files: `server/internal/admin/solokaraoke_types.go`,
+    `server/internal/admin/solokaraoke.go` (REST routes:
+    `GET/POST /api/solo-karaoke/library`, `DELETE .../library/{trackId}`,
+    `GET/POST /api/solo-karaoke/playlist`, `DELETE .../playlist/{trackId}`,
+    `PUT .../playlist/reorder`, `POST .../import-playlist`,
+    `POST .../tracks/{trackId}/requery-lyrics`,
+    `PUT .../tracks/{trackId}/lyrics`),
+    `server/internal/store/solo_karaoke_store.go` (Postgres impl),
+    `server/internal/game/solo_karaoke.go` (engine mode logic + new local
+    message types), `server/internal/game/solo_karaoke_test.go`,
+    `server/internal/admin/solokaraoke_test.go`.
+  - Modified: `server/internal/admin/store.go` (`AdminStore` interface
+    gains the Library/Playlist methods; new `SoloKaraokeReloader`
+    interface so the admin handler keeps the engine's live in-memory queue
+    in sync with Postgres after every Playlist mutation),
+    `server/internal/admin/handler.go` (route registration +
+    `SetSoloKaraokeReloader`), `server/cmd/gameserver/main.go` (wires
+    `adminHandler.SetSoloKaraokeReloader(eng)`),
+    `server/internal/game/engine.go` (`startTrack`'s playback primitive
+    extracted into a shared `loadAndPlayTrack` helper — pure extraction,
+    trivia behavior unchanged; new `soloKaraoke` state field; `StartGame`
+    mode-lock gate; `admin.endGame` now also broadcasts the released
+    lock; new dispatch cases for the nine `admin.soloKaraoke.*` commands;
+    `sendFullSync`/`onStagePlayerState`/`broadcastPlaybackPosition` each
+    gained a Solo Karaoke branch).
+  - New local `CONTRACT-QUESTION` message types (not in the fixed
+    `protocol.go`, per project rules — mirrored in `web/shared/protocol.ts`):
+    client `admin.soloKaraoke.play/pause/resume/stop/next/prev/seek/
+    setShuffle/setRepeat`; server `soloKaraokeNowPlaying`/`modeLock`/
+    `soloKaraokeActive`/`soloKaraokeLyricsStatus`. `admin.soloKaraoke.
+    setVolume` is deliberately NOT one of these — it reuses the existing
+    `admin.setVolume` unmodified (one physical volume knob shared by both
+    modes).
+  - **No fixed-contract files were modified** (`protocol/protocol.go`,
+    `protocol/state.go`, `game/scoring.go`, `anticheat/latency.go`,
+    `anticheat/nonce.go`, `config/config.go` — untouched).
+  - **Admin frontend — new "Karaoke" tab.** Library (search/import holding
+    pool) + Playlist (ordered, drag-reorderable queue) + Player
+    (play/pause/resume/stop/next/prev/seek/shuffle/repeat/volume +
+    full-metadata now-playing display — admin isn't §4A-sanitization-gated).
+    New `SoloKaraokePage.tsx`: a single `DragDropContext` (modeled on
+    `BoardBuilderPage.tsx`'s `handleDragEnd`) with two droppables
+    (`skLibrary`/`skPlaylist`). Cross-bucket drag is the same non-atomic
+    move+compensating-rollback shape as the Daily Double bucket; a
+    same-droppable drag within the Playlist is a genuine reorder (the
+    Playlist is ordered by `position`, unlike Daily Double's unordered
+    bucket), handled by a local optimistic reorder + a single
+    `PUT .../playlist/reorder` call with the full ordered id list.
+  - New `components/soloKaraoke/{LibraryBucket,PlaylistBucket,Player,
+    SoloKaraokeLyricsModal}.tsx`. `LibraryBucket` adapts
+    `HoldingArea.tsx`/`SpotifySearch.tsx`/`ImportPlaylist.tsx`;
+    `PlaylistBucket` adapts `DailyDoubleBucket.tsx` (search-add kept, but
+    lyrics gating is soft here, not a hard 412 reject); `Player` reuses
+    `GameControls.tsx`'s `Scrubber` (now exported) wired to
+    `admin.soloKaraoke.seek`, and the existing `admin.setVolume`
+    action/control — no new volume action was added, per the one-physical-
+    device design. `SoloKaraokeLyricsModal` adapts
+    `builder/LyricsEditorModal.tsx` for the non-board-scoped
+    `PUT /api/solo-karaoke/tracks/{id}/lyrics` route.
+  - `builder/TrackCard.tsx` generalized to a generic
+    `TrackCard<T extends LyricsFlaggedTrack>` so it's reusable for
+    `SoloKaraokeTrack` (no `lyricsOverride` field — soft gating, so the
+    status badge renders non-interactively when no `onToggleOverride` is
+    passed) as well as the existing board-scoped `TrackData`. Generic
+    rather than a single widened parameter type, to avoid a
+    `strictFunctionTypes` contravariance error on the `onOpenManualLyrics`
+    callback prop at the existing Board Builder call sites.
+  - `useAdminApi.ts` gained the `SoloKaraokeTrack` type + the ten
+    `/api/solo-karaoke/...` REST methods. `useAdmin.ts` gained `modeLock`/
+    `soloKaraokeNowPlaying` state + listeners, and the nine
+    `admin.soloKaraoke.*` action senders.
+  - `GameControls.tsx`'s "Start Game" button is now disabled (with an
+    explanatory title) while `modeLock === "solo_karaoke"`; the Player's
+    own "Play" button is disabled while a trivia game is active
+    (`gameState` not `LOBBY`/`GAME_OVER`) — the mirror image of the same
+    lock. Both read the server's `modeLock` broadcast, never local/per-tab
+    state, since multiple admin tabs can be open at once. A rejected
+    `admin.soloKaraoke.play` (server error code `modeLocked`) surfaces
+    through the existing `admin.error` -> `state.notice` banner — no new
+    error-display mechanism was added.
+  - `App.tsx`: new `"karaoke"` page + nav entry. The transient-notice and
+    connection-lost banners (previously rendered only inside the Control
+    Room page branch) now render regardless of which tab is open, since a
+    rejected Solo Karaoke action can occur while the Karaoke tab is active.
+  - **Stage frontend.** `Karaoke.tsx` (trivia's existing post-round
+    lyric-sync view) gained one optional `hideBanner` prop to suppress the
+    winner/guesser banner — its lyric-sync rAF loop, auto-scroll, and line
+    rendering are reused verbatim, the same way `DailyDoublePerformance.tsx`
+    already reuses it. New `SoloKaraokeView.tsx` renders
+    `<Karaoke ... hideBanner />` plus an album-art thumbnail and track-index
+    indicator, driven by new `useGame.ts` listeners for
+    `soloKaraokeActive`/`soloKaraokeNowPlaying`/`soloKaraokeLyricsStatus`.
+    `App.tsx` renders `SoloKaraokeView` ahead of the trivia `GameState`
+    switch when `soloKaraokeActive` is true (the mode-lock keeps `GameState`
+    pinned on `LOBBY`/`GAME_OVER` for the whole session, so it can't be a
+    case inside that switch). The existing `audio`/`state` handlers are
+    reused completely unmodified. `sendFullSync` (engine.go) also now
+    re-sends the current track's lyrics on stage reconnect, in addition to
+    the audio replay — otherwise a stage refresh mid-song showed blank
+    lyrics until the next track change.
+  - **Mobile frontend.** The ONLY Solo Karaoke signal mobile ever receives
+    is the bare boolean `soloKaraokeActive` — zero track metadata, per
+    §4A. `App.tsx` short-circuits to an idle screen when it's true, ahead
+    of (and without touching) the existing trivia `GameState` switch.
+    `IdleScreen.tsx` gained an optional `soloKaraoke` prop rendering fixed
+    copy ("Solo Karaoke mode — sing along at the stage!") in place of its
+    normal state-keyed lookup.
+  - Verified: `scripts/preflight.sh` passes (Go build/vet/test + all three
+    frontends' clean install + production build). DB-gated tests
+    (unique-placement/RebuildLayout-rollback/played-state-persistence/
+    integration store guards) self-skip without `YFI_TEST_DSN` — pre-existing
+    behavior, unrelated to this feature, not a regression. Remaining:
+    a manual pass against real Spotify Premium credentials + a real
+    Chromium stage tab, and a two-admin-tab mode-lock check, have not yet
+    been run (see docs/ADVERSARIAL_REVIEW_HANDOFF.md's "unrun by design"
+    category).
+
 ### Changed
 - `server/internal/admin.Track`/`DailyDoubleTrack`: `HasSyncedLyrics *bool`
   replaced by `LyricsStatus string` ("" / "pending" / "not_found" /

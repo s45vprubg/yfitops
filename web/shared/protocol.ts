@@ -68,7 +68,24 @@ export type ClientMsgType =
   // engine.go (CONTRACT-QUESTION — not in the fixed protocol.go).
   | "player.selectCell"
   | "stage.playerState"
-  | "stage.deviceReady";
+  | "stage.deviceReady"
+  // admin.soloKaraoke.*: the second, independent game mode (straight
+  // playback, no guessing/scoring). Mirrors the nine cmsgAdminSoloKaraoke*
+  // consts in server game/solo_karaoke.go (CONTRACT-QUESTION — not in the
+  // fixed protocol.go; see docs/CHANGELOG.md). play/next/prev/setShuffle/
+  // setRepeat take a body; pause/resume/stop take none.
+  // admin.soloKaraoke.setVolume is NOT one of these — it deliberately
+  // reuses the existing "admin.setVolume" type above (one physical volume
+  // knob shared by both modes).
+  | "admin.soloKaraoke.play" // SoloKaraokePlayData — trackId optional
+  | "admin.soloKaraoke.pause"
+  | "admin.soloKaraoke.resume"
+  | "admin.soloKaraoke.stop"
+  | "admin.soloKaraoke.next"
+  | "admin.soloKaraoke.prev"
+  | "admin.soloKaraoke.seek" // SoloKaraokeSeekData
+  | "admin.soloKaraoke.setShuffle" // SoloKaraokeSetShuffleData
+  | "admin.soloKaraoke.setRepeat"; // SoloKaraokeSetRepeatData
 
 // Server -> client message types
 export type ServerMsgType =
@@ -142,7 +159,30 @@ export type ServerMsgType =
   // volumeStatus: {percent} — admin-only, current operating playback
   // volume (the admin volume slider + the Daily Double fade's restore
   // level). Mirrors smsgVolumeStatus in engine.go (CONTRACT-QUESTION).
-  | "volumeStatus";
+  | "volumeStatus"
+  // soloKaraokeNowPlaying: full track metadata for the current Solo
+  // Karaoke track — stage (renders the karaoke view) + admin (Player UI)
+  // ONLY, never mobile (§4A). Mirrors smsgSoloKaraokeNowPlaying in server
+  // game/solo_karaoke.go (CONTRACT-QUESTION).
+  | "soloKaraokeNowPlaying"
+  // modeLock: {owner: "none"|"trivia"|"solo_karaoke"} — admin-only. Every
+  // open /admin tab's Start Game / Solo Karaoke Play buttons must disable
+  // off this server broadcast, not local/per-tab state (navigation/tab
+  // close is not a reliable release signal). Mirrors smsgModeLock
+  // (CONTRACT-QUESTION).
+  | "modeLock"
+  // soloKaraokeActive: {active: boolean} — the ONLY Solo Karaoke signal
+  // mobile may ever receive, broadcast to ALL roles. Zero track metadata;
+  // mobile uses it to show an idle "sing along at the stage" screen.
+  // Mirrors smsgSoloKaraokeActive (CONTRACT-QUESTION).
+  | "soloKaraokeActive"
+  // soloKaraokeLyricsStatus: stage-only — "loading"/"ready"/"none", kept
+  // DISTINCT from "lyricsStatus" above (that one is trivia's post-round
+  // karaoke phase; the two modes never share an identifier per the
+  // project's naming decision). Mirrors smsgSoloKaraokeLyricsStatus
+  // (CONTRACT-QUESTION). The lines themselves still arrive via the fixed
+  // "lyrics" frame, exactly like trivia's karaoke phase.
+  | "soloKaraokeLyricsStatus";
 
 export interface ClientEnvelope<D = unknown> {
   t: ClientMsgType;
@@ -190,6 +230,11 @@ export interface DailyDoubleDecisionData { accept: boolean; }
 export interface DailyDoubleChooseData { trackID: string; }
 export interface StagePlayerStateData { positionMs: number; paused: boolean; trackEnded: boolean; }
 export interface StageDeviceReadyData { spotifyDeviceID: string; }
+// Solo Karaoke admin.* payloads — mirrors server game/solo_karaoke.go.
+export interface SoloKaraokePlayData { trackId: string; } // "" = play current/first
+export interface SoloKaraokeSeekData { positionMs: number; }
+export interface SoloKaraokeSetShuffleData { shuffle: boolean; }
+export interface SoloKaraokeSetRepeatData { repeat: "" | "one" | "all"; }
 
 // ---- Server payloads ----
 export interface WelcomeData { playerID: string; role: Role; nonce: number; }
@@ -269,3 +314,22 @@ export interface DailyDoubleSongChoice { id: string; title: string; artist: stri
 // doc comment above.
 export interface DailyDoubleOfferData { songs: DailyDoubleSongChoice[]; }
 export interface DailyDoubleResultData { avgStars: number; points: number; }
+// Solo Karaoke server->client payloads — mirrors server game/solo_karaoke.go.
+// SoloKaraokeNowPlayingData carries full track metadata — stage/admin ONLY
+// (§4A), see the "soloKaraokeNowPlaying" ServerMsgType doc comment above.
+// Index is -1 when nothing is loaded.
+export interface SoloKaraokeNowPlayingData {
+  trackId: string;
+  spotifyUri: string;
+  artist: string;
+  song: string;
+  albumArt?: string;
+  durationMs: number;
+  index: number;
+  queueLen: number;
+  shuffle: boolean;
+  repeat: "" | "one" | "all";
+}
+export interface ModeLockData { owner: "none" | "trivia" | "solo_karaoke"; }
+export interface SoloKaraokeActiveData { active: boolean; }
+export interface SoloKaraokeLyricsStatusData { status: "loading" | "ready" | "none"; }

@@ -82,6 +82,24 @@ export interface ImportResult {
   total: number;
 }
 
+// A song in one of Solo Karaoke's two standalone buckets (not board-scoped,
+// unlike TrackData above). Mirrors server/internal/admin's SoloKaraokeTrack.
+// Position is populated (and meaningful) only for playlist tracks; library
+// tracks are ordered by createdAt, like TrackData. Lyrics gating is soft for
+// BOTH buckets (unlike the Daily Double bucket's hard requirement) — adding
+// a track never fails for missing/unresolved lyrics.
+export interface SoloKaraokeTrack {
+  id: string;
+  spotifyUri: string;
+  artist: string;
+  song: string;
+  albumArt: string;
+  durationMs: number;
+  createdAt: number;
+  position: number; // playlist only; 0 for library tracks
+  lyricsStatus: LyricsStatus;
+}
+
 // Result of a rescan-lyrics/requery-pending-lyrics bulk call. truncated means
 // maxRescanTracksPerRequest was hit with more eligible tracks still
 // remaining — the caller should re-run the same action to pick up the rest.
@@ -171,6 +189,32 @@ function api(secret: string) {
     // Spotify
     searchSpotify: (q: string, limit = 10) => req<SpotifyResult[]>("GET", `/api/spotify/search?q=${encodeURIComponent(q)}&limit=${limit}`),
     importPlaylist: (boardId: string, playlistUri: string) => req<ImportResult>("POST", `/api/boards/${boardId}/import-playlist`, { playlistUri }),
+
+    // Solo Karaoke — standalone Library (holding pool) + Playlist (ordered
+    // queue the engine plays from), not board-scoped. Mirrors
+    // server/internal/admin/solokaraoke.go's route shape.
+    listSoloKaraokeLibrary: () => req<SoloKaraokeTrack[]>("GET", "/api/solo-karaoke/library"),
+    addSoloKaraokeLibraryTrack: (track: { spotifyUri: string; artist: string; song: string; albumArt: string; durationMs: number }) =>
+      req<SoloKaraokeTrack>("POST", "/api/solo-karaoke/library", track),
+    deleteSoloKaraokeLibraryTrack: (trackId: string) => req<void>("DELETE", `/api/solo-karaoke/library/${trackId}`),
+    listSoloKaraokePlaylist: () => req<SoloKaraokeTrack[]>("GET", "/api/solo-karaoke/playlist"),
+    addSoloKaraokePlaylistTrack: (track: { spotifyUri: string; artist: string; song: string; albumArt: string; durationMs: number }) =>
+      req<SoloKaraokeTrack>("POST", "/api/solo-karaoke/playlist", track),
+    deleteSoloKaraokePlaylistTrack: (trackId: string) => req<void>("DELETE", `/api/solo-karaoke/playlist/${trackId}`),
+    // Full ordered rewrite of the playlist's position column — same
+    // "atomically replace everything" shape as the board layout, avoiding
+    // off-by-one arithmetic on a partial reorder.
+    reorderSoloKaraokePlaylist: (orderedIds: string[]) =>
+      req<void>("PUT", "/api/solo-karaoke/playlist/reorder", { orderedIds }),
+    // Lands imported tracks in the Library, never the Playlist — admin
+    // drags from there afterward.
+    importSoloKaraokePlaylist: (playlistUri: string) =>
+      req<ImportResult>("POST", "/api/solo-karaoke/import-playlist", { playlistUri }),
+    // Resolves trackId against EITHER bucket.
+    requerySoloKaraokeLyrics: (trackId: string) =>
+      req<LyricsRecord>("POST", `/api/solo-karaoke/tracks/${trackId}/requery-lyrics`),
+    setSoloKaraokeLyricsManual: (trackId: string, lrcText: string) =>
+      req<LyricsRecord>("PUT", `/api/solo-karaoke/tracks/${trackId}/lyrics`, { lrcText }),
   };
 }
 

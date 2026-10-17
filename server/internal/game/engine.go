@@ -326,6 +326,12 @@ type Engine struct {
 	// (known to have no synced lyrics). Guarded by lyricMu (touched off-loop).
 	lyricMu    sync.Mutex
 	lyricCache map[string]*lyricEntry
+
+	// soloKaraoke is the live state for the independent Solo Karaoke mode
+	// (see solo_karaoke.go) — straight playback with no guessing/scoring,
+	// mutually exclusive with the trivia state machine via the mode-lock
+	// gate (modeLockOwner). Run-goroutine-owned like every other live field.
+	soloKaraoke soloKaraokeState
 }
 
 // NewEngine wires the engine to its dependencies (all injected for testing).
@@ -391,6 +397,7 @@ func NewEngine(repo GameRepo, lock BuzzLock, audio AudioDevice, lyrics LyricsPro
 		cellVisits:     map[string]int{},
 		volumePct:      100,
 		volumeCmds:     make(chan int, 64),
+		soloKaraoke:    soloKaraokeState{index: -1},
 	}
 }
 
@@ -498,6 +505,14 @@ func (e *Engine) StartGame() error {
 			ch <- result{fmt.Errorf("no board attached")}
 			return
 		}
+		// Mode-lock (solo_karaoke.go): trivia cannot start while Solo Karaoke
+		// is active. Released only by an explicit admin.soloKaraoke.stop or
+		// queue exhaustion — never by navigation/tab-close (every admin tab
+		// reflects the same server-side lock via the modeLock broadcast).
+		if e.soloKaraoke.active {
+			ch <- result{fmt.Errorf("solo karaoke is active — stop it before starting a trivia game")}
+			return
+		}
 		if e.state != protocol.StateLobby {
 			ch <- result{fmt.Errorf("game already started (state: %s)", e.state)}
 			return
@@ -505,6 +520,7 @@ func (e *Engine) StartGame() error {
 		e.assignDailyDoubles()
 		e.transitionTo(protocol.StateBoard)
 		e.broadcastBoard()
+		e.broadcastModeLock()
 		ch <- result{}
 	}}
 	return (<-ch).err
@@ -887,7 +903,16 @@ func (e *Engine) dispatch(connID string, role protocol.Role, env protocol.Client
 		cmsgAdminSetDropPoint,
 		cmsgAdminJumpToDropPoint,
 		cmsgAdminSetVolume,
-		cmsgAdminEndDailyDouble:
+		cmsgAdminEndDailyDouble,
+		cmsgAdminSoloKaraokePlay,
+		cmsgAdminSoloKaraokePause,
+		cmsgAdminSoloKaraokeResume,
+		cmsgAdminSoloKaraokeStop,
+		cmsgAdminSoloKaraokeNext,
+		cmsgAdminSoloKaraokePrev,
+		cmsgAdminSoloKaraokeSeek,
+		cmsgAdminSoloKaraokeSetShuffle,
+		cmsgAdminSoloKaraokeSetRepeat:
 		if role != protocol.RoleAdmin {
 			e.sendError(connID, "forbidden", "admin role required")
 			return
@@ -943,9 +968,32 @@ func (e *Engine) dispatchAdmin(connID string, env protocol.ClientEnvelope) {
 		e.onAdminSetVolume(connID, env)
 	case cmsgAdminEndDailyDouble:
 		e.onAdminEndDailyDouble(connID, env)
+	case cmsgAdminSoloKaraokePlay:
+		e.onAdminSoloKaraokePlay(connID, env)
+	case cmsgAdminSoloKaraokePause:
+		e.onAdminSoloKaraokePause(connID, env)
+	case cmsgAdminSoloKaraokeResume:
+		e.onAdminSoloKaraokeResume(connID, env)
+	case cmsgAdminSoloKaraokeStop:
+		e.onAdminSoloKaraokeStop(connID, env)
+	case cmsgAdminSoloKaraokeNext:
+		e.onAdminSoloKaraokeNext(connID, env)
+	case cmsgAdminSoloKaraokePrev:
+		e.onAdminSoloKaraokePrev(connID, env)
+	case cmsgAdminSoloKaraokeSeek:
+		e.onAdminSoloKaraokeSeek(connID, env)
+	case cmsgAdminSoloKaraokeSetShuffle:
+		e.onAdminSoloKaraokeSetShuffle(connID, env)
+	case cmsgAdminSoloKaraokeSetRepeat:
+		e.onAdminSoloKaraokeSetRepeat(connID, env)
 	case protocol.CMsgAdminEndGame:
 		e.transitionTo(protocol.StateGameOver)
 		e.persistScores()
+		// trivia -> GAME_OVER releases the mode-lock (back to "none" unless
+		// Solo Karaoke somehow claimed it in the meantime, which it cannot
+		// while e.soloKaraoke.active implies trivia was never holding the
+		// lock in the first place — see modeLockOwner).
+		e.broadcastModeLock()
 	}
 }
 
@@ -1034,6 +1082,50 @@ func (e *Engine) onHeartbeat(connID string, env protocol.ClientEnvelope) {
 // only the sanitized state flag; stage/admin additionally get board + reveal.
 func (e *Engine) sendFullSync(connID string, role protocol.Role) {
 	e.bcast.SendTo(connID, e.envelope(protocol.SMsgState, protocol.StateData{State: e.state}))
+	// Solo Karaoke's active flag is the one signal EVERY role (including
+	// mobile) may see — a bare boolean, zero track metadata (§4A) — so a
+	// reconnecting client of any role resyncs to the idle-screen gate.
+	e.bcast.SendTo(connID, e.envelope(smsgSoloKaraokeActive, soloKaraokeActiveData{Active: e.soloKaraoke.active}))
+	// Mode-lock status: every (re)connecting admin tab must reflect the
+	// current owner immediately, not just after the next flip — multiple
+	// admin tabs can be open on /admin at once (solo_karaoke.go design note).
+	if role == protocol.RoleAdmin {
+		e.bcast.SendTo(connID, e.envelope(smsgModeLock, modeLockData{Owner: e.modeLockOwner()}))
+	}
+	if e.soloKaraoke.active && e.soloKaraoke.currentTrack != nil {
+		if role == protocol.RoleAdmin || role == protocol.RoleStage {
+			e.bcast.SendTo(connID, e.envelope(smsgSoloKaraokeNowPlaying, e.soloKaraokeNowPlayingData()))
+		}
+		// A stage (re)connecting mid-song (plausible over a multi-hour
+		// event) must re-register playback with Spotify and resume at the
+		// last known position — otherwise the device is silently
+		// re-registered with no replay. This is a real gap for Solo
+		// Karaoke specifically (trivia's own sendFullSync never re-issues
+		// SMsgAudio either, but a trivia round is bounded by the buzzer/
+		// reveal clock and the admin can just re-select the cell; Solo
+		// Karaoke has no such recovery path).
+		if role == protocol.RoleStage {
+			posMs := e.soloKaraoke.pausedAtMs
+			if !e.soloKaraoke.paused {
+				posMs = nowMs() - e.soloKaraoke.trackStartMs
+			}
+			e.bcast.SendTo(connID, e.envelope(protocol.SMsgAudio, protocol.AudioData{
+				Action: "play", TrackURI: e.soloKaraoke.currentTrack.SpotifyURI, PositionMs: posMs,
+			}))
+			if e.soloKaraoke.paused {
+				e.bcast.SendTo(connID, e.envelope(protocol.SMsgAudio, protocol.AudioData{Action: "pause"}))
+			}
+			// Re-send the current track's lyrics too — otherwise a
+			// reconnecting stage replays audio but shows a blank lyrics view
+			// until the next track change, since the "state" frame above
+			// (LOBBY/GAME_OVER, pinned there for the duration of Solo
+			// Karaoke) causes the stage's existing state handler to clear
+			// its lyrics on every reconnect. soloKaraokeFetchAndSendLyrics
+			// serves instantly from the singleflight cache in the common
+			// case (lyrics were already fetched when the track started).
+			e.soloKaraokeFetchAndSendLyrics()
+		}
+	}
 	// Reconnect mid-reveal: send the CURRENT masked frame to ALL roles (mobile
 	// included) so a reconnecting phone resyncs to exactly what the stage shows.
 	// currentMask reflects only rc.*Revealed, so this can never leak ahead.
@@ -1277,11 +1369,23 @@ func (e *Engine) startTrack(cell *Cell, track *Track) {
 	e.bcast.Broadcast(protocol.RoleAdmin, e.adminViewEnvelope())
 
 	// Route playback to the stage's virtual device (§6, §9).
-	if err := e.audio.Play(context.Background(), track.SpotifyURI, 0); err != nil {
+	e.loadAndPlayTrack(track, 0)
+}
+
+// loadAndPlayTrack is the playback primitive extracted out of startTrack: it
+// routes a track to the stage's Spotify virtual device (§6, §9) and tells
+// the stage to start local playback at positionMs. Pure extraction — startTrack's
+// own round-bookkeeping (nonce bump, roundKey, GuessedThisTrack reset,
+// transitionTo, lyric prefetch) is untouched and still happens around this
+// call exactly as before. Shared with Solo Karaoke's soloKaraokePlayAt
+// (solo_karaoke.go), which needs the identical primitive without any of
+// trivia's round bookkeeping.
+func (e *Engine) loadAndPlayTrack(track *Track, positionMs int64) {
+	if err := e.audio.Play(context.Background(), track.SpotifyURI, positionMs); err != nil {
 		log.Printf("[engine] audio.Play failed: %v", err)
 	}
 	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{
-		Action: "play", TrackURI: track.SpotifyURI, PositionMs: 0,
+		Action: "play", TrackURI: track.SpotifyURI, PositionMs: positionMs,
 	}))
 }
 
@@ -3124,6 +3228,14 @@ func (e *Engine) onStagePlayerState(connID string, env protocol.ClientEnvelope) 
 	if !d.TrackEnded {
 		return
 	}
+	// Solo Karaoke owns the deck exclusively while active (mode-lock), so
+	// trivia's own TrackEnded handling below must never run concurrently
+	// with it — route and return instead of falling into the trivia switch
+	// below with the wrong curTrack.
+	if e.soloKaraoke.active {
+		e.soloKaraokeAdvance()
+		return
+	}
 	switch e.state {
 	case protocol.StateKaraoke:
 		e.karaokeConditionMet()
@@ -3158,6 +3270,17 @@ type playbackPositionData struct {
 // Drop" without a separate round-trip. No-ops with no track loaded (nothing
 // to show).
 func (e *Engine) broadcastPlaybackPosition(d protocol.StagePlayerStateData) {
+	if e.soloKaraoke.active {
+		if e.soloKaraoke.currentTrack == nil {
+			return
+		}
+		e.bcast.Broadcast(protocol.RoleAdmin, e.envelope(smsgPlaybackPosition, playbackPositionData{
+			PositionMs: d.PositionMs,
+			DurationMs: e.soloKaraoke.currentTrack.DurationMs,
+			Paused:     d.Paused,
+		}))
+		return
+	}
 	if e.curTrack == nil {
 		return
 	}

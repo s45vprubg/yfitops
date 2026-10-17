@@ -8,12 +8,13 @@ import (
 
 // Handler serves the admin REST API for track and board management.
 type Handler struct {
-	store   AdminStore
-	spotify SpotifySearcher
-	engine  BoardReloader
-	lyrics  LyricsProber // optional; probes synced-lyric availability on add/import
-	ai      Categorizer  // optional; AI board builder (nil => 503)
-	secret  string
+	store       AdminStore
+	spotify     SpotifySearcher
+	engine      BoardReloader
+	lyrics      LyricsProber        // optional; probes synced-lyric availability on add/import
+	ai          Categorizer         // optional; AI board builder (nil => 503)
+	soloKaraoke SoloKaraokeReloader // optional; keeps the engine's live SK queue in sync
+	secret      string
 }
 
 // NewHandler creates a Handler. Pass nil for spotify if Spotify is unavailable
@@ -37,6 +38,12 @@ func (h *Handler) SetLyricsProber(p LyricsProber) { h.lyrics = p }
 // SetCategorizer wires the optional AI board builder. If nil, the build-with-AI
 // endpoint returns 503.
 func (h *Handler) SetCategorizer(c Categorizer) { h.ai = c }
+
+// SetSoloKaraokeReloader wires the optional live-engine sync for the Solo
+// Karaoke Playlist. If nil, playlist mutations persist to Postgres but the
+// engine's in-memory queue is not pushed (dev/in-memory mode, matching
+// SetLyricsProber's optionality).
+func (h *Handler) SetSoloKaraokeReloader(r SoloKaraokeReloader) { h.soloKaraoke = r }
 
 // Register mounts all admin API routes onto the given mux. CORS is handled
 // at the top level via a catch-all /api/ prefix handler that intercepts OPTIONS
@@ -89,6 +96,20 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("POST /api/boards/{id}/attach", wrap(h.attachBoard))
 	mux.Handle("POST /api/game/start", wrap(h.startGame))
 	mux.Handle("POST /api/game/reset", wrap(h.resetGame))
+
+	// Solo Karaoke: standalone Library (holding pool) + Playlist (ordered
+	// queue the engine plays from) — not board-scoped.
+	mux.Handle("GET /api/solo-karaoke/library", wrap(h.listSoloKaraokeLibrary))
+	mux.Handle("POST /api/solo-karaoke/library", wrap(h.addSoloKaraokeLibraryTrack))
+	mux.Handle("DELETE /api/solo-karaoke/library/{trackId}", wrap(h.deleteSoloKaraokeLibraryTrack))
+	mux.Handle("GET /api/solo-karaoke/playlist", wrap(h.listSoloKaraokePlaylist))
+	mux.Handle("POST /api/solo-karaoke/playlist", wrap(h.addSoloKaraokePlaylistTrack))
+	mux.Handle("DELETE /api/solo-karaoke/playlist/{trackId}", wrap(h.deleteSoloKaraokePlaylistTrack))
+	mux.Handle("PUT /api/solo-karaoke/playlist/reorder", wrap(h.reorderSoloKaraokePlaylist))
+	mux.Handle("POST /api/solo-karaoke/import-playlist", wrap(h.importSoloKaraokePlaylist))
+	// Per-track lyrics requery/manual-set, resolving against EITHER bucket.
+	mux.Handle("POST /api/solo-karaoke/tracks/{trackId}/requery-lyrics", wrap(h.requerySoloKaraokeLyrics))
+	mux.Handle("PUT /api/solo-karaoke/tracks/{trackId}/lyrics", wrap(h.setSoloKaraokeLyricsManual))
 
 	// Spotify
 	mux.Handle("GET /api/spotify/search", wrap(h.searchSpotify))

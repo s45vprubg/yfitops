@@ -15,16 +15,23 @@ export function IdleScreen({
   scoreboard,
   me,
   ddResult,
+  soloKaraoke,
 }: {
   state: GameState;
   scoreboard?: ScoreboardData | null;
   me?: string | null;
   ddResult?: DailyDoubleResultData | null;
+  // When true, overrides the normal state-keyed copy with fixed Solo
+  // Karaoke copy (§4A: mobile knows nothing beyond this flag — no track
+  // metadata is ever rendered here).
+  soloKaraoke?: boolean;
 }) {
-  const copy = COPY[state] ?? {
-    title: "Waiting for the next track…",
-    sub: "Look at the main screen.",
-  };
+  const copy = soloKaraoke
+    ? { title: "Solo Karaoke mode", sub: "Sing along at the stage!" }
+    : COPY[state] ?? {
+        title: "Waiting for the next track…",
+        sub: "Look at the main screen.",
+      };
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center animate-fadeIn">
       {ddResult && (

@@ -76,6 +76,30 @@ type AdminStore interface {
 	// Game-time
 	LoadBoardByID(ctx context.Context, boardID string) (*game.Board, error)
 	AttachBoard(ctx context.Context, sessionID, boardID string) error
+
+	// Solo Karaoke Library (standalone, global holding pool — not board-
+	// scoped; mirrors ListTracks/AddTrack/DeleteTrack's shape).
+	AddSoloKaraokeLibraryTrack(ctx context.Context, t *SoloKaraokeTrack) error
+	ListSoloKaraokeLibraryTracks(ctx context.Context) ([]SoloKaraokeTrack, error)
+	RemoveSoloKaraokeLibraryTrack(ctx context.Context, trackID string) error
+
+	// Solo Karaoke Playlist (standalone, global ordered queue — the engine
+	// plays directly from this list). AddSoloKaraokePlaylistTrack appends at
+	// the end (position = current max + 1). ReorderSoloKaraokePlaylist
+	// atomically rewrites every row's position in one transaction (mirrors
+	// RebuildLayout's "atomically replace everything" pattern — avoids
+	// off-by-one arithmetic from a sequence of individual position updates).
+	AddSoloKaraokePlaylistTrack(ctx context.Context, t *SoloKaraokeTrack) error
+	ListSoloKaraokePlaylistTracks(ctx context.Context) ([]SoloKaraokeTrack, error)
+	RemoveSoloKaraokePlaylistTrack(ctx context.Context, trackID string) error
+	ReorderSoloKaraokePlaylist(ctx context.Context, orderedIDs []string) error
+
+	// GetSoloKaraokeTrack looks up a single track by id across BOTH buckets
+	// (library first, then playlist) — needed to resolve a track's artist/
+	// song/duration/spotifyUri for the requery/manual-lyrics endpoints,
+	// mirroring GetTrack's role for board_tracks. Returns nil, nil if no such
+	// track exists in either bucket.
+	GetSoloKaraokeTrack(ctx context.Context, trackID string) (*SoloKaraokeTrack, error)
 }
 
 // LayoutColumn describes one category column to (re)create in RebuildLayout,
@@ -120,6 +144,17 @@ type BoardReloader interface {
 	ReloadBoard(b *game.Board)
 	StartGame() error
 	ResetToLobby() error
+}
+
+// SoloKaraokeReloader lets the admin handler push the current Solo Karaoke
+// Playlist to the live engine's in-memory queue after a playlist mutation
+// (add/delete/reorder/import) — so the engine never queries Postgres itself.
+// The handler builds the []*game.Track from whatever AdminStore just
+// returned (the same shape ReloadBoard's caller already builds a *game.Board
+// from Postgres data elsewhere), converting the lightweight REST
+// SoloKaraokeTrack rows into the engine's own domain type.
+type SoloKaraokeReloader interface {
+	ReloadSoloKaraokeQueue(tracks []*game.Track)
 }
 
 // LyricsProber fetches raw LRC lyric text for a track from LRCLIB, for the

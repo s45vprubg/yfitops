@@ -26,6 +26,9 @@ import type {
   RevealData,
   ScoreboardData,
   ServerEnvelope,
+  SoloKaraokeActiveData,
+  SoloKaraokeLyricsStatusData,
+  SoloKaraokeNowPlayingData,
   StateData,
   TrackStartData,
   WelcomeData,
@@ -84,6 +87,19 @@ export interface GameView {
   // through the transition back to BOARD so the reveal banner is visible;
   // cleared when the next Daily Double's offer starts or a new track begins.
   ddResult: DailyDoubleResultData | null;
+  // Solo Karaoke (independent mode, orthogonal to GameState — the trivia
+  // state machine stays pinned on LOBBY/GAME_OVER while this is true, per the
+  // server's mode-lock). `soloKaraokeActive` is the broadcast every role gets
+  // (§4A-safe boolean, mirrored to mobile's idle screen); the top-level App
+  // uses it to switch into SoloKaraokeView ahead of the normal GameState
+  // switch. `soloKaraokeNowPlaying` carries full track metadata — stage is
+  // TRUSTED, so no sanitization applies here (unlike mobile).
+  soloKaraokeActive: boolean;
+  soloKaraokeNowPlaying: SoloKaraokeNowPlayingData | null;
+  // Kept as its own field, distinct from `lyricsStatus` above — the server
+  // deliberately broadcasts a separate soloKaraokeLyricsStatus message so the
+  // two modes' lyric-fetch lifecycles never cross-contaminate each other.
+  soloKaraokeLyricsStatus: "idle" | "loading" | "ready" | "none";
 }
 
 // Infer the board row for a given selection so the timer uses the right
@@ -128,6 +144,9 @@ export function useGame() {
     audioActivated: false,
     ddPerformer: null,
     ddResult: null,
+    soloKaraokeActive: false,
+    soloKaraokeNowPlaying: null,
+    soloKaraokeLyricsStatus: "idle",
   });
 
   const clientRef = useRef<GameClient | null>(null);
@@ -357,6 +376,18 @@ export function useGame() {
         }));
       });
       client.on("dailyDouble.result", (e: ServerEnvelope) => patch({ ddResult: e.d as DailyDoubleResultData }));
+
+      // ---- Solo Karaoke: independent mode, orthogonal to GameState ----
+      client.on("soloKaraokeActive", (e: ServerEnvelope) => {
+        patch({ soloKaraokeActive: (e.d as SoloKaraokeActiveData).active });
+      });
+      client.on("soloKaraokeNowPlaying", (e: ServerEnvelope) => {
+        patch({ soloKaraokeNowPlaying: e.d as SoloKaraokeNowPlayingData });
+      });
+      client.on("soloKaraokeLyricsStatus", (e: ServerEnvelope) => {
+        const s = (e.d as SoloKaraokeLyricsStatusData)?.status;
+        if (s === "loading" || s === "ready" || s === "none") patch({ soloKaraokeLyricsStatus: s });
+      });
 
       // ---- audio: backend commands -> local player (§9) ----
       client.on("audio", (e: ServerEnvelope) => {
