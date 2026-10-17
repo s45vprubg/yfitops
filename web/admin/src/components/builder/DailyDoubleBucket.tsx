@@ -164,7 +164,7 @@ export default function DailyDoubleBucket({ api, boardId, tracks, onRefresh }: P
                       <div className="truncate text-xs text-slate-400">{t.artist}</div>
                     </div>
                     <button
-                      onClick={() => removeTrack(t.id)}
+                      onClick={(e) => { e.stopPropagation(); removeTrack(t.id); }}
                       className="shrink-0 rounded px-1.5 py-0.5 text-xs text-slate-500 hover:text-red-400"
                       title="Permanently delete (drag to the Track Library instead to keep the song)"
                     >

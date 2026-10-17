@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeProber is a controllable LyricsProber for handler-level tests. probe
@@ -103,6 +105,122 @@ func TestRescanLyrics_OnlyProbesNeverAttempted(t *testing.T) {
 	}
 	if summary.Attempted != 1 || summary.Resolved != 1 || summary.Truncated {
 		t.Errorf("summary = %+v, want attempted=1 resolved=1 truncated=false", summary)
+	}
+}
+
+// TestRequeryPendingLyrics_RetriesPendingAndNotFound is the regression test
+// for widening the bulk "Retry unresolved" endpoint from pending-only to
+// pending+not_found (s9code-03's context): a genuinely false not_found
+// (recoverable via lyrics.go's near-duplicate fallback — see production
+// cases like Chumbawamba/Tubthumping) must actually get re-probed by this
+// endpoint, not silently skipped the way the never-attempted-only rescan
+// endpoint correctly skips it.
+func TestRequeryPendingLyrics_RetriesPendingAndNotFound(t *testing.T) {
+	store := &mockStore{
+		boards: []Board{{ID: "brd_test", Name: "Test", Cols: 3}},
+		tracks: []Track{
+			{ID: "t_resolved", BoardID: "brd_test", SpotifyURI: "spotify:track:resolved", Artist: "A1", Song: "S1"},
+			{ID: "t_pending", BoardID: "brd_test", SpotifyURI: "spotify:track:pending", Artist: "A2", Song: "S2"},
+			{ID: "t_notfound", BoardID: "brd_test", SpotifyURI: "spotify:track:notfound", Artist: "A3", Song: "S3"},
+		},
+		lyrics: map[string]LyricsRecord{
+			"spotify:track:resolved": {SpotifyURI: "spotify:track:resolved", Status: LyricsStatusResolved, Source: "lrclib"},
+			"spotify:track:pending":  {SpotifyURI: "spotify:track:pending", Status: LyricsStatusPending, LastError: "rate limited"},
+			"spotify:track:notfound": {SpotifyURI: "spotify:track:notfound", Status: LyricsStatusNotFound},
+		},
+	}
+	prober := &fakeProber{probe: map[string]proberResult{
+		"A2|S2": {text: "[00:00.00]recovered", found: true},
+		"A3|S3": {text: "[00:00.00]recovered via fallback", found: true},
+	}}
+	_, mux := newLyricsTestHandler(prober, store)
+
+	w := doReq(mux, "POST", "/api/boards/brd_test/requery-pending-lyrics", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("requery-pending: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	if len(prober.calls) != 2 {
+		t.Fatalf("probe calls = %v, want exactly 2 (pending + not_found, never resolved)", prober.calls)
+	}
+	if store.lyrics["spotify:track:resolved"].Status != LyricsStatusResolved {
+		t.Error("resolved song's status was touched")
+	}
+	if store.lyrics["spotify:track:pending"].Status != LyricsStatusResolved {
+		t.Errorf("pending song should have recovered to resolved, got %+v", store.lyrics["spotify:track:pending"])
+	}
+	if store.lyrics["spotify:track:notfound"].Status != LyricsStatusResolved {
+		t.Errorf("not_found song should have recovered to resolved, got %+v", store.lyrics["spotify:track:notfound"])
+	}
+
+	var summary rescanLyricsResult
+	if err := json.Unmarshal(w.Body.Bytes(), &summary); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if summary.Attempted != 2 || summary.Resolved != 2 {
+		t.Errorf("summary = %+v, want attempted=2 resolved=2", summary)
+	}
+}
+
+// TestRequeryPendingLyrics_PendingNeverStarvedByNotFoundBacklog is the
+// regression test for s9code-04: ListTracks orders by created_at, so a board
+// with more not_found rows ordered BEFORE a handful of still-pending ones
+// could let the not_found backlog consume the entire maxRescanTracksPerRequest
+// budget every single call, permanently starving the recoverable pending
+// rows. Pending must always get first claim on the cap.
+func TestRequeryPendingLyrics_PendingNeverStarvedByNotFoundBacklog(t *testing.T) {
+	origDelay := lyricsProbeDelay
+	lyricsProbeDelay = time.Millisecond
+	defer func() { lyricsProbeDelay = origDelay }()
+
+	// More not_found tracks than the cap, all ordered BEFORE the 2 pending
+	// ones (mirrors ListTracks' created_at-ascending order on a board that's
+	// accumulated a not_found backlog over time).
+	var tracks []Track
+	lyrics := map[string]LyricsRecord{}
+	for i := 0; i < maxRescanTracksPerRequest+10; i++ {
+		uri := fmt.Sprintf("spotify:track:nf%d", i)
+		tracks = append(tracks, Track{
+			ID: fmt.Sprintf("t_nf%d", i), BoardID: "brd_test", SpotifyURI: uri,
+			Artist: fmt.Sprintf("NF%d", i), Song: "Dead Song",
+		})
+		lyrics[uri] = LyricsRecord{SpotifyURI: uri, Status: LyricsStatusNotFound}
+	}
+	tracks = append(tracks,
+		Track{ID: "t_p1", BoardID: "brd_test", SpotifyURI: "spotify:track:p1", Artist: "P1", Song: "Pending One"},
+		Track{ID: "t_p2", BoardID: "brd_test", SpotifyURI: "spotify:track:p2", Artist: "P2", Song: "Pending Two"},
+	)
+	lyrics["spotify:track:p1"] = LyricsRecord{SpotifyURI: "spotify:track:p1", Status: LyricsStatusPending}
+	lyrics["spotify:track:p2"] = LyricsRecord{SpotifyURI: "spotify:track:p2", Status: LyricsStatusPending}
+
+	store := &mockStore{boards: []Board{{ID: "brd_test", Name: "Test", Cols: 3}}, tracks: tracks, lyrics: lyrics}
+	prober := &fakeProber{probe: map[string]proberResult{
+		"P1|Pending One": {text: "[00:00.00]ok", found: true},
+		"P2|Pending Two": {text: "[00:00.00]ok", found: true},
+	}}
+	_, mux := newLyricsTestHandler(prober, store)
+
+	w := doReq(mux, "POST", "/api/boards/brd_test/requery-pending-lyrics", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("requery-pending: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	if store.lyrics["spotify:track:p1"].Status != LyricsStatusResolved {
+		t.Errorf("p1 (pending) was starved by the not_found backlog: %+v", store.lyrics["spotify:track:p1"])
+	}
+	if store.lyrics["spotify:track:p2"].Status != LyricsStatusResolved {
+		t.Errorf("p2 (pending) was starved by the not_found backlog: %+v", store.lyrics["spotify:track:p2"])
+	}
+
+	var summary rescanLyricsResult
+	if err := json.Unmarshal(w.Body.Bytes(), &summary); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if summary.Resolved != 2 {
+		t.Errorf("summary.Resolved = %d, want 2 (both pending tracks recovered)", summary.Resolved)
+	}
+	if !summary.Truncated {
+		t.Error("summary.Truncated = false, want true — the not_found backlog alone exceeds the cap")
 	}
 }
 

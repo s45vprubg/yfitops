@@ -2,15 +2,19 @@ import { useEffect, useRef, useState } from "react";
 import type { AdminRevealCfgData } from "@shared/protocol";
 import type { AdminActions } from "../useAdmin";
 
-// AudioSettingsPanel — everything audio-related in one place: the live
-// operating-volume slider (also what a Daily Double fade-out restores to)
-// plus the full mixing desk, moved here from the former standalone "Mixer"
-// tab so operators don't have to leave the Control Room to touch either.
+// AudioSettingsPanel — two independent sections stacked under the board:
 //
-// Each mixer knob is a VERTICAL fader (fills from the bottom like a channel
-// strip) with the value on top and the label on the bottom cap, plus a toggle
-// "switch" channel. Reveal knobs seed from the server echo and apply NEXT
-// round; skip threshold applies immediately.
+// Volume: a live knob. Dragging it has an immediate, audible effect (and is
+// what a Daily Double fade-out restores to), same as a real volume dial —
+// debounced while dragging so a drag doesn't fire a Spotify API call per
+// pixel, but otherwise applies as you go.
+//
+// Game Settings: everything else that used to live on the "Mixer" tab
+// (letter-reveal timing, hint delays, skip threshold, reveal order). These
+// are NOT a live audio mixer — they never were; that was a naming leftover
+// from before this panel existed. Edits here are a pure draft: nothing is
+// sent to the server until "Save Settings" is pressed, so idly adjusting a
+// number can never change a setting mid-round by accident.
 
 interface Props {
   volumePct?: number;
@@ -19,32 +23,25 @@ interface Props {
   actions: AdminActions;
 }
 
-// Server clamp bounds (mirror reveal.go): [min, max, step].
-const B = {
-  interval: [250, 10000, 250] as const,
-  phase1: [0, 20000, 500] as const,
-  block: [0, 20000, 500] as const,
-  ease: [0, 10000, 100] as const,
-  lockout: [0, 20, 1] as const,
-  autoKaraoke: [0, 15000, 500] as const,
-  hintDelay: [0, 20000, 500] as const,
+// Server clamp bounds (mirror reveal.go), expressed in the unit the form
+// actually shows: seconds for every *Ms knob (operators think in seconds,
+// not milliseconds), raw counts for the two that aren't durations at all.
+const SEC = {
+  interval: [0.25, 10, 0.25] as const,
+  phase1: [0, 20, 0.5] as const,
+  block: [0, 20, 0.5] as const,
+  ease: [0, 10, 0.1] as const,
+  autoKaraoke: [0, 15, 0.5] as const,
+  hintDelay: [0, 20, 0.5] as const,
 };
+const LOCKOUT = [0, 20, 1] as const;
+// Floor matches the server's own clamp (engine.go) and the original spec
+// (design_doc.md: "Skip Voting Threshold slider (50% - 100%)") — below 50%
+// a minority of voters could force a skip, so the server never allows it.
+const THRESH = [50, 100, 5] as const;
 
 export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, actions }: Props) {
-  // Skip threshold: no server readback; local, applies immediately.
-  const [thresh, setThresh] = useState(50);
-  const threshTouched = useRef(false);
-  useEffect(() => {
-    if (!threshTouched.current) return;
-    const id = setTimeout(() => actions.setThresh(thresh), 120);
-    return () => clearTimeout(id);
-  }, [thresh, actions]);
-
-  // Volume: server-echoed (volumePct), but local-while-dragging + debounced
-  // the same way thresh/reveal-cfg are above (s8uia-1) — otherwise every
-  // drag tick fires a real Spotify API call (dozens per drag), producing an
-  // audible stuttering ramp and burning requests against Spotify's own rate
-  // limits.
+  // ---- Volume: live, debounced only to coalesce drag ticks ----
   const [localVolume, setLocalVolume] = useState(volumePct ?? 100);
   const volumeTouched = useRef(false);
   useEffect(() => {
@@ -57,54 +54,72 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
     return () => clearTimeout(id);
   }, [localVolume, onSetVolume]);
 
-  // Reveal knobs seed from the server echo until edited.
-  const [intervalMs, setIntervalMs] = useState(revealCfg?.intervalMs ?? 3000);
-  const [phase1Ms, setPhase1Ms] = useState(revealCfg?.phase1Ms ?? 10000);
-  const [blockMs, setBlockMs] = useState(revealCfg?.blockMs ?? 15000);
-  const [easeMs, setEaseMs] = useState(revealCfg?.easeMs ?? 3000);
-  const [lockoutChars, setLockoutChars] = useState(revealCfg?.lockoutChars ?? 2);
-  const [autoKaraokeMs, setAutoKaraokeMs] = useState(revealCfg?.autoKaraokeMs ?? 3000);
-  const [genreDelayMs, setGenreDelayMs] = useState(revealCfg?.genreDelayMs ?? 3000);
-  const [yearDelayMs, setYearDelayMs] = useState(revealCfg?.yearDelayMs ?? 5000);
-  const [alternate, setAlternate] = useState(revealCfg?.alternate ?? true);
-  const revealTouched = useRef(false);
+  // ---- Game Settings: draft-only until Save ----
+  // threshTouched: skip-vote threshold has no server readback at all (never
+  // echoed back by anything), so `thresh` is only ever a guess seeded at 50.
+  // Save must NEVER push it unless the operator actually touched this one
+  // control — otherwise saving an unrelated field (e.g. a reveal delay)
+  // would silently clobber the real server-side threshold back to 50 (s9ui2-01).
+  const threshTouched = useRef(false);
+  const [thresh, setThresh] = useState(50);
+  const [intervalSec, setIntervalSec] = useState(3);
+  const [phase1Sec, setPhase1Sec] = useState(10);
+  const [blockSec, setBlockSec] = useState(15);
+  const [easeSec, setEaseSec] = useState(3);
+  const [lockoutChars, setLockoutChars] = useState(2);
+  const [autoKaraokeSec, setAutoKaraokeSec] = useState(3);
+  const [genreDelaySec, setGenreDelaySec] = useState(3);
+  const [yearDelaySec, setYearDelaySec] = useState(5);
+  const [alternate, setAlternate] = useState(true);
+  const [dirty, setDirty] = useState(false);
+  const [saved, setSaved] = useState(false);
 
+  // Seed the draft from the live server echo, but only while nothing is
+  // being edited — the same "touched" guard the old sliders used, so a
+  // broadcast landing mid-edit can never clobber what's being typed.
   useEffect(() => {
-    if (revealTouched.current || !revealCfg) return;
-    setIntervalMs(revealCfg.intervalMs);
-    setPhase1Ms(revealCfg.phase1Ms);
-    setBlockMs(revealCfg.blockMs);
-    setEaseMs(revealCfg.easeMs);
+    if (dirty || !revealCfg) return;
+    setIntervalSec(revealCfg.intervalMs / 1000);
+    setPhase1Sec(revealCfg.phase1Ms / 1000);
+    setBlockSec(revealCfg.blockMs / 1000);
+    setEaseSec(revealCfg.easeMs / 1000);
     setLockoutChars(revealCfg.lockoutChars);
-    setAutoKaraokeMs(revealCfg.autoKaraokeMs);
-    setGenreDelayMs(revealCfg.genreDelayMs);
-    setYearDelayMs(revealCfg.yearDelayMs);
+    setAutoKaraokeSec(revealCfg.autoKaraokeMs / 1000);
+    setGenreDelaySec(revealCfg.genreDelayMs / 1000);
+    setYearDelaySec(revealCfg.yearDelayMs / 1000);
     setAlternate(revealCfg.alternate);
-  }, [revealCfg]);
+  }, [revealCfg, dirty]);
 
-  useEffect(() => {
-    if (!revealTouched.current) return;
-    const id = setTimeout(
-      () => actions.setRevealCfg({ intervalMs, phase1Ms, blockMs, easeMs, lockoutChars, autoKaraokeMs, genreDelayMs, yearDelayMs }),
-      150,
-    );
-    return () => clearTimeout(id);
-  }, [intervalMs, phase1Ms, blockMs, easeMs, lockoutChars, autoKaraokeMs, genreDelayMs, yearDelayMs, actions]);
+  const edit = <T,>(setter: (v: T) => void) => (v: T) => {
+    setDirty(true);
+    setSaved(false);
+    setter(v);
+  };
+  const editThresh = (v: number) => { threshTouched.current = true; edit(setThresh)(v); };
 
-  const edit = <T,>(setter: (v: T) => void) => (v: T) => { revealTouched.current = true; setter(v); };
+  const handleSave = () => {
+    if (threshTouched.current) actions.setThresh(thresh);
+    actions.setRevealCfg({
+      intervalMs: Math.round(intervalSec * 1000),
+      phase1Ms: Math.round(phase1Sec * 1000),
+      blockMs: Math.round(blockSec * 1000),
+      easeMs: Math.round(easeSec * 1000),
+      lockoutChars: Math.round(lockoutChars),
+      autoKaraokeMs: Math.round(autoKaraokeSec * 1000),
+      genreDelayMs: Math.round(genreDelaySec * 1000),
+      yearDelayMs: Math.round(yearDelaySec * 1000),
+      alternate,
+    });
+    setDirty(false);
+    setSaved(true);
+  };
 
   return (
     <div className="border-t border-edge">
+      {/* Volume */}
       <div className="flex items-baseline justify-between px-3 py-2">
-        <h2 className="text-xs font-bold uppercase tracking-[0.25em] text-accent">Audio Settings</h2>
+        <h2 className="text-xs font-bold uppercase tracking-[0.25em] text-accent">Volume</h2>
       </div>
-      <p className="px-3 pb-2 text-[10px] text-slate-500">
-        Live game knobs. Reveal channels apply to the next round; skip threshold applies immediately.
-      </p>
-
-      {/* Live operating volume — also the level a Daily Double fade-out
-          restores to once a performance ends, so this is the baseline, not
-          a one-off control. */}
       <div className="flex items-center gap-2 border-b border-edge px-3 py-2">
         <span className="text-[10px] uppercase tracking-wide text-slate-500" title="Playback volume">
           🔊
@@ -121,114 +136,148 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
         <span className="tnum w-8 text-right text-[10px] text-slate-500">{localVolume}%</span>
       </div>
 
-      {/* The desk: channel strips, wrapping to fit this column's width. */}
-      <div className="max-h-[40vh] overflow-auto p-2">
-        <div className="flex flex-wrap items-end gap-2">
-          <Fader label="Skip" sub="threshold" value={thresh} min={0} max={100} step={5}
-            fmt={(v) => `${v}%`} onChange={(v) => { threshTouched.current = true; setThresh(v); }} />
+      {/* Game Settings */}
+      <div className="flex items-baseline justify-between px-3 py-2">
+        <h2 className="text-xs font-bold uppercase tracking-[0.25em] text-accent">Game Settings</h2>
+        {dirty && <span className="text-[10px] font-semibold uppercase text-amber-400">unsaved changes</span>}
+      </div>
+      <p className="px-3 pb-1 text-[10px] text-slate-500">
+        A draft until you press Save — nothing here changes live while you type.
+      </p>
 
-          <Divider label="Hints — next round" />
+      <div className="max-h-[40vh] overflow-auto px-3">
+        <SettingRow label="Skip vote threshold" sub="% of players voting to skip a track"
+          value={thresh} min={THRESH[0]} max={THRESH[1]} step={THRESH[2]} suffix="%"
+          onChange={editThresh} />
 
-          <Fader label="Genre" sub="show after" value={genreDelayMs} min={B.hintDelay[0]} max={B.hintDelay[1]} step={B.hintDelay[2]}
-            fmt={(v) => `${(v / 1000).toFixed(1)}s`} onChange={edit(setGenreDelayMs)} />
-          <Fader label="Year" sub="after genre" value={yearDelayMs} min={B.hintDelay[0]} max={B.hintDelay[1]} step={B.hintDelay[2]}
-            fmt={(v) => `${(v / 1000).toFixed(1)}s`} onChange={edit(setYearDelayMs)} />
+        <Divider label="Hints — apply next round" />
+        <SettingRow label="Reveal genre after" sub="seconds into the track"
+          value={genreDelaySec} min={SEC.hintDelay[0]} max={SEC.hintDelay[1]} step={SEC.hintDelay[2]} suffix="s"
+          onChange={edit(setGenreDelaySec)} />
+        <SettingRow label="Reveal year after" sub="seconds into the track"
+          value={yearDelaySec} min={SEC.hintDelay[0]} max={SEC.hintDelay[1]} step={SEC.hintDelay[2]} suffix="s"
+          onChange={edit(setYearDelaySec)} />
 
-          <Divider label="Reveal — next round" />
+        <Divider label="Letter reveal — apply next round" />
+        <SettingRow label="Letter reveal interval" sub="seconds between each revealed letter"
+          value={intervalSec} min={SEC.interval[0]} max={SEC.interval[1]} step={SEC.interval[2]} suffix="s"
+          onChange={edit(setIntervalSec)} />
+        <SettingRow label="Start revealing letters after" sub="seconds into the track"
+          value={phase1Sec} min={SEC.phase1[0]} max={SEC.phase1[1]} step={SEC.phase1[2]} suffix="s"
+          onChange={edit(setPhase1Sec)} />
+        <SettingRow label="Hide title length until" sub="seconds (0 = never hide the length)"
+          value={blockSec} min={SEC.block[0]} max={SEC.block[1]} step={SEC.block[2]} suffix="s"
+          onChange={edit(setBlockSec)} />
+        <SettingRow label="Length reveal animation" sub="seconds to morph to the real length"
+          value={easeSec} min={SEC.ease[0]} max={SEC.ease[1]} step={SEC.ease[2]} suffix="s"
+          onChange={edit(setEaseSec)} />
+        <SettingRow label="Lock the buzzer with" sub="letters still unrevealed"
+          value={lockoutChars} min={LOCKOUT[0]} max={LOCKOUT[1]} step={LOCKOUT[2]} suffix="chars"
+          onChange={edit(setLockoutChars)} />
+        <SettingRow label="Auto-start karaoke after" sub="seconds after reveal completes (0 = off)"
+          value={autoKaraokeSec} min={SEC.autoKaraoke[0]} max={SEC.autoKaraoke[1]} step={SEC.autoKaraoke[2]} suffix="s"
+          onChange={edit(setAutoKaraokeSec)} />
 
-          <Fader label="Interval" sub="per letter" value={intervalMs} min={B.interval[0]} max={B.interval[1]} step={B.interval[2]}
-            fmt={(v) => `${(v / 1000).toFixed(2)}s`} onChange={edit(setIntervalMs)} />
-          <Fader label="Start" sub="letters after" value={phase1Ms} min={B.phase1[0]} max={B.phase1[1]} step={B.phase1[2]}
-            fmt={(v) => `${(v / 1000).toFixed(1)}s`} onChange={edit(setPhase1Ms)} />
-          <Fader label="Hide len" sub="block until" value={blockMs} min={B.block[0]} max={B.block[1]} step={B.block[2]}
-            fmt={(v) => (v === 0 ? "off" : `${(v / 1000).toFixed(1)}s`)} onChange={edit(setBlockMs)} />
-          <Fader label="Morph" sub="length ease" value={easeMs} min={B.ease[0]} max={B.ease[1]} step={B.ease[2]}
-            fmt={(v) => `${(v / 1000).toFixed(1)}s`} onChange={edit(setEaseMs)} />
-          <Fader label="Lockout" sub="chars left" value={lockoutChars} min={B.lockout[0]} max={B.lockout[1]} step={B.lockout[2]}
-            fmt={(v) => `${v}`} onChange={edit(setLockoutChars)} />
-          <Fader label="Auto lyrics" sub="after reveal" value={autoKaraokeMs} min={B.autoKaraoke[0]} max={B.autoKaraoke[1]} step={B.autoKaraoke[2]}
-            fmt={(v) => (v === 0 ? "off" : `${(v / 1000).toFixed(1)}s`)} onChange={edit(setAutoKaraokeMs)} />
+        <label className="flex items-center justify-between gap-3 border-b border-edge/50 py-2.5 text-xs last:border-0">
+          <span className="text-slate-300">Alternate artist/song reveal order</span>
+          <input
+            type="checkbox"
+            checked={alternate}
+            onChange={(e) => edit(setAlternate)(e.target.checked)}
+            className="h-4 w-4 accent-accent"
+          />
+        </label>
+      </div>
 
-          <Switch label="Alt" sub="artist/song" checked={alternate}
-            onChange={(v) => { revealTouched.current = true; setAlternate(v); actions.setRevealCfg({ alternate: v }); }} />
-        </div>
+      <div className="flex items-center justify-end gap-2 border-t border-edge px-3 py-2">
+        {saved && !dirty && <span className="text-[10px] font-semibold uppercase text-emerald-400">Saved</span>}
+        <button
+          onClick={handleSave}
+          disabled={!dirty}
+          className="rounded border border-accent/60 bg-accent/10 px-3 py-1.5 text-xs font-bold uppercase tracking-wide text-accent hover:bg-accent/20 disabled:opacity-40"
+        >
+          Save Settings
+        </button>
       </div>
     </div>
   );
 }
 
-// Divider — a labelled gap between channel groups on the desk.
-function Divider({ label }: { label: string }) {
-  return (
-    <div className="mx-1 flex h-56 flex-col items-center justify-center">
-      <div className="h-full w-px bg-edge" />
-      <span className="mt-2 max-w-[3rem] rotate-180 text-center text-[9px] uppercase tracking-widest text-slate-600 [writing-mode:vertical-rl]">
-        {label}
-      </span>
-    </div>
-  );
-}
-
-// Fader — a vertical channel fader. The native range input is rotated so the
-// thumb travels bottom→top like a real mixer slider; the filled track shows
-// level. Value reads on top, label on the bottom cap.
-function Fader({
-  label, sub, value, min, max, step, fmt, onChange,
+// SettingRow — one labelled setting: a title + unit sub-label on the left,
+// a plain number input + suffix on the right. The point of this whole
+// rework: a number textbox that says exactly what it does, not a vertical
+// fader an operator has to interpret.
+//
+// The input holds its own raw text while focused and only commits (parse,
+// clamp, snap to the nearest step) on blur/Enter — clamping on every
+// keystroke made it impossible to type a decimal point or a value whose
+// first digit was below a non-zero min (e.g. "85" into a 50-100 field: the
+// "8" alone clamps up to 50 before "5" can be typed) (s9ui2-02/03).
+function SettingRow({
+  label, sub, value, min, max, step, suffix, onChange,
 }: {
   label: string; sub?: string; value: number; min: number; max: number; step: number;
-  fmt: (v: number) => string; onChange: (v: number) => void;
+  suffix?: string; onChange: (v: number) => void;
 }) {
-  const pct = max > min ? ((value - min) / (max - min)) * 100 : 0;
-  return (
-    <div className="flex w-14 flex-col items-center gap-2">
-      <div className="font-mono text-xs font-semibold text-accent">{fmt(value)}</div>
+  const [text, setText] = useState(String(value));
+  const focused = useRef(false);
 
-      {/* Fader track: a tall rail with a fill from the bottom + the rotated input. */}
-      <div className="relative flex h-48 w-7 items-center justify-center rounded bg-panel">
-        <div className="absolute inset-x-0 bottom-0 rounded-b bg-accent/25" style={{ height: `${pct}%` }} />
-        <div className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-edge" />
+  // Mirror the committed value into the field, but only while it's not
+  // being edited — otherwise a parent re-render would stomp mid-typing.
+  useEffect(() => {
+    if (!focused.current) setText(String(value));
+  }, [value]);
+
+  const commit = () => {
+    const n = Number(text);
+    if (Number.isNaN(n)) {
+      setText(String(value)); // invalid/empty: revert, don't propagate
+      return;
+    }
+    const clamped = Math.min(max, Math.max(min, n));
+    // Snap to the nearest step (also rounds lockoutChars to a whole number,
+    // since its step is 1) and clean up any float noise from the division.
+    const stepped = Math.round(Math.round((clamped - min) / step) * step * 1000) / 1000 + min;
+    const final = Math.min(max, Math.max(min, stepped));
+    onChange(final);
+    setText(String(final));
+  };
+
+  return (
+    <div className="flex items-center justify-between gap-3 border-b border-edge/50 py-2.5 text-xs">
+      <div className="min-w-0">
+        <div className="font-semibold text-slate-200">{label}</div>
+        {sub && <div className="text-[10px] text-slate-500">{sub}</div>}
+      </div>
+      <div className="flex shrink-0 items-center gap-1.5">
         <input
-          type="range"
+          type="number"
+          inputMode="decimal"
           min={min}
           max={max}
           step={step}
-          value={value}
-          onChange={(e) => onChange(Number(e.target.value))}
-          className="h-48 w-48 -rotate-90 cursor-pointer accent-accent"
-          style={{ appearance: "auto" }}
+          value={text}
+          onFocus={() => { focused.current = true; }}
+          onChange={(e) => setText(e.target.value)}
+          onBlur={() => { focused.current = false; commit(); }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") { commit(); (e.target as HTMLInputElement).blur(); }
+            if (e.key === "Escape") { setText(String(value)); (e.target as HTMLInputElement).blur(); }
+          }}
+          className="w-20 rounded border border-edge bg-panel px-2 py-1 text-right font-mono text-xs text-slate-100 outline-none focus:border-accent"
         />
-      </div>
-
-      <div className="text-center leading-tight">
-        <div className="text-[10px] font-bold uppercase tracking-wide text-slate-200">{label}</div>
-        {sub && <div className="text-[8px] uppercase tracking-wide text-slate-500">{sub}</div>}
+        {suffix && <span className="w-9 text-[10px] text-slate-500">{suffix}</span>}
       </div>
     </div>
   );
 }
 
-// Switch — a mixer-style on/off channel (a vertical toggle button in the same
-// footprint as a fader).
-function Switch({ label, sub, checked, onChange }: { label: string; sub?: string; checked: boolean; onChange: (v: boolean) => void }) {
+// Divider — a labelled gap between groups of related settings.
+function Divider({ label }: { label: string }) {
   return (
-    <div className="flex w-14 flex-col items-center gap-2">
-      <div className={`font-mono text-xs font-semibold ${checked ? "text-accent" : "text-slate-600"}`}>
-        {checked ? "ON" : "OFF"}
-      </div>
-      <button
-        onClick={() => onChange(!checked)}
-        className={`relative flex h-48 w-7 flex-col rounded p-1 transition ${
-          checked ? "justify-start bg-accent/25" : "justify-end bg-panel"
-        }`}
-        aria-pressed={checked}
-        title="Toggle"
-      >
-        <span className={`h-7 w-full rounded shadow ${checked ? "bg-accent" : "bg-slate-600"}`} />
-      </button>
-      <div className="text-center leading-tight">
-        <div className="text-[10px] font-bold uppercase tracking-wide text-slate-200">{label}</div>
-        {sub && <div className="text-[8px] uppercase tracking-wide text-slate-500">{sub}</div>}
-      </div>
+    <div className="mt-2 flex items-center gap-2 pb-1">
+      <span className="text-[9px] font-bold uppercase tracking-widest text-slate-600">{label}</span>
+      <div className="h-px flex-1 bg-edge" />
     </div>
   );
 }

@@ -317,37 +317,47 @@ func (h *Handler) requeryPendingLyrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Two passes, pending first: ListTracks orders by created_at, so a board
+	// that's accumulated a large not_found backlog ahead of a handful of
+	// still-pending tracks could otherwise let that backlog consume the
+	// entire maxRescanTracksPerRequest budget every single call, forever
+	// starving the recoverable pending rows out of ever being attempted
+	// (s9code-04). Pending always gets first claim on the cap; not_found
+	// only spends whatever's left.
 	attempted, resolved, truncated := 0, 0, false
-	for i, t := range tracks {
-		if r.Context().Err() != nil {
-			break
-		}
-		rec, ok := existing[t.SpotifyURI]
-		if !ok || (rec.Status != "pending" && rec.Status != "not_found") {
-			continue
-		}
-		if attempted >= maxRescanTracksPerRequest {
-			truncated = true
-			break
-		}
-		text, found, perr := h.lyrics.Probe(r.Context(), t.Artist, t.Song, int(t.DurationMs/1000))
-		attempted++
-		switch {
-		case perr != nil:
-			_ = h.store.UpsertLyricsError(r.Context(), t.SpotifyURI, perr.Error())
-		case !found:
-			_ = h.store.UpsertLyricsNotFound(r.Context(), t.SpotifyURI)
-		default:
-			_ = h.store.UpsertLyricsResolved(r.Context(), t.SpotifyURI, text, "lrclib")
-			resolved++
-		}
-		if i < len(tracks)-1 {
+	runPass := func(wantStatus string) {
+		for _, t := range tracks {
+			if r.Context().Err() != nil {
+				return
+			}
+			rec, ok := existing[t.SpotifyURI]
+			if !ok || rec.Status != wantStatus {
+				continue
+			}
+			if attempted >= maxRescanTracksPerRequest {
+				truncated = true
+				return
+			}
+			text, found, perr := h.lyrics.Probe(r.Context(), t.Artist, t.Song, int(t.DurationMs/1000))
+			attempted++
+			switch {
+			case perr != nil:
+				_ = h.store.UpsertLyricsError(r.Context(), t.SpotifyURI, perr.Error())
+			case !found:
+				_ = h.store.UpsertLyricsNotFound(r.Context(), t.SpotifyURI)
+			default:
+				_ = h.store.UpsertLyricsResolved(r.Context(), t.SpotifyURI, text, "lrclib")
+				resolved++
+			}
 			select {
 			case <-time.After(lyricsProbeDelay):
 			case <-r.Context().Done():
 			}
 		}
 	}
+	runPass("pending")
+	runPass("not_found")
+
 	writeJSON(w, http.StatusOK, rescanLyricsResult{Attempted: attempted, Resolved: resolved, Truncated: truncated})
 }
 

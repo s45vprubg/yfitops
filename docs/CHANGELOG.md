@@ -225,6 +225,47 @@ different edit/remix (verified by hand — compilation/radio edits of the
 same songs differ by tens of seconds, not ~1s) is never picked up by this,
 so it can't desync a karaoke overlay against a shorter/different cut.
 
+### Changed — Mixer sliders replaced with a Volume + Game Settings form (2026-10-16)
+The old "Mixer" fader rack was never an audio equalizer — it was always
+game-reveal-timing knobs (skip threshold, hint delays, letter-reveal
+timing) laid out as vertical sliders, which made the actual values hard to
+read and, after an earlier move to this panel, confusing to find. Replaced
+with two clearly separate sections: a **Volume** slider (unchanged, live)
+and a **Game Settings** form — every knob is now a labeled number input or
+checkbox with a plain-English label and a unit in seconds, and nothing
+applies live: edits are a pure draft until **Save Settings** is pressed.
+Confirmed (via Spotify's own docs and the DRM constraints on their Web
+Playback SDK) that a real bass/treble audio EQ isn't achievable with this
+architecture, so Audio Settings stops at Volume.
+
+### Fixed — QA sweep 9 (16 findings, 1 critical) (2026-10-16/17)
+Full report: `docs/security/qa-sweep-9.md`. Headline fix: the new Game
+Settings form's Save button was unconditionally pushing a hardcoded
+default skip-vote-threshold value to the server on every save — including
+saves of totally unrelated fields — because that control has no
+server-side readback and the panel genuinely remounts (resetting its
+default) every time the admin switches between the Control Room and Board
+Builder tabs. Caught and fixed before this ever reached production. Also:
+decimal values couldn't be typed into any of the new number inputs
+(clamped on every keystroke instead of on commit); the LRCLIB
+near-duplicate fallback could burst-request LRCLIB and silently swallow
+its own rate limiting; the bulk "Retry unresolved" action could let a
+backlog of permanently-dead `not_found` tracks starve out the genuinely
+recoverable `pending` ones; and a few Daily Double bucket drag-and-drop
+polish fixes (stopPropagation on the delete button, a clear error instead
+of a silent no-op when dropping on the grid, a race guard against
+double-dragging the same track).
+
+### Fixed — admin bundle shipped without its production backend URL (2026-10-17)
+A local-only verification build (for an unrelated favicon change) got
+deployed without the `VITE_HTTP_URL=https://yfitops.us` build flag, so the
+shipped bundle fell back to its default (`http://<hostname>:8777`,
+bypassing nginx/TLS). Every HTTP-driven call from the admin panel (Spotify
+status/token, Board Builder's REST endpoints) was silently blocked by the
+browser's mixed-content policy; Control Room's live game state (over
+WebTransport, a separate connection) was unaffected. Rebuilt and redeployed
+with the correct flag.
+
 ## [Unreleased] — 2026-07-01
 
 ### Added

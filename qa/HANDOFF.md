@@ -946,3 +946,58 @@ diff against this sweep's HEAD first.
   show last-picked cell on admin (and optionally stage, placement TBD), a
   "Karaoke" admin tab after Board Builder (content TBD), and a fix to the
   Audio Settings UI (nothing specific reported yet — ask before touching).
+
+# SWEEP 9 (2026-10-16/17) — DONE
+
+Full writeup: `docs/security/qa-sweep-9.md`. Outcome: **16 findings, 16
+CONFIRMED, 0 REFUTED. 1 CRITICAL, 3 HIGH, 7 MEDIUM, 5 LOW. 13 fixed and
+verified cold, 3 deliberately deferred** (s9code-03: not_found retry has no
+cooldown, bounded/low-risk, needs a small schema-adjacent plumbing change;
+s9ui2-04: unsaved Game Settings drafts lost on tab-switch unmount, UX-only
+once s9ui2-01 is fixed; s9ui2-05: skip-threshold has no server readback at
+all, pre-existing since before this session, now lower-stakes). The
+critical finding (s9ui2-01) was in code written earlier *this same
+session* — the AudioSettingsPanel rewrite — and was caught before it ever
+reached production: Save Settings unconditionally pushed a hardcoded-50
+local skip-threshold default to the server on every save, including saves
+triggered by unrelated fields, because `AudioSettingsPanel` genuinely
+unmounts/remounts on every Control Room <-> Board Builder tab switch
+(confirmed in App.tsx) and the threshold has zero server-side echo. Fixed
+with a `threshTouched` guard restoring the exact safety property the
+pre-rewrite slider had. Full gotchas and breakdown in the writeup.
+
+## Separately: a real production bug found via a live error report
+
+Not from the hunt pipeline — mid-sweep, the user reported Mixed Content
+console errors on the live admin page (`http://yfitops.us:8777/...` blocked
+by the browser because the page loads over HTTPS). Confirmed directly on
+the box: the currently-deployed admin bundle had neither `https://yfitops.us`
+nor `yfitops.us:8777` as a literal string in it, meaning it was built
+without the required `VITE_HTTP_URL=https://yfitops.us` flag — one of this
+session's local-only verification builds (for the favicon swap) must have
+gotten shipped without it. Scope was narrower than "full outage": only the
+HTTP-driven calls (Spotify status/token, Board Builder's REST endpoints)
+were blocked — Control Room's live game state goes over WebTransport, a
+separate connection unaffected by this. Rebuilt with the correct flag and
+redeployed immediately; confirmed the new bundle carries the right URL.
+**Lesson for next session**: always pass `env VITE_HTTP_URL=https://yfitops.us`
+on every admin/stage build intended for production, even a "just checking
+it compiles" build — if that `dist/` is the one that later gets shipped
+(or a later step forgets to rebuild before deploying), a quick local check
+becomes a live incident. Consider a `scripts/deploy-admin.sh` wrapper that
+always sets this instead of relying on remembering the env prefix every time.
+
+## Still open after sweep 9
+
+Unchanged from sweep 8, not re-litigated: no frontend test runner (now 6
+sweeps running), the `client.ts` locked-contract question, `uimobile-4`,
+`adminapi-5`, the 3x-duplicated section 7 decay curve. New from this
+sweep: s9code-03 (not_found retry cooldown), s9ui2-04 (draft persistence
+across tab switches), s9ui2-05 (threshold server readback) — the latter
+two are good candidates to fix together since both need the same shape of
+change (thread one more field through the existing admin-sync broadcast).
+
+## Sweep 10 recommendation
+
+Low urgency on a hunt basis. See `docs/security/qa-sweep-9.md` for full
+reasoning. Re-scope again per the established rule if more features land.

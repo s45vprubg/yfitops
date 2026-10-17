@@ -173,12 +173,25 @@ export default function BoardBuilderPage({ secret }: Props) {
     return undefined;
   };
 
+  // Tracks ids currently mid-move. @hello-pangea/dnd releases its drag
+  // session as soon as onDragEnd fires on mouseup — it does NOT wait for
+  // this (async) handler's promise to settle, so a second drag gesture on
+  // the same still-rendered row before refresh() lands could otherwise
+  // read stale membership and double-execute a move (e.g. two create+delete
+  // round trips for the same track, risking a duplicate). Checked/set for
+  // every branch, not just the Daily Double ones, since the same unguarded
+  // async gap exists on every move below (s9ui1-03).
+  const movingIds = useRef(new Set<string>());
+
   const handleDragEnd = async (result: DropResult) => {
     if (!selectedId || !result.destination) return;
 
     const src = result.source;
     const dst = result.destination;
     const trackId = result.draggableId;
+
+    if (movingIds.current.has(trackId)) return; // already mid-move, ignore
+    movingIds.current.add(trackId);
 
     const parseCell = (id: string) => {
       const m = id.match(/^cell-(\d+)-(\d+)$/);
@@ -190,7 +203,9 @@ export default function BoardBuilderPage({ secret }: Props) {
 
     try {
       setError(null);
-      if (dst.droppableId === "dailyDouble") {
+      if (src.droppableId === "dailyDouble" && dstCell) {
+        setError("Daily Double tracks can't be placed on the grid directly — drag to the Track Library first.");
+      } else if (dst.droppableId === "dailyDouble") {
         // MOVE: the track leaves the grid system entirely (deleting the
         // board_tracks row cascades out of any cell placement) and is
         // re-created in the bucket's own table — a Daily Double track can
@@ -283,6 +298,7 @@ export default function BoardBuilderPage({ secret }: Props) {
       // a second drag against stale membership while this refetch is still
       // in flight (dd-ui-admin-2).
       await refresh();
+      movingIds.current.delete(trackId);
     }
   };
 
@@ -354,8 +370,13 @@ export default function BoardBuilderPage({ secret }: Props) {
           <DailyDoubleBucket api={api} boardId={selectedId} tracks={ddBucket} onRefresh={refresh} />
         </div>
         {requeryError && (
-          <div className="border-t border-red-900/60 bg-red-950/40 px-4 py-2 text-xs text-red-300">
+          // sticky: a requery can now be triggered on a track deep in a
+          // scrolled BuilderGrid cell, not just HoldingArea's own column —
+          // pin this so it stays visible regardless of inner-column scroll
+          // position instead of landing below the fold (s9ui1-04).
+          <div className="sticky bottom-0 z-10 border-t border-red-900/60 bg-red-950/95 px-4 py-2 text-xs text-red-300">
             {requeryError}
+            <button onClick={() => setRequeryError(null)} className="ml-3 underline">Dismiss</button>
           </div>
         )}
         {manualLyricsTrack && (

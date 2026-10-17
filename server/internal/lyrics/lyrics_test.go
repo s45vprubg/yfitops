@@ -395,6 +395,117 @@ func TestProbe_FallbackRejectsDistantDuration(t *testing.T) {
 	}
 }
 
+// TestProbe_FallbackPicksClosestOfMultipleCandidates proves the fallback
+// doesn't just take the first in-tolerance synced match — with two
+// candidates at different in-tolerance distances, the closer one must win
+// (s9code-05: an unconditional first-match assignment would pass every
+// other existing test but fail this one).
+func TestProbe_FallbackPicksClosestOfMultipleCandidates(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/get":
+			_, _ = w.Write([]byte(`{"syncedLyrics":""}`))
+		case "/api/search":
+			// Farther candidate (diff 0.9s) listed FIRST on purpose: if the
+			// implementation regressed to "first in-tolerance match wins"
+			// instead of "closest wins", it would return this one and fail
+			// the assertion below.
+			_, _ = w.Write([]byte(`[
+				{"duration":278.9,"syncedLyrics":"[00:00.00]farther match"},
+				{"duration":278.2,"syncedLyrics":"[00:00.00]closer match"}
+			]`))
+		}
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv.URL)
+	text, found, err := c.Probe(context.Background(), "a", "b", 278)
+	if err != nil {
+		t.Fatalf("Probe error: %v", err)
+	}
+	if !found {
+		t.Fatal("found = false, want true")
+	}
+	if text != "[00:00.00]closer match" {
+		t.Fatalf("text = %q, want the closer (0.2s off) candidate, not the farther (0.9s off) one", text)
+	}
+}
+
+// TestProbe_FallbackFailureModesNeverPropagateAsErrors proves
+// searchForSyncedWithinTolerance's central safety contract: a malformed
+// response from /api/search can only ever fall back to the primary
+// not-found result, never turn it into a new kind of error (s9code-06).
+func TestProbe_FallbackFailureModesNeverPropagateAsErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		code int
+	}{
+		{"server error", "", http.StatusInternalServerError},
+		{"malformed JSON", "not json at all", http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/get":
+					_, _ = w.Write([]byte(`{"syncedLyrics":""}`))
+				case "/api/search":
+					w.WriteHeader(tc.code)
+					if tc.body != "" {
+						_, _ = w.Write([]byte(tc.body))
+					}
+				}
+			}))
+			defer srv.Close()
+
+			c := newClient(t, srv.URL)
+			_, found, err := c.Probe(context.Background(), "a", "b", 278)
+			if err != nil {
+				t.Fatalf("Probe error: %v, want nil (primary not-found result preserved)", err)
+			}
+			if found {
+				t.Fatal("found = true, want false")
+			}
+		})
+	}
+}
+
+// TestProbe_FallbackRetriesOnceAfterRateLimit proves a 429/503 on the
+// /api/search call itself gets the same one-retry-after-Retry-After
+// treatment as the primary /api/get call, instead of being silently
+// treated as "no near-duplicate exists" (s9code-02).
+func TestProbe_FallbackRetriesOnceAfterRateLimit(t *testing.T) {
+	searchCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/get":
+			_, _ = w.Write([]byte(`{"syncedLyrics":""}`))
+		case "/api/search":
+			searchCalls++
+			if searchCalls == 1 {
+				w.Header().Set("Retry-After", "0")
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			_, _ = w.Write([]byte(`[{"duration":278,"syncedLyrics":"[00:00.00]recovered after retry"}]`))
+		}
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv.URL)
+	text, found, err := c.Probe(context.Background(), "a", "b", 278)
+	if err != nil {
+		t.Fatalf("Probe error: %v", err)
+	}
+	if !found || text != "[00:00.00]recovered after retry" {
+		t.Fatalf("found=%v text=%q, want the fallback to recover after one retry", found, text)
+	}
+	if searchCalls != 2 {
+		t.Fatalf("search calls = %d, want 2 (one 429 + one retry)", searchCalls)
+	}
+}
+
 // TestProbe_SkipsFallbackWhenPrimaryAlreadyFound proves the fallback never
 // fires (and so never spends a second request) once /api/get already
 // resolved synced lyrics directly — it only ever supplements a clean

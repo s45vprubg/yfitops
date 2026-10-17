@@ -150,12 +150,26 @@ func (c *LRCLIBClient) Probe(ctx context.Context, artist, song string, durationS
 	// of those). Only tried when the primary call cleanly found nothing;
 	// never overrides an error, and never introduces a new one of its own.
 	if err == nil && !found {
+		// Pace the fallback the same way the admin layer paces inter-track
+		// probes (lyricsProbeDelay in admin/tracks.go) — firing it back-to-back
+		// with the primary call doubled the burst rate against a host this
+		// project has repeatedly hit rate limits on (s9code-01).
+		select {
+		case <-time.After(fallbackProbeDelay):
+		case <-ctx.Done():
+			return text, found, err
+		}
 		if searchText, searchFound := c.searchForSyncedWithinTolerance(ctx, artist, song, durationSec); searchFound {
 			return searchText, true, nil
 		}
 	}
 	return text, found, err
 }
+
+// fallbackProbeDelay paces the /api/search fallback relative to the primary
+// /api/get call it follows (s9code-01) — not a retry wait, just the same
+// "don't burst" courtesy applied between any two LRCLIB calls for one track.
+const fallbackProbeDelay = 300 * time.Millisecond
 
 func asRateLimitError(err error) (*RateLimitError, bool) {
 	var rle *RateLimitError
@@ -176,38 +190,29 @@ type lrclibSearchResult struct {
 // found no synced lyrics: /api/search returns every submission for the
 // artist+track regardless of duration, which can surface a near-duplicate
 // submission (same recording, slightly different reported length) that DOES
-// have synced lyrics. Any failure here (network, bad JSON, non-200) is
-// swallowed — this only ever adds a result on top of the primary not-found
-// answer, never turns a clean "not found" into a different kind of failure.
+// have synced lyrics. Any failure here (network, bad JSON, non-200 other than
+// a rate limit) is swallowed — this only ever adds a result on top of the
+// primary not-found answer, never turns a clean "not found" into a different
+// kind of failure. A 429/503 gets ONE retry-after-wait like probeOnce's own
+// primary call (s9code-02) rather than being silently treated as "no match" —
+// otherwise a rate limit on this specific request looks identical to a
+// genuine absence, and no backoff signal reaches the caller's loop.
 func (c *LRCLIBClient) searchForSyncedWithinTolerance(ctx context.Context, artist, song string, durationSec int) (string, bool) {
-	q := url.Values{}
-	q.Set("artist_name", artist)
-	q.Set("track_name", song)
-	endpoint := c.baseURL + "/api/search?" + q.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return "", false
+	results, rle, err := c.searchOnce(ctx, artist, song)
+	if rle != nil {
+		wait := rle.RetryAfter
+		if wait > maxRetryWait {
+			wait = maxRetryWait
+		}
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return "", false
+		}
+		results, rle, err = c.searchOnce(ctx, artist, song)
 	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", userAgent)
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return "", false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", false
-	}
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxLyricsBytes))
-	if err != nil {
-		return "", false
-	}
-	var results []lrclibSearchResult
-	if err := json.Unmarshal(body, &results); err != nil {
-		return "", false
+	if err != nil || rle != nil {
+		return "", false // genuine failure, or still rate-limited after the one retry: give up quietly
 	}
 
 	target := float64(durationSec)
@@ -226,6 +231,49 @@ func (c *LRCLIBClient) searchForSyncedWithinTolerance(ctx context.Context, artis
 		}
 	}
 	return bestText, found
+}
+
+// searchOnce makes a single /api/search request with no retry logic, mirroring
+// probeOnce's shape: rle is non-nil on 429/503 (caller decides whether to wait
+// and retry), err is any other failure, and results is nil whenever rle or err
+// is set.
+func (c *LRCLIBClient) searchOnce(ctx context.Context, artist, song string) ([]lrclibSearchResult, *RateLimitError, error) {
+	q := url.Values{}
+	q.Set("artist_name", artist)
+	q.Set("track_name", song)
+	endpoint := c.baseURL + "/api/search?" + q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", userAgent)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		return nil, &RateLimitError{RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"))}, nil
+	case http.StatusOK:
+		// fall through to body parsing below
+	default:
+		return nil, nil, fmt.Errorf("lyrics: search unexpected status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxLyricsBytes))
+	if err != nil {
+		return nil, nil, err
+	}
+	var results []lrclibSearchResult
+	if err := json.Unmarshal(body, &results); err != nil {
+		return nil, nil, err
+	}
+	return results, nil, nil
 }
 
 // probeOnce makes a single /api/get request with no retry logic.
