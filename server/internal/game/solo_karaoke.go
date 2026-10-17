@@ -71,6 +71,16 @@ const smsgSoloKaraokeActive protocol.ServerMsgType = "soloKaraokeActive"
 // frame, exactly like trivia's karaoke phase.
 const smsgSoloKaraokeLyricsStatus protocol.ServerMsgType = "soloKaraokeLyricsStatus"
 
+// CONTRACT-QUESTION: smsgSoloKaraokeError surfaces a playback failure
+// (audio.Play erroring, e.g. a transient Spotify rate limit or an
+// unregistered device) to the admin Player UI (s10eng-07). Without this,
+// such a failure was only ever logged server-side — the session stayed
+// "active" claiming to play a track that never actually started, with no
+// TrackEnded ever arriving to trigger auto-advance, until a human noticed
+// the silence at a live event. Admin-only; carries no track metadata beyond
+// a plain message string.
+const smsgSoloKaraokeError protocol.ServerMsgType = "soloKaraokeError"
+
 // soloKaraokePlayData is the admin.soloKaraoke.play payload. TrackID is
 // optional: "" resumes/starts at the current index (or 0 if none), set
 // jumps directly to that playlist track (the admin clicking a specific song
@@ -118,10 +128,21 @@ type soloKaraokeNowPlayingData struct {
 	QueueLen   int    `json:"queueLen"`
 	Shuffle    bool   `json:"shuffle"`
 	Repeat     string `json:"repeat"`
+	// Paused lets a (re)connecting admin tab's Play/Pause toggle render
+	// correctly from this one frame alone (s10eng-05) — without it, the only
+	// other paused signal (broadcastPlaybackPosition) is reactive to the
+	// stage's own periodic position reports and isn't sent proactively on
+	// connect, so a reconnecting admin had no authoritative state until the
+	// next tick happened to arrive.
+	Paused bool `json:"paused"`
 }
 
 type soloKaraokeLyricsStatusData struct {
 	Status string `json:"status"` // "loading" | "ready" | "none"
+}
+
+type soloKaraokeErrorData struct {
+	Message string `json:"message"`
 }
 
 // soloKaraokeState is the live state for Solo Karaoke mode (Run-goroutine-
@@ -229,7 +250,13 @@ func (e *Engine) soloKaraokePlayAt(idx int) {
 	e.soloKaraoke.trackStartMs = nowMs()
 	e.soloKaraoke.playToken = fmt.Sprintf("sk:%d:%s:%d", idx, track.ID, e.soloKaraoke.trackStartMs)
 
-	e.loadAndPlayTrack(track, 0)
+	if err := e.loadAndPlayTrack(track, 0); err != nil {
+		// Surface it (s10eng-07) — without this, broadcastSoloKaraokeNowPlaying
+		// just below still reports the track as current/playing even though
+		// real playback never started, and no TrackEnded will ever arrive to
+		// auto-advance away from it.
+		e.broadcastSoloKaraokeError(fmt.Sprintf("playback failed to start: %v", err))
+	}
 	e.broadcastSoloKaraokeNowPlaying()
 	// Clear any lingering lyrics from the previous track immediately so the
 	// old lines don't bleed into the new song (mirrors startTrack's
@@ -329,10 +356,22 @@ func (e *Engine) onAdminSoloKaraokeSeek(connID string, env protocol.ClientEnvelo
 	if e.soloKaraoke.currentTrack.DurationMs > 0 && pos > e.soloKaraoke.currentTrack.DurationMs {
 		pos = e.soloKaraoke.currentTrack.DurationMs
 	}
-	e.loadAndPlayTrack(e.soloKaraoke.currentTrack, pos)
+	wasPaused := e.soloKaraoke.paused
+	if err := e.loadAndPlayTrack(e.soloKaraoke.currentTrack, pos); err != nil {
+		e.broadcastSoloKaraokeError(fmt.Sprintf("seek failed: %v", err))
+	}
 	e.soloKaraoke.trackStartMs = nowMs() - pos
-	if e.soloKaraoke.paused {
+	if wasPaused {
+		// loadAndPlayTrack just told the device to play — bring it back to
+		// paused at the new position instead of leaving e.soloKaraoke.paused
+		// true while audio is actually running (s10eng-01). Previously this
+		// desynced Pause (dead until the next track, since it no-ops on
+		// paused==true), Resume (would audibly jump back to the pre-seek
+		// position), and the stage-reconnect resume logic (would tell a
+		// reconnecting stage to pause a device that's actually playing).
 		e.soloKaraoke.pausedAtMs = pos
+		_ = e.audio.Pause(context.Background())
+		e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{Action: "pause"}))
 	}
 }
 
@@ -365,11 +404,31 @@ func (e *Engine) onAdminSoloKaraokeSetRepeat(connID string, env protocol.ClientE
 // the current track exactly; anything else steps forward (soloKaraokeStepForward),
 // which itself handles shuffle/repeat="all"/queue exhaustion.
 func (e *Engine) soloKaraokeAdvance() {
+	// s10eng-02 (duplicate/retransmitted TrackEnded signal double-advancing):
+	// investigated and fixed at the actual source instead of here. There is
+	// no per-track identifier in StagePlayerStateData, and by the time any
+	// second call to this function runs, e.soloKaraoke's fields already
+	// reflect whatever the FIRST call just advanced to — a token/flag
+	// compared against the engine's OWN live state can't tell "a genuine new
+	// end for the new track" apart from "a stale duplicate of the old one"
+	// (proven by writing exactly that guard and watching it fail to catch a
+	// back-to-back duplicate in a test). The real root cause is client-side:
+	// web/stage/src/audio/spotify.ts's ingest() was reporting trackEnded as
+	// a LEVEL (true on every sample while paused-at-position-0), not an EDGE
+	// (true once, on the transition into that state) — the Spotify SDK can
+	// fire player_state_changed more than once during a single track
+	// transition, each one landing on the terminal state. Fixed there.
 	if e.soloKaraoke.repeat == "one" {
 		if e.soloKaraoke.index >= 0 && e.soloKaraoke.index < len(e.soloKaraoke.queue) {
 			e.soloKaraokePlayAt(e.soloKaraoke.index)
 		} else {
-			e.soloKaraokeDeactivate()
+			// The currently-playing track was removed from the Playlist
+			// bucket mid-song (ReloadSoloKaraokeQueue sets index = -1) while
+			// repeat="one" was set — fall back to the queue-exhaustion-safe
+			// step logic instead of ending the whole session outright
+			// (s10eng-03): soloKaraokeStepForward already deactivates if and
+			// only if the queue is genuinely empty.
+			e.soloKaraokeStepForward()
 		}
 		return
 	}
@@ -430,6 +489,7 @@ func (e *Engine) soloKaraokeNowPlayingData() soloKaraokeNowPlayingData {
 		AlbumArt: t.AlbumArt, DurationMs: t.DurationMs,
 		Index: e.soloKaraoke.index, QueueLen: len(e.soloKaraoke.queue),
 		Shuffle: e.soloKaraoke.shuffle, Repeat: e.soloKaraoke.repeat,
+		Paused: e.soloKaraoke.paused,
 	}
 }
 
@@ -446,6 +506,12 @@ func (e *Engine) broadcastSoloKaraokeNowPlaying() {
 // ever see — see smsgSoloKaraokeActive's CONTRACT-QUESTION.
 func (e *Engine) broadcastSoloKaraokeActive() {
 	e.bcast.BroadcastAll(e.envelope(smsgSoloKaraokeActive, soloKaraokeActiveData{Active: e.soloKaraoke.active}))
+}
+
+// broadcastSoloKaraokeError surfaces a playback failure to the admin Player
+// UI (s10eng-07). Admin-only; no track metadata.
+func (e *Engine) broadcastSoloKaraokeError(message string) {
+	e.bcast.Broadcast(protocol.RoleAdmin, e.envelope(smsgSoloKaraokeError, soloKaraokeErrorData{Message: message}))
 }
 
 // modeLockOwner reports which mode currently owns the engine. Solo Karaoke

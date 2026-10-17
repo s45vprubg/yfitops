@@ -417,6 +417,48 @@ browser's mixed-content policy; Control Room's live game state (over
 WebTransport, a separate connection) was unaffected. Rebuilt and redeployed
 with the correct flag.
 
+### Fixed — admin login no longer eats a guaranteed-404 request every time (2026-10-17)
+The server deliberately never registers `/cert-hash` once running a real CA
+cert (pinning via `serverCertificateHashes` requires a <=14-day cert, which
+a real CA cert fails) — only the dev self-signed cert ever needs it. Every
+admin login was firing a guaranteed 404 against it anyway: harmless (the
+client already caught a non-OK response and used `undefined`, the correct
+value either way) but noisy. The client now skips the request entirely
+once talking to an `https://` backend.
+
+### Added — Solo Karaoke mode: a second, independent playback-only game mode (2026-10-17)
+Straight playback, no guessing/scoring, reachable as a third "Karaoke"
+admin tab. Admin builds a Library + ordered Playlist from the same Spotify
+search/import and lyrics infrastructure the Board Builder uses, then the
+engine plays it back with full transport control (play/pause/resume/
+next/prev/seek/shuffle/repeat). Lyrics sync on stage and audio routes
+through the existing Spotify device exactly like trivia's karaoke phase.
+Mutually exclusive with the trivia game via a server-side mode-lock —
+starting one is rejected while the other is active, and every open admin
+tab reflects the lock via a broadcast. New standalone migration
+(`0010_solo_karaoke.sql`, two tables, no FK into existing boards).
+
+### Fixed — QA sweep 10 (20 findings, 3 high) (2026-10-17)
+Full report: `docs/security/qa-sweep-10.md`. Headline fixes: seeking while
+Solo Karaoke was paused silently resumed real playback without updating
+the paused flag, desyncing Pause/Resume and stage-reconnect behavior for
+the rest of the track; the Playlist's `position` column had no protection
+against concurrent admin tabs or a stale reorder list, risking duplicate
+positions and nondeterministic play order (closed with a shared Postgres
+advisory lock plus a reorder that always produces a total order regardless
+of how incomplete the input list is); `handleStartGame`/`handleResetGame`
+silently swallowed every HTTP rejection from the server, including the new
+mode-lock rejection, so a stale admin tab's Start Game click could do
+nothing with zero feedback. Also: a failed Solo Karaoke playback attempt
+used to be logged server-side only, with no admin-visible signal that the
+session was stalled on a dead track; deleting the currently-playing track
+mid-session under repeat-one ended the whole session instead of advancing;
+a duplicate TrackEnded signal (confirmed caused by the Spotify SDK firing
+player_state_changed more than once per track transition) could skip an
+extra song — fixed at the actual source (stage's playback-state ingestion)
+after a first server-side fix attempt was proven not to work by its own
+regression test.
+
 ## [Unreleased] — 2026-07-01
 
 ### Added

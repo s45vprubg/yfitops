@@ -10,6 +10,38 @@ interface Props {
   gameState?: GameState;
   modeLock?: ModeLockData["owner"];
   volumePct?: number;
+  // s10ui1-04: lets Play disable proactively instead of only failing after
+  // the fact (the server rejects admin.soloKaraoke.play with
+  // {code:"emptyQueue"}, which does correctly surface via the WS
+  // admin.error -> state.notice path — this is a pure UX affordance, not a
+  // silent-failure fix).
+  queueEmpty?: boolean;
+}
+
+// transportGuard: a short in-flight boolean guard mirroring GameControls.tsx's
+// markingDrop/jumpingToDrop pattern (uia7-3) — WS actions have no await-able
+// completion signal reaches this component, so the guard clears on a short
+// timeout fallback rather than on response receipt. Applied to Prev/Play/Next
+// (s10ui1-01): a misclick/double-click previously sent two unconditional
+// admin.soloKaraoke.{prev,play,next} messages before any state update could
+// disable the button, each one unconditionally advancing/jumping a track.
+// Pause/Resume/Stop are already idempotent server-side (state-checked), so
+// lower priority and left as-is.
+function useTransportGuard(): [boolean, (fn: () => void) => void] {
+  const [inFlight, setInFlight] = useState(false);
+  const timeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (timeout.current) clearTimeout(timeout.current);
+    };
+  }, []);
+  const guard = (fn: () => void) => {
+    if (inFlight) return;
+    setInFlight(true);
+    fn();
+    timeout.current = setTimeout(() => setInFlight(false), 1500);
+  };
+  return [inFlight, guard];
 }
 
 function formatMs(ms: number): string {
@@ -44,10 +76,14 @@ const REPEAT_LABEL: Record<SoloKaraokeSetRepeatData["repeat"], string> = {
 // mirrored here by disabling Play in that case. A rejected action still
 // surfaces through the existing admin.error -> state.notice mechanism
 // (App.tsx), not a new one.
-export default function Player({ actions, nowPlaying, playback, gameState, modeLock, volumePct }: Props) {
+export default function Player({ actions, nowPlaying, playback, gameState, modeLock, volumePct, queueEmpty }: Props) {
   const active = modeLock === "solo_karaoke";
   const triviaActive = !!gameState && gameState !== "LOBBY" && gameState !== "GAME_OVER";
-  const playDisabled = triviaActive;
+  const playDisabled = triviaActive || !!queueEmpty;
+
+  const [prevInFlight, guardPrev] = useTransportGuard();
+  const [playInFlight, guardPlay] = useTransportGuard();
+  const [nextInFlight, guardNext] = useTransportGuard();
 
   // Pause vs Resume: mirror GameControls.tsx's own manuallyPaused pattern,
   // but Solo Karaoke's playback.paused (relayed verbatim from the stage's
@@ -115,8 +151,8 @@ export default function Player({ actions, nowPlaying, playback, gameState, modeL
       {/* Transport */}
       <div className="flex flex-wrap items-center gap-2">
         <button
-          onClick={actions.soloKaraokePrev}
-          disabled={!active}
+          onClick={() => guardPrev(actions.soloKaraokePrev)}
+          disabled={!active || prevInFlight}
           className="rounded border border-edge bg-panel px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-panel3 disabled:pointer-events-none disabled:opacity-30"
         >
           ⏮ Prev
@@ -124,9 +160,15 @@ export default function Player({ actions, nowPlaying, playback, gameState, modeL
 
         {!active ? (
           <button
-            onClick={() => actions.soloKaraokePlay()}
-            disabled={playDisabled}
-            title={playDisabled ? "A trivia game is active — end it before starting Solo Karaoke" : undefined}
+            onClick={() => guardPlay(() => actions.soloKaraokePlay())}
+            disabled={playDisabled || playInFlight}
+            title={
+              triviaActive
+                ? "A trivia game is active — end it before starting Solo Karaoke"
+                : queueEmpty
+                  ? "The Playlist is empty — add tracks first"
+                  : undefined
+            }
             className="rounded border border-green-600 bg-green-950/50 px-3 py-1.5 text-xs font-bold uppercase text-green-300 hover:bg-green-900/60 disabled:pointer-events-none disabled:opacity-30"
           >
             Play
@@ -148,8 +190,8 @@ export default function Player({ actions, nowPlaying, playback, gameState, modeL
         )}
 
         <button
-          onClick={actions.soloKaraokeNext}
-          disabled={!active}
+          onClick={() => guardNext(actions.soloKaraokeNext)}
+          disabled={!active || nextInFlight}
           className="rounded border border-edge bg-panel px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-panel3 disabled:pointer-events-none disabled:opacity-30"
         >
           Next ⏭

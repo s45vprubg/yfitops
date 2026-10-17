@@ -74,6 +74,17 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
   const [dirty, setDirty] = useState(false);
   const [saved, setSaved] = useState(false);
 
+  // Mirrors the server's real defaults exactly (reveal.go's
+  // defaultReveal*/defaultAutoKaraokeMs/defaultGenreDelayMs/defaultYearDelayMs
+  // constants, engine.go's SkipThresholdPct==0 fallback) — "Reset to
+  // Defaults" below restores these into the draft, not whatever the admin
+  // last saved, same as a fresh game would start with.
+  const DEFAULTS = {
+    thresh: 50, intervalSec: 3, phase1Sec: 10, blockSec: 15, easeSec: 3,
+    lockoutChars: 2, autoKaraokeSec: 3, genreDelaySec: 3, yearDelaySec: 5,
+    alternate: true,
+  };
+
   // Seed the draft from the live server echo, but only while nothing is
   // being edited — the same "touched" guard the old sliders used, so a
   // broadcast landing mid-edit can never clobber what's being typed.
@@ -112,6 +123,26 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
     });
     setDirty(false);
     setSaved(true);
+  };
+
+  // Resets the DRAFT to the real defaults — does NOT touch the server. Same
+  // "nothing happens until Save" rule as every other edit: lets an operator
+  // see exactly what they're about to apply, and back out via the X-equivalent
+  // (just don't press Save) if a reset turns out to be the wrong call too.
+  const handleResetDefaults = () => {
+    threshTouched.current = true; // defaults include a real threshold value; must be saveable
+    setThresh(DEFAULTS.thresh);
+    setIntervalSec(DEFAULTS.intervalSec);
+    setPhase1Sec(DEFAULTS.phase1Sec);
+    setBlockSec(DEFAULTS.blockSec);
+    setEaseSec(DEFAULTS.easeSec);
+    setLockoutChars(DEFAULTS.lockoutChars);
+    setAutoKaraokeSec(DEFAULTS.autoKaraokeSec);
+    setGenreDelaySec(DEFAULTS.genreDelaySec);
+    setYearDelaySec(DEFAULTS.yearDelaySec);
+    setAlternate(DEFAULTS.alternate);
+    setDirty(true);
+    setSaved(false);
   };
 
   return (
@@ -191,6 +222,13 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
 
       <div className="flex items-center justify-end gap-2 border-t border-edge px-3 py-2">
         {saved && !dirty && <span className="text-[10px] font-semibold uppercase text-emerald-400">Saved</span>}
+        <button
+          onClick={handleResetDefaults}
+          title="Reset the draft below to the game's default settings — still requires Save to apply"
+          className="rounded border border-edge px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-300 hover:border-amber-600 hover:text-amber-300"
+        >
+          Reset to Defaults
+        </button>
         <button
           onClick={handleSave}
           disabled={!dirty}

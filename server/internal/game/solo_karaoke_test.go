@@ -2,6 +2,7 @@ package game
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/s45vprubg/yfitops/server/internal/protocol"
@@ -281,5 +282,156 @@ func TestSoloKaraoke_ModeLock_BroadcastsOnEveryOwnerChange(t *testing.T) {
 	h.soloKaraokeMsg("admin", cmsgAdminSoloKaraokeStop, nil)
 	if got := h.lastModeLockOwner(); got != "none" {
 		t.Fatalf("after solo karaoke stop: owner = %q, want %q", got, "none")
+	}
+}
+
+// TestSoloKaraoke_SeekWhilePaused_StaysPaused is the regression test for
+// s10eng-01: seeking while paused must leave the device genuinely paused at
+// the new position, not resume real playback while e.soloKaraoke.paused
+// still claims paused — the pre-fix desync left Pause dead for the rest of
+// the track and made Resume audibly jump backward.
+func TestSoloKaraoke_SeekWhilePaused_StaysPaused(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.joinStage("stage")
+
+	h.e.ReloadSoloKaraokeQueue([]*Track{soloKaraokeTestTrack("sk1", "Song One")})
+	h.sync(func() {})
+	h.soloKaraokeMsg("admin", cmsgAdminSoloKaraokePlay, nil)
+	h.soloKaraokeMsg("admin", cmsgAdminSoloKaraokePause, nil)
+
+	var paused bool
+	h.sync(func() { paused = h.e.soloKaraoke.paused })
+	if !paused {
+		t.Fatalf("expected paused=true after pause")
+	}
+
+	h.soloKaraokeMsg("admin", cmsgAdminSoloKaraokeSeek, soloKaraokeSeekData{PositionMs: 50000})
+
+	h.sync(func() { paused = h.e.soloKaraoke.paused })
+	if !paused {
+		t.Fatalf("expected paused=true to survive a seek while paused (s10eng-01 regression)")
+	}
+	// The device must have actually been told to pause again after the seek
+	// (loadAndPlayTrack resumes it), not just the in-memory flag.
+	if last, ok := h.audio.last(); !ok || last.method != "pause" {
+		t.Fatalf("expected the last audio call after seek-while-paused to be pause, got %+v (ok=%v)", last, ok)
+	}
+
+	// Pause must now be a genuine no-op (already paused), not dead — and
+	// Resume must work from the NEW seeked position, not jump back.
+	playsBefore := len(h.audio.ofMethod("resume"))
+	h.soloKaraokeMsg("admin", cmsgAdminSoloKaraokeResume, nil)
+	if len(h.audio.ofMethod("resume")) <= playsBefore {
+		t.Fatalf("expected Resume to actually resume after a seek-while-paused")
+	}
+	var pausedAtMs int64
+	h.sync(func() { pausedAtMs = h.e.soloKaraoke.pausedAtMs })
+	if pausedAtMs != 50000 {
+		t.Fatalf("pausedAtMs = %d, want 50000 (the seeked position, not a stale pre-seek one)", pausedAtMs)
+	}
+}
+
+// NOTE on s10eng-02 (duplicate TrackEnded double-advancing the queue): fixed
+// client-side in web/stage/src/audio/spotify.ts (ingest() now edge-triggers
+// trackEnded instead of reporting it as a level), not here — see
+// soloKaraokeAdvance's doc comment for why a server-side guard can't
+// actually distinguish the two cases. No Go regression test for this one;
+// this project has no frontend test runner (standing gap, same as every
+// other UI-layer fix across prior sweeps), verified via tsc + hand-trace.
+
+// TestSoloKaraoke_DeleteCurrentTrack_RepeatOne_FallsBackInsteadOfEnding is
+// the regression test for s10eng-03: deleting the currently-playing track
+// from the Playlist mid-song while repeat="one" must fall back to normal
+// step-forward behavior on the next TrackEnded, not end the whole session.
+func TestSoloKaraoke_DeleteCurrentTrack_RepeatOne_FallsBackInsteadOfEnding(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.joinStage("stage")
+
+	h.e.ReloadSoloKaraokeQueue([]*Track{
+		soloKaraokeTestTrack("sk1", "Song One"),
+		soloKaraokeTestTrack("sk2", "Song Two"),
+	})
+	h.sync(func() {})
+	h.soloKaraokeMsg("admin", cmsgAdminSoloKaraokePlay, nil)
+	h.soloKaraokeMsg("admin", cmsgAdminSoloKaraokeSetRepeat, soloKaraokeSetRepeatData{Repeat: "one"})
+
+	// Admin deletes the currently-playing track (sk1) from the Playlist bucket
+	// mid-song — ReloadSoloKaraokeQueue can't find it anymore, index -> -1.
+	h.e.ReloadSoloKaraokeQueue([]*Track{soloKaraokeTestTrack("sk2", "Song Two")})
+	h.sync(func() {})
+
+	h.stagePlayerState("stage", 200000, false, true)
+
+	var active bool
+	var cur string
+	h.sync(func() {
+		active = h.e.soloKaraoke.active
+		if h.e.soloKaraoke.currentTrack != nil {
+			cur = h.e.soloKaraoke.currentTrack.ID
+		}
+	})
+	if !active {
+		t.Fatalf("expected solo karaoke to fall back to sk2 instead of ending the session (s10eng-03 regression)")
+	}
+	if cur != "sk2" {
+		t.Fatalf("expected fallback to play sk2, got %q", cur)
+	}
+}
+
+// TestSoloKaraoke_PlayFailure_SurfacesError is the regression test for
+// s10eng-07: a failed audio.Play must broadcast smsgSoloKaraokeError to
+// admin instead of only being logged server-side with no client-visible signal.
+func TestSoloKaraoke_PlayFailure_SurfacesError(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.joinStage("stage")
+
+	h.e.ReloadSoloKaraokeQueue([]*Track{soloKaraokeTestTrack("sk1", "Song One")})
+	h.sync(func() {})
+
+	h.audio.mu.Lock()
+	h.audio.playErr = fmt.Errorf("injected spotify failure")
+	h.audio.mu.Unlock()
+
+	h.bcast.reset()
+	h.soloKaraokeMsg("admin", cmsgAdminSoloKaraokePlay, nil)
+
+	found := false
+	h.bcast.mu.Lock()
+	for _, f := range h.bcast.frames {
+		if f.role == protocol.RoleAdmin && f.env.Type == smsgSoloKaraokeError {
+			found = true
+		}
+	}
+	h.bcast.mu.Unlock()
+	if !found {
+		t.Fatalf("expected a smsgSoloKaraokeError frame broadcast to admin after a failed Play")
+	}
+}
+
+// TestSoloKaraoke_NowPlaying_IncludesPaused is the regression test for
+// s10eng-05: the full-metadata now-playing payload must carry the current
+// paused state so a (re)connecting admin tab's Play/Pause toggle has an
+// authoritative signal from this one frame, not just a hardcoded false.
+func TestSoloKaraoke_NowPlaying_IncludesPaused(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.joinStage("stage")
+
+	h.e.ReloadSoloKaraokeQueue([]*Track{soloKaraokeTestTrack("sk1", "Song One")})
+	h.sync(func() {})
+	h.soloKaraokeMsg("admin", cmsgAdminSoloKaraokePlay, nil)
+	h.soloKaraokeMsg("admin", cmsgAdminSoloKaraokePause, nil)
+
+	var d soloKaraokeNowPlayingData
+	h.sync(func() { d = h.e.soloKaraokeNowPlayingData() })
+	if !d.Paused {
+		t.Fatalf("expected soloKaraokeNowPlayingData().Paused = true after pause, got false")
 	}
 }

@@ -701,3 +701,60 @@ func TestQARegression_RenameBoard_DailyDoubleCount_RejectsOversized(t *testing.T
 		t.Fatalf("expected 204 for in-bounds dailyDoubleCount, got %d: %s", w2.Code, w2.Body.String())
 	}
 }
+
+// TestSoloKaraokeRoutes_RequireAuth is the regression test for s10api-03's
+// auth-gating half: every one of the 10 new Solo Karaoke routes must reject
+// an unauthenticated request exactly like every pre-existing /api/* route
+// does. Previously this was only verified by reading handler.go's
+// registration list once by hand (confirming every route uses the same
+// wrap(...) call every other route does) -- there was no test that would
+// catch a future copy-paste route registration forgetting it.
+func TestSoloKaraokeRoutes_RequireAuth(t *testing.T) {
+	_, mux := newTestHandler()
+
+	routes := []struct{ method, path string }{
+		{"GET", "/api/solo-karaoke/library"},
+		{"POST", "/api/solo-karaoke/library"},
+		{"DELETE", "/api/solo-karaoke/library/sklib_x"},
+		{"GET", "/api/solo-karaoke/playlist"},
+		{"POST", "/api/solo-karaoke/playlist"},
+		{"DELETE", "/api/solo-karaoke/playlist/skpl_x"},
+		{"PUT", "/api/solo-karaoke/playlist/reorder"},
+		{"POST", "/api/solo-karaoke/import-playlist"},
+		{"POST", "/api/solo-karaoke/tracks/sk_x/requery-lyrics"},
+		{"PUT", "/api/solo-karaoke/tracks/sk_x/lyrics"},
+	}
+	for _, rt := range routes {
+		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
+			req := httptest.NewRequest(rt.method, rt.path, strings.NewReader("{}"))
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("expected 401 with no Authorization header, got %d: %s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// TestAddSoloKaraokeTrack_SucceedsWithNoLyrics is the regression test for
+// s10api-03's soft-lyrics-gate half: unlike board_dd_bucket_tracks' hard
+// reject (dailydouble.go), adding a track to either Solo Karaoke bucket must
+// succeed even when the lyrics prober is unconfigured (nil, as in this test
+// harness -- matching how a real deploy without LRCLIB creds would also
+// leave it nil) and no track_lyrics row exists at all.
+func TestAddSoloKaraokeTrack_SucceedsWithNoLyrics(t *testing.T) {
+	_, mux := newTestHandler()
+
+	body := `{"spotifyUri":"spotify:track:abc123","artist":"Test Artist","song":"Test Song","durationMs":200000}`
+
+	w := doReq(mux, "POST", "/api/solo-karaoke/library", body)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("library add: expected 201 with no lyrics configured, got %d: %s", w.Code, w.Body.String())
+	}
+
+	body2 := `{"spotifyUri":"spotify:track:def456","artist":"Test Artist 2","song":"Test Song 2","durationMs":200000}`
+	w2 := doReq(mux, "POST", "/api/solo-karaoke/playlist", body2)
+	if w2.Code != http.StatusCreated {
+		t.Fatalf("playlist add: expected 201 with no lyrics configured, got %d: %s", w2.Code, w2.Body.String())
+	}
+}

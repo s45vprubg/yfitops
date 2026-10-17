@@ -182,7 +182,13 @@ export type ServerMsgType =
   // project's naming decision). Mirrors smsgSoloKaraokeLyricsStatus
   // (CONTRACT-QUESTION). The lines themselves still arrive via the fixed
   // "lyrics" frame, exactly like trivia's karaoke phase.
-  | "soloKaraokeLyricsStatus";
+  | "soloKaraokeLyricsStatus"
+  // soloKaraokeError: {message: string} — admin-only. Surfaces a playback
+  // failure (e.g. audio.Play erroring) that previously was only ever logged
+  // server-side, leaving the session silently "active" on a track that
+  // never actually started (s10eng-07). Mirrors smsgSoloKaraokeError
+  // (CONTRACT-QUESTION).
+  | "soloKaraokeError";
 
 export interface ClientEnvelope<D = unknown> {
   t: ClientMsgType;
@@ -329,7 +335,12 @@ export interface SoloKaraokeNowPlayingData {
   queueLen: number;
   shuffle: boolean;
   repeat: "" | "one" | "all";
+  // Lets a (re)connecting admin tab's Play/Pause toggle render correctly
+  // from this one frame alone, instead of only from the reactive
+  // broadcastPlaybackPosition tick (s10eng-05).
+  paused: boolean;
 }
 export interface ModeLockData { owner: "none" | "trivia" | "solo_karaoke"; }
 export interface SoloKaraokeActiveData { active: boolean; }
 export interface SoloKaraokeLyricsStatusData { status: "loading" | "ready" | "none"; }
+export interface SoloKaraokeErrorData { message: string; }

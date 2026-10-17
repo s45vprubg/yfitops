@@ -20,6 +20,7 @@ import type {
   PickerStatusData,
   ScoreboardData,
   ServerEnvelope,
+  SoloKaraokeErrorData,
   SoloKaraokeNowPlayingData,
   SoloKaraokePlayData,
   SoloKaraokeSeekData,
@@ -228,6 +229,12 @@ export function useAdmin(): [AdminState, AdminActions] {
       });
       client.on("soloKaraokeNowPlaying", (env: ServerEnvelope) => {
         patch({ soloKaraokeNowPlaying: env.d as SoloKaraokeNowPlayingData });
+      });
+      // s10eng-07: a failed Play/Seek used to be logged server-side only,
+      // with zero client-visible signal — surface it the same way an
+      // operational "error" frame does (dismissable notice banner).
+      client.on("soloKaraokeError", (env: ServerEnvelope) => {
+        patch({ notice: `Solo Karaoke: ${(env.d as SoloKaraokeErrorData).message}` });
       });
       client.on("pickerStatus", (env: ServerEnvelope) => {
         patch({ pickerStatus: env.d as PickerStatusData });

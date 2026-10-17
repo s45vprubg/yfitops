@@ -33,7 +33,10 @@ export default function SoloKaraokeView({ nowPlaying, lyrics, lyricsStatus, audi
     );
   }
 
-  const reveal = { artist: nowPlaying.artist, song: nowPlaying.song, albumArt: nowPlaying.albumArt };
+  // albumArt deliberately omitted (s10ui2-02): Karaoke only ever reads
+  // reveal.artist/song — the art is rendered separately by this view's own
+  // <img> overlay below.
+  const reveal = { artist: nowPlaying.artist, song: nowPlaying.song };
 
   return (
     <div className="relative h-full w-full">

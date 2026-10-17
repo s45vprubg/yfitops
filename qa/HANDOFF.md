@@ -997,7 +997,98 @@ across tab switches), s9ui2-05 (threshold server readback) — the latter
 two are good candidates to fix together since both need the same shape of
 change (thread one more field through the existing admin-sync broadcast).
 
-## Sweep 10 recommendation
+## Sweep 10 recommendation (sweep 9's own)
 
 Low urgency on a hunt basis. See `docs/security/qa-sweep-9.md` for full
 reasoning. Re-scope again per the established rule if more features land.
+
+# SWEEP 10 (2026-10-17) — DONE
+
+Full writeup: `docs/security/qa-sweep-10.md`. Scope: a large new feature
+("Solo Karaoke mode", commit `aa43dc8`, 32 files/~3,489 insertions —
+already deployed before this sweep, first real adversarial read of it)
+plus a small Reset-to-Defaults addition. Outcome: **20 findings, 19
+CONFIRMED, 1 PARTIALLY REFUTED (s10api-03 — real coverage already existed
+in a sibling test file the hunter's grep missed). 3 HIGH, 10 MEDIUM, 6
+LOW. 16 fixed and verified cold, 3 verification-only/no-bug, 2 deferred**
+(s10eng-04 cosmetic, s10ui2-03 self-healing transient flash). §4A
+sanitization independently confirmed clean from three separate angles —
+crown jewel held.
+
+**Notable: one fix was tried, found NOT to work via its own regression
+test, and redirected to the real root cause** (s10eng-02 — a duplicate
+TrackEnded signal double-advancing the Solo Karaoke queue). The first
+attempt (a server-side token comparison) looked reasonable but structurally
+cannot work: by the time a second sequential call runs, the engine's own
+state has already moved past the signal it would need to compare against.
+The real cause was client-side (`web/stage/src/audio/spotify.ts` reporting
+`trackEnded` as a sustained level instead of an edge-triggered transition)
+and was fixed there instead. This is the sweep methodology's "judge the fix
+as hard as the finding" principle catching a real near-miss — write the
+test, trust what it shows, don't ship a plausible-looking fix unverified.
+
+## Fixed & verified (16)
+
+Engine (`server/internal/game/{engine.go,solo_karaoke.go}`): seek-while-
+paused state desync (s10eng-01), duplicate-TrackEnded double-advance
+redirected to the real client-side fix (s10eng-02, see above),
+delete-current-track-under-repeat-one incorrectly ending the session
+instead of falling back (s10eng-03), missing `Paused` field on the
+full-sync now-playing payload (s10eng-05), silent playback failures with no
+client-visible signal (s10eng-07, new admin-only `smsgSoloKaraokeError`
+message). Store (`server/internal/store/solo_karaoke_store.go`): playlist
+position collisions from a partial reorder list (s10api-01) and from
+concurrent adds under READ COMMITTED (s10api-02) — both closed with a
+shared `pg_advisory_xact_lock` plus a full-renumber reorder that's immune
+to a stale/incomplete client list; a request-size cap on reorder
+(s10api-04). Admin frontend: no double-click guard on Solo Karaoke
+transport buttons (s10ui1-01, same `uia7-3` pattern already used
+elsewhere), `handleStartGame`/`handleResetGame` silently swallowing HTTP
+rejections including the new mode-lock one (s10ui1-02), Play not disabled
+on an empty queue (s10ui1-04). Stage/mobile: a dead `albumArt` field
+(s10ui2-02), a clarifying comment for an intentional prop omission
+(s10ui2-04). Test coverage gaps closed alongside: 6 new Go regression
+tests (3 engine, 2 handler-level: auth-gating across all 10 new routes +
+the playlist bucket's soft-lyrics-gate), each proven against a cold build;
+the two highest-value ones additionally proven via explicit fail-first
+authoring (s10eng-01/03) or a redirect after a documented failed first
+attempt (s10eng-02).
+
+## Deferred (2) + partially refuted (1)
+
+- **s10eng-04 (LOW):** stage-reconnect lyrics resend broadcasts to every
+  stage connection instead of just the reconnecting one. Cosmetic,
+  harmless in the common single-stage deployment.
+- **s10ui2-03 (LOW):** a brand-new stage connection can flash Lobby/GameOver
+  for one round trip before Solo Karaoke's full-sync lands. Self-heals,
+  matches existing first-connect flash patterns elsewhere in the app.
+- **s10api-03 (MEDIUM, PARTIALLY REFUTED):** reported as zero test coverage
+  for the 10 new HTTP handlers; real coverage already existed in
+  `solokaraoke_test.go`, just not in the file the hunter grepped. The two
+  genuine gaps (auth-gating, playlist-bucket soft-gate) are now closed.
+
+## Still open after sweep 10
+
+Unchanged from sweep 9, not re-litigated: no frontend test runner (now 7
+sweeps running), the `client.ts` locked-contract question, s9code-03
+(not_found retry cooldown), s9ui2-04/s9ui2-05 (Game Settings draft
+persistence + threshold server readback — still good candidates to fix
+together). New from this sweep: s10eng-04, s10ui2-03 (both deferred above),
+and **the store-layer fix (s10api-01/02) has not been verified against a
+real live Postgres instance under real concurrency** — recommend a staging
+pass before Solo Karaoke sees heavy concurrent-admin-tab use at an event.
+
+## Resume checklist for whoever picks this up next
+
+- Everything in this sweep is committed, pushed, and deployed as of the end
+  of this session (verify `git log` / the live site if picking this up
+  later, rather than assuming).
+- The store-layer concurrency fix (s10api-01/02) is the one piece of this
+  sweep that's unverified against real Postgres — see the "Still open"
+  note above before trusting it under genuine concurrent load.
+
+## Sweep 11 recommendation
+
+Moderate value specifically around the unverified store-layer fix if Solo
+Karaoke sees real concurrent-admin-tab use. Otherwise low urgency — re-scope
+again per the established rule if more features land.

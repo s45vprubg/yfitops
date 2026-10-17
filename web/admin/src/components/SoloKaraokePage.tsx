@@ -252,6 +252,7 @@ export default function SoloKaraokePage({ secret, gameState, modeLock, nowPlayin
             gameState={gameState}
             modeLock={modeLock}
             volumePct={volumePct}
+            queueEmpty={playlist.length === 0}
           />
         </div>
         {requeryError && (

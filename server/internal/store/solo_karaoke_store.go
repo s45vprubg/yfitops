@@ -74,12 +74,31 @@ func (r *PostgresRepo) RemoveSoloKaraokeLibraryTrack(ctx context.Context, trackI
 	return nil
 }
 
+// soloKaraokePlaylistPositionLockKey serializes every operation that reads
+// or assigns solo_karaoke_playlist_tracks.position — AddSoloKaraokePlaylistTrack
+// (MAX(position)+1) and ReorderSoloKaraokePlaylist (full renumber) both take
+// this advisory lock first (s10api-01/s10api-02/s10ui1-03). A plain
+// INSERT...SELECT MAX(...) does NOT serialize against a concurrent one under
+// Postgres's default READ COMMITTED isolation — two near-simultaneous adds
+// (or an add racing a reorder) could otherwise both compute the same max and
+// collide on position, which has no UNIQUE constraint backing it. The lock
+// is released automatically on commit/rollback (pg_advisory_xact_lock).
+const soloKaraokePlaylistPositionLockKey = 827364501
+
 // AddSoloKaraokePlaylistTrack appends a song to the end of the Solo Karaoke
-// Playlist — position = current max + 1 (0 if the playlist is empty),
-// computed inside the same INSERT so a concurrent add can't race onto the
-// same position.
+// Playlist — position = current max + 1 (0 if the playlist is empty).
 func (r *PostgresRepo) AddSoloKaraokePlaylistTrack(ctx context.Context, t *admin.SoloKaraokeTrack) error {
-	tag, err := r.pool.Exec(ctx,
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("store: add solo karaoke playlist track: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, soloKaraokePlaylistPositionLockKey); err != nil {
+		return fmt.Errorf("store: add solo karaoke playlist track: lock: %w", err)
+	}
+
+	tag, err := tx.Exec(ctx,
 		`INSERT INTO solo_karaoke_playlist_tracks (id, spotify_uri, artist, song, album_art, duration_ms, position, created_at)
 		 SELECT $1, $2, $3, $4, $5, $6, COALESCE(MAX(position) + 1, 0), $7
 		   FROM solo_karaoke_playlist_tracks
@@ -91,7 +110,7 @@ func (r *PostgresRepo) AddSoloKaraokePlaylistTrack(ctx context.Context, t *admin
 	if tag.RowsAffected() == 0 {
 		return admin.ErrSoloKaraokePlaylistTrackExists
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (r *PostgresRepo) ListSoloKaraokePlaylistTracks(ctx context.Context) ([]admin.SoloKaraokeTrack, error) {
@@ -135,15 +154,22 @@ func (r *PostgresRepo) RemoveSoloKaraokePlaylistTrack(ctx context.Context, track
 	return nil
 }
 
-// ReorderSoloKaraokePlaylist atomically rewrites every row's position to
-// match orderedIDs' index, within one transaction — mirrors RebuildLayout's
-// "atomically replace everything" pattern (admin_store.go) rather than a
-// sequence of individual position updates, which would risk a transient
-// off-by-one/duplicate-position state if read mid-sequence. A trackID not
-// found among the existing rows is silently skipped (nothing to reorder);
-// an existing row NOT present in orderedIDs keeps its current position
-// untouched rather than being deleted — this endpoint only reorders, it
-// never removes.
+// ReorderSoloKaraokePlaylist atomically renumbers EVERY row to 0..n-1 within
+// one transaction, keyed off a server-side read of the current full id set
+// rather than trusting orderedIDs to be a complete, current permutation.
+//
+// The original version only updated rows present in orderedIDs and left any
+// row NOT present at its old position — which could silently collide with a
+// position just assigned to a different row (s10api-01/s10ui1-03: a second
+// admin tab's stale/partial orderedIds list, or a track added by another tab
+// between that tab's last refresh and this reorder, both reproduce this).
+// There is no UNIQUE constraint on position, so the collision was silent.
+//
+// Fixed by always producing a total order: known ids from orderedIDs go
+// first (in the given order, deduped, dropping any id that doesn't actually
+// exist), then every remaining existing row is appended afterward preserving
+// its prior relative order — a superset-safe renumber that can never leave
+// two rows at the same position, regardless of how incomplete orderedIDs is.
 func (r *PostgresRepo) ReorderSoloKaraokePlaylist(ctx context.Context, orderedIDs []string) error {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
@@ -151,7 +177,50 @@ func (r *PostgresRepo) ReorderSoloKaraokePlaylist(ctx context.Context, orderedID
 	}
 	defer tx.Rollback(ctx)
 
-	for i, id := range orderedIDs {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, soloKaraokePlaylistPositionLockKey); err != nil {
+		return fmt.Errorf("store: reorder solo karaoke playlist: lock: %w", err)
+	}
+
+	rows, err := tx.Query(ctx, `SELECT id FROM solo_karaoke_playlist_tracks ORDER BY position ASC`)
+	if err != nil {
+		return fmt.Errorf("store: reorder solo karaoke playlist: read existing: %w", err)
+	}
+	var existing []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return fmt.Errorf("store: reorder solo karaoke playlist: scan existing: %w", err)
+		}
+		existing = append(existing, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("store: reorder solo karaoke playlist: rows: %w", err)
+	}
+	rows.Close()
+
+	existingSet := make(map[string]bool, len(existing))
+	for _, id := range existing {
+		existingSet[id] = true
+	}
+
+	seen := make(map[string]bool, len(orderedIDs))
+	final := make([]string, 0, len(existing))
+	for _, id := range orderedIDs {
+		if !existingSet[id] || seen[id] {
+			continue // unknown or duplicate id: silently skipped, same as before
+		}
+		seen[id] = true
+		final = append(final, id)
+	}
+	for _, id := range existing {
+		if !seen[id] {
+			final = append(final, id) // not in orderedIDs: appended after, never left at a stale position
+		}
+	}
+
+	for i, id := range final {
 		if _, err := tx.Exec(ctx,
 			`UPDATE solo_karaoke_playlist_tracks SET position = $1 WHERE id = $2`, i, id); err != nil {
 			return fmt.Errorf("store: reorder solo karaoke playlist: update id=%s: %w", id, err)

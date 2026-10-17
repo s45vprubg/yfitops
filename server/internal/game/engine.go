@@ -1380,13 +1380,23 @@ func (e *Engine) startTrack(cell *Cell, track *Track) {
 // call exactly as before. Shared with Solo Karaoke's soloKaraokePlayAt
 // (solo_karaoke.go), which needs the identical primitive without any of
 // trivia's round bookkeeping.
-func (e *Engine) loadAndPlayTrack(track *Track, positionMs int64) {
-	if err := e.audio.Play(context.Background(), track.SpotifyURI, positionMs); err != nil {
+//
+// Returns audio.Play's error (still logged here either way) so a caller
+// that has somewhere to surface it can (Solo Karaoke does — see
+// soloKaraokePlayAt/onAdminSoloKaraokeSeek, s10eng-07: a failed Play used to
+// leave the session silently "active" on a track that never actually
+// started, with no TrackEnded ever arriving to auto-advance away from it).
+// Trivia's own call site deliberately keeps discarding it — unchanged
+// behavior, not a regression this fix is scoped to touch.
+func (e *Engine) loadAndPlayTrack(track *Track, positionMs int64) error {
+	err := e.audio.Play(context.Background(), track.SpotifyURI, positionMs)
+	if err != nil {
 		log.Printf("[engine] audio.Play failed: %v", err)
 	}
 	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{
 		Action: "play", TrackURI: track.SpotifyURI, PositionMs: positionMs,
 	}))
+	return err
 }
 
 func (e *Engine) trackStartEnvelope() protocol.ServerEnvelope {

@@ -146,16 +146,31 @@ export default function GameControls({
   const { confirm } = useModal();
   const api = useMemo(() => createAdminApi(adminSecret), [adminSecret]);
 
+  // s10ui1-02: the comment on these catch blocks ("state broadcast will
+  // update UI") was false for every rejection — engine.go's StartGame()
+  // returns its error BEFORE calling broadcastBoard/broadcastModeLock, so
+  // no broadcast ever fires on a 409. A stale/not-yet-synced modeLock on
+  // this tab (plausible: it's per-connection broadcast state, not
+  // guaranteed synchronous across multiple open admin tabs) meant Start
+  // Game could be clicked, get rejected, and show literally nothing.
+  const [actionError, setActionError] = useState<string | null>(null);
+
   const handleStartGame = async () => {
+    setActionError(null);
     try {
       await api.startGame();
-    } catch { /* state broadcast will update UI */ }
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : "Failed to start game");
+    }
   };
 
   const handleResetGame = async () => {
+    setActionError(null);
     try {
       await api.resetGame();
-    } catch { /* state broadcast will update UI */ }
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : "Failed to reset game");
+    }
   };
 
   const [manuallyPaused, setManuallyPaused] = useState(false);
@@ -308,6 +323,13 @@ export default function GameControls({
       ) : null}
 
       <StatusPill status={status} connected={connected} nonce={nonce} />
+
+      {actionError && (
+        <div className="absolute left-0 top-full z-50 flex items-center gap-2 border-b border-red-900/60 bg-red-950/90 px-3 py-1.5 text-xs text-red-200 shadow-lg">
+          <span>{actionError}</span>
+          <button onClick={() => setActionError(null)} className="underline">Dismiss</button>
+        </div>
+      )}
     </header>
   );
 }

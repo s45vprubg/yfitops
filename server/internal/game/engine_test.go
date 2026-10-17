@@ -90,6 +90,7 @@ type fakeAudio struct {
 	mu           sync.Mutex
 	calls        []audioCall
 	volumeErr    error // injected failure for SetVolume, to test the restore-is-still-attempted guarantee
+	playErr      error // injected failure for Play, to test error-surfacing (s10eng-07)
 	volumeNow    int
 	volumeNowSet bool
 	// volumeDelay, if set, sleeps for this long on the FIRST SetVolume call
@@ -103,7 +104,10 @@ type fakeAudio struct {
 func (a *fakeAudio) SetDevice(string) {}
 func (a *fakeAudio) Play(_ context.Context, uri string, pos int64) error {
 	a.add(audioCall{method: "play", uri: uri, pos: pos})
-	return nil
+	a.mu.Lock()
+	err := a.playErr
+	a.mu.Unlock()
+	return err
 }
 func (a *fakeAudio) Pause(context.Context) error  { a.add(audioCall{method: "pause"}); return nil }
 func (a *fakeAudio) Resume(context.Context) error { a.add(audioCall{method: "resume"}); return nil }

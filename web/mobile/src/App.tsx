@@ -34,6 +34,10 @@ export default function App() {
     return (
       <>
         <StatusBar conn={view.conn} rttMs={view.rttMs} />
+        {/* scoreboard/ddResult intentionally omitted (s10ui2-04) — Solo
+            Karaoke has no scoring, so a stale pre-mode-lock scoreboard would
+            be confusing here. IdleScreen's own pulsing-dots fallback covers
+            scoreboard being undefined. */}
         <IdleScreen state={view.state} soloKaraoke me={getSavedHandle()} />
       </>
     );

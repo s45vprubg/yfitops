@@ -44,6 +44,16 @@ export class SpotifyAudioPlayer implements AudioPlayer {
   private connectState: ConnectState = "idle";
 
   private last: PlayerState = { positionMs: 0, paused: true, trackEnded: false, sampledAt: performance.now() };
+  // Tracks whether the player is CURRENTLY sitting in the "ended" terminal
+  // state (paused at position 0), separate from `last.trackEnded` itself,
+  // so ingest() can edge-detect the transition INTO that state instead of
+  // reporting trackEnded=true on every sample while still in it (s10eng-02:
+  // the SDK can fire player_state_changed more than once during a single
+  // track transition, each landing on the same paused-at-0 state — without
+  // this, that sent duplicate TrackEnded=true signals to the server for one
+  // real end, and the server has no way to tell them apart from a genuine
+  // second end since StagePlayerStateData carries no per-track identifier).
+  private endedLevel = false;
 
   private activated = false;
   // Remembers the most recent play() request so we can retry it once the
@@ -212,17 +222,21 @@ export class SpotifyAudioPlayer implements AudioPlayer {
   }
 
   private ingest(s: SpotifyPlaybackState | null) {
+    // A null state from the SDK usually means playback transferred away /
+    // the device went idle — treat as track ended, same as the paused-at-0
+    // heuristic below.
+    const endedNow = !s || (s.paused && s.position === 0 && s.duration > 0);
+    // Edge-triggered: true only on the transition INTO the ended state, not
+    // on every subsequent sample while still in it. endedLevel self-clears
+    // the moment the SDK reports actual playback again (paused=false), so
+    // no explicit reset on track-change is needed.
+    const trackEnded = endedNow && !this.endedLevel;
+    this.endedLevel = endedNow;
+
     if (!s) {
-      // A null state from the SDK usually means playback transferred away /
-      // the device went idle — treat as track ended.
-      this.last = { ...this.last, trackEnded: true, sampledAt: performance.now() };
+      this.last = { ...this.last, trackEnded, sampledAt: performance.now() };
     } else {
-      this.last = {
-        positionMs: s.position,
-        paused: s.paused,
-        trackEnded: s.paused && s.position === 0 && s.duration > 0,
-        sampledAt: performance.now(),
-      };
+      this.last = { positionMs: s.position, paused: s.paused, trackEnded, sampledAt: performance.now() };
     }
     const snap = this.last;
     this.stateSubs.forEach((cb) => cb(snap));

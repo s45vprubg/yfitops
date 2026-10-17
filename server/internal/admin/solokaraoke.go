@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -112,12 +113,23 @@ func (h *Handler) deleteSoloKaraokePlaylistTrack(w http.ResponseWriter, r *http.
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// maxSoloKaraokeReorderIDs bounds reorderSoloKaraokePlaylist's request body
+// (s10api-04): with no cap, a real playlist is tiny, but nothing stopped a
+// buggy/malicious authenticated client from sending tens of thousands of id
+// strings, each costing a separate round trip inside the store's one
+// transaction. 1000 is comfortably above any realistic queue size.
+const maxSoloKaraokeReorderIDs = 1000
+
 func (h *Handler) reorderSoloKaraokePlaylist(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		OrderedIDs []string `json:"orderedIds"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if len(body.OrderedIDs) > maxSoloKaraokeReorderIDs {
+		http.Error(w, fmt.Sprintf("orderedIds too long (max %d)", maxSoloKaraokeReorderIDs), http.StatusBadRequest)
 		return
 	}
 	if err := h.store.ReorderSoloKaraokePlaylist(r.Context(), body.OrderedIDs); err != nil {
