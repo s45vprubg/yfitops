@@ -90,10 +90,16 @@ func CertSHA256(certPath string) (raw [32]byte, b64 string, err error) {
 	return raw, base64.StdEncoding.EncodeToString(raw[:]), nil
 }
 
-// loadOrGenerateCert loads the cert/key pair, generating a self-signed pair
-// first if either file is missing. Returns the parsed tls.Certificate.
+// loadOrGenerateCert loads the cert/key pair, generating a fresh self-signed
+// pair if either file is missing OR the existing cert has already expired.
+// The intentionally short ~13-day validity (see GenerateSelfSigned) means
+// expiry is the common case for a dev checkout left untouched for a couple
+// of weeks, not a rare edge case -- an expired cert here produces the exact
+// same silent symptom as a missing one ("connect failed: Opening handshake
+// failed.", no server-side log of the cause). Returns the parsed
+// tls.Certificate.
 func loadOrGenerateCert(certPath, keyPath string) (tls.Certificate, error) {
-	if !fileExists(certPath) || !fileExists(keyPath) {
+	if !fileExists(certPath) || !fileExists(keyPath) || certExpired(certPath) {
 		if err := GenerateSelfSigned(certPath, keyPath); err != nil {
 			return tls.Certificate{}, err
 		}
@@ -104,4 +110,24 @@ func loadOrGenerateCert(certPath, keyPath string) (tls.Certificate, error) {
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// certExpired reports whether the PEM certificate at certPath is already
+// past its NotAfter, or can't be parsed at all -- a corrupt file is treated
+// the same as expired so it self-heals via regeneration instead of failing
+// the handshake forever.
+func certExpired(certPath string) bool {
+	pemBytes, err := os.ReadFile(certPath)
+	if err != nil {
+		return true
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return true
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return true
+	}
+	return time.Now().UTC().After(cert.NotAfter)
 }
