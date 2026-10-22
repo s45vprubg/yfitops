@@ -94,12 +94,16 @@ func setupDDPerformance(t *testing.T, h *harness) (performerID, raterConn string
 	return performerID, raterConn
 }
 
-// TestDailyDoubleFade_AllRatedFadesGracefully is the core fix: the old
-// behavior called e.audio.Pause() the instant the last rating landed, with
-// no fade. Now checkDailyDoubleComplete routes through
-// fadeOutAndFinishDailyDouble, which steps SetVolume down to 0 before
-// pausing, then restores the operating volume afterward.
-func TestDailyDoubleFade_AllRatedFadesGracefully(t *testing.T) {
+// TestDailyDoubleFade_AllRatedDoesNotEndPerformance: owner decision,
+// 2026-10-22 — submitting the last rating used to end the performance
+// immediately (first an instant e.audio.Pause(), later a graceful fade).
+// That felt unfair to a performer still mid-song: the only ways to end a
+// performance now are the admin's End Daily Double button or the track
+// finishing on its own. This pins that "all rated" alone is a no-op — the
+// fade/score/restore behavior itself is covered by
+// TestDailyDoubleFade_EndButtonTriggersSameFade, and that the rating is
+// still retained (counted in the eventual payout) is confirmed here too.
+func TestDailyDoubleFade_AllRatedDoesNotEndPerformance(t *testing.T) {
 	withFastFade(t)
 	h := newHarness(t)
 	defer h.run()()
@@ -108,55 +112,38 @@ func TestDailyDoubleFade_AllRatedFadesGracefully(t *testing.T) {
 	var scoreBefore int
 	h.sync(func() { scoreBefore = h.e.reg.players[performerID].Score })
 
-	h.rate(raterConn, 5) // the only eligible rater — completes the pool immediately
-
-	// ddFadingRoundKey flips synchronously, to this performance's own
-	// e.roundKey, before the fade's goroutine even starts (s8eng-03: it's a
-	// per-performance identity now, not a bare bool).
-	var fadingKey, rk string
-	h.sync(func() { fadingKey = h.e.ddFadingRoundKey; rk = h.e.roundKey })
-	if fadingKey == "" || fadingKey != rk {
-		t.Fatalf("e.ddFadingRoundKey = %q immediately after the completing rating landed, want it to equal e.roundKey (%q)", fadingKey, rk)
-	}
-
-	// Pause must not happen until the fade finishes stepping volume down —
-	// confirm volume actually got stepped toward 0 BEFORE any pause call.
-	if !waitUntil(t, time.Second, func() bool { return len(h.audio.ofMethod("pause")) > 0 }) {
-		t.Fatal("timed out waiting for the fade to finish and pause")
-	}
-	vols := h.audio.ofMethod("setVolume")
-	pauses := h.audio.ofMethod("pause")
-	if len(vols) < dailyDoubleFadeSteps {
-		t.Fatalf("got %d setVolume calls, want at least %d fade-down steps", len(vols), dailyDoubleFadeSteps)
-	}
-	// Every fade-down step must have happened strictly before the pause —
-	// the whole point is "quiet, then stop," never "stop, then still fading."
-	for _, v := range vols[:dailyDoubleFadeSteps] {
-		_ = v // ordering is enforced by construction (goroutine does volume
-		// steps then calls e.submit for pause); this loop exists so a
-		// future refactor that reorders them has something to break.
-	}
-	if len(pauses) != 1 {
-		t.Fatalf("got %d pause calls, want exactly 1", len(pauses))
-	}
-
-	// Final restore: the last setVolume call must bring it back to the
-	// configured operating level (100, the default), not leave it at 0.
-	last := vols[len(vols)-1]
-	if last.vol != 100 {
-		t.Errorf("final setVolume call = %d, want 100 (restored operating level)", last.vol)
-	}
+	h.rate(raterConn, 5) // the only eligible rater — used to complete the pool immediately
 
 	h.sync(func() {
 		if h.e.ddFadingRoundKey != "" {
-			t.Errorf("e.ddFadingRoundKey = %q after the fade completed, want empty", h.e.ddFadingRoundKey)
+			t.Fatalf("e.ddFadingRoundKey = %q after the last rating landed, want empty (rating alone must not end the performance)", h.e.ddFadingRoundKey)
 		}
-		if h.e.state != protocol.StateBoard {
-			t.Errorf("state = %s, want BOARD after the fade completes", h.e.state)
+		if h.e.state != protocol.StateDailyDouble {
+			t.Fatalf("state = %s, want DAILY_DOUBLE still in progress after the last rating", h.e.state)
 		}
+	})
+	if got := len(h.audio.ofMethod("pause")); got != 0 {
+		t.Fatalf("got %d pause calls after rating alone, want 0", got)
+	}
+
+	// The admin can still end it whenever they decide to — and the 5-star
+	// rating submitted above must still be the one counted in the payout,
+	// not discarded for having arrived before the end.
+	h.endDailyDouble("admin")
+	if !waitUntil(t, time.Second, func() bool { return len(h.audio.ofMethod("pause")) > 0 }) {
+		t.Fatal("timed out waiting for the admin-ended fade to finish and pause")
+	}
+	h.sync(func() {
 		got := h.e.reg.players[performerID].Score
 		if got <= scoreBefore {
 			t.Errorf("performer score = %d, want > %d (payout applied)", got, scoreBefore)
+		}
+		// 5 stars -> DailyDoubleMultiplier(5) = 2.0x -> the richest payout
+		// tier; a 1-star-floor payout (the no-ratings-at-all case) would be
+		// much lower, so this also confirms the rating wasn't dropped.
+		want := scoreBefore + int(float64(MaxPointsForRow(1))*DailyDoubleMultiplier(5))
+		if got != want {
+			t.Errorf("performer score = %d, want %d (5-star rating counted, not discarded)", got, want)
 		}
 	})
 	if h.repo.eventCount("dailyDouble") != 1 {
@@ -320,7 +307,8 @@ func TestDailyDoubleFade_RestoreStillAttemptedWhenSetVolumeErrors(t *testing.T) 
 	_, raterConn := setupDDPerformance(t, h)
 	h.audio.volumeErr = errors.New("simulated Spotify API failure")
 
-	h.rate(raterConn, 5) // completes the pool, starts the fade
+	h.rate(raterConn, 5) // completes the pool; admin still has to end it (2026-10-22)
+	h.endDailyDouble("admin")
 
 	if !waitUntil(t, time.Second, func() bool { return len(h.audio.ofMethod("pause")) > 0 }) {
 		t.Fatal("timed out waiting for the fade to finish and pause, despite every SetVolume call erroring")
@@ -445,7 +433,8 @@ func TestDailyDoubleFade_FirstStepIsFullVolumeNoNotch(t *testing.T) {
 	defer h.run()()
 	_, raterConn := setupDDPerformance(t, h)
 
-	h.rate(raterConn, 5) // completes the pool, starts the fade
+	h.rate(raterConn, 5) // completes the pool; admin still has to end it (2026-10-22)
+	h.endDailyDouble("admin")
 
 	if !waitUntil(t, time.Second, func() bool { return len(h.audio.ofMethod("pause")) > 0 }) {
 		t.Fatal("timed out waiting for the fade to finish and pause")
@@ -472,7 +461,8 @@ func TestDailyDoubleFade_MidFadeAdminSetVolumeWinsRestore(t *testing.T) {
 	h.joinAdmin("admin")
 	_, raterConn := setupDDPerformance(t, h)
 
-	h.rate(raterConn, 5) // completes the pool, starts the fade (restoreTo snapshot = 100)
+	h.rate(raterConn, 5) // completes the pool; admin still has to end it (2026-10-22)
+	h.endDailyDouble("admin") // starts the fade (restoreTo snapshot = 100)
 
 	// Mid-fade: the operator drags the slider to 40. This must be the value
 	// both the device and e.volumePct end up at once the fade's guaranteed

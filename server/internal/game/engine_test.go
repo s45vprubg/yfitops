@@ -373,6 +373,15 @@ func (h *harness) ddChoose(connID, trackID string) {
 	h.sync(func() {})
 }
 
+// endDailyDouble drives the admin's "End Daily Double" button (the only
+// owner-approved way to end a performance besides the track finishing on
+// its own, as of 2026-10-22 — see onRate/checkDailyDoubleComplete).
+func (h *harness) endDailyDouble(adminConn string) {
+	d, _ := json.Marshal(struct{}{})
+	h.e.OnMessage(adminConn, protocol.RoleAdmin, protocol.ClientEnvelope{Type: cmsgAdminEndDailyDouble, Data: d, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+}
+
 // lastDailyDoubleOfferTrackIDs returns the track IDs from the most recent
 // smsgDailyDoubleOffer frame sent to connID (test helper for driving choose).
 func (h *harness) lastDailyDoubleOfferTrackIDs(connID string) []string {
@@ -920,6 +929,9 @@ func TestDailyDouble_BonusApplied(t *testing.T) {
 	rd, _ := json.Marshal(protocol.RateData{Stars: 5})
 	h.e.OnMessage("c2", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgRate, Data: rd, Nonce: h.gate.Current()}, nowMs())
 	h.sync(func() {})
+	// Rating alone no longer ends the performance (owner decision,
+	// 2026-10-22) — the admin must end it.
+	h.endDailyDouble("admin")
 
 	// The payout now lands after a graceful fade (fadeOutAndFinishDailyDouble),
 	// not synchronously the instant the last rating arrives — wait for it.
@@ -1965,6 +1977,9 @@ func TestDailyDouble_WinnerBecomesPicker(t *testing.T) {
 	rd, _ := json.Marshal(protocol.RateData{Stars: 5})
 	h.e.OnMessage("c2", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgRate, Data: rd, Nonce: h.gate.Current()}, nowMs())
 	h.sync(func() {})
+	// Rating alone no longer ends the performance (owner decision,
+	// 2026-10-22) — the admin must end it.
+	h.endDailyDouble("admin")
 	// The DD resolution now lands after a graceful fade, not synchronously.
 	if !waitUntil(t, time.Second, func() bool { return len(h.audio.ofMethod("pause")) > 0 }) {
 		t.Fatal("timed out waiting for the Daily Double fade to finish and pause")

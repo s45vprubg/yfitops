@@ -243,8 +243,9 @@ type Engine struct {
 	// performance blocking or misfiring against a later, unrelated one
 	// (s8eng-03). It holds the e.roundKey of whichever Daily Double
 	// performance currently has a graceful fade-out in flight (from either
-	// the automatic all-rated completion or the admin.endDailyDouble
-	// button), "" when none is in flight. e.roundKey is already minted
+	// checkDailyDoubleComplete's disconnect/kick deadlock guard, the track
+	// ending naturally, or the admin.endDailyDouble button), "" when none
+	// is in flight. e.roundKey is already minted
 	// fresh per DD performance (startDailyDoublePerformance), so comparing
 	// against the CURRENT e.roundKey — not a bare bool — lets a new
 	// performance's own fade proceed even while an old, already-abandoned
@@ -2483,23 +2484,30 @@ func (e *Engine) onRate(connID string, env protocol.ClientEnvelope) {
 	}
 	e.ratings[p.ID] = d.Stars
 
-	// Once every eligible rater has voted, average + apply the payout (§7).
-	e.checkDailyDoubleComplete()
+	// Recording the vote does NOT end the performance (owner decision,
+	// 2026-10-22): the performer keeps singing until the admin ends it or
+	// the track finishes naturally — "every rater has voted" used to cut
+	// the performance short the instant the last vote landed, which felt
+	// unfair to a performer still mid-song. See checkDailyDoubleComplete's
+	// own remaining call sites for the one case that still needs it.
 }
 
 // checkDailyDoubleComplete finishes the daily double EARLY once every
-// eligible rater has voted (§7) — it never cuts a performance short just
-// because the pool is/became empty; an empty pool means the song plays to its
-// natural end (or an admin Force End Round) with a graceful 1★-floor payout
-// (see finishDailyDouble), not an instant pause the moment it starts.
-// Guarded on curTrack != nil so a disconnect/kick during the offer/song-pick
-// sub-phase (state already DAILY_DOUBLE, but no performance started yet and
-// ratingPool not yet built) is a safe no-op rather than a premature finish.
+// REMAINING eligible rater has voted (§7). Only called from the
+// disconnect/kick paths now (not from onRate, as of 2026-10-22) — it exists
+// solely as a deadlock guard: if a rater leaves the pool mid-performance,
+// the round must not hang forever waiting on a vote that can never arrive.
+// It never cuts a performance short just because the pool is/became empty;
+// an empty pool means the song plays to its natural end (or an admin Force
+// End Round) with a graceful 1★-floor payout (see finishDailyDouble), not an
+// instant pause the moment it starts. Guarded on curTrack != nil so a
+// disconnect/kick during the offer/song-pick sub-phase (state already
+// DAILY_DOUBLE, but no performance started yet and ratingPool not yet
+// built) is a safe no-op rather than a premature finish.
 //
 // Routes through fadeOutAndFinishDailyDouble (not finishDailyDouble
-// directly) so the "all ratings are in" completion fades gracefully too,
-// not just the admin.endDailyDouble button — the abrupt instant stop this
-// used to do was the actual complaint being fixed here.
+// directly) so this completion fades gracefully too, not just the
+// admin.endDailyDouble button.
 func (e *Engine) checkDailyDoubleComplete() {
 	if e.state != protocol.StateDailyDouble || e.curTrack == nil {
 		return
@@ -2923,9 +2931,11 @@ func (e *Engine) onAdminEndDailyDouble(connID string, _ protocol.ClientEnvelope)
 
 // fadeOutAndFinishDailyDouble is the one shared path for ending a Daily
 // Double performance gracefully — used by both checkDailyDoubleComplete's
-// automatic all-rated completion and the admin.endDailyDouble button. Force
-// End Round / admin.skipDailyDouble deliberately do NOT go through this —
-// they stay instant, true emergency stops.
+// disconnect/kick deadlock guard and the admin.endDailyDouble button
+// (ratings alone no longer end a performance, per owner decision
+// 2026-10-22 — only the admin or the track ending naturally can). Force End
+// Round / admin.skipDailyDouble deliberately do NOT go through this — they
+// stay instant, true emergency stops.
 //
 // Guaranteed volume restore: restoreTo is captured BEFORE the fade starts,
 // and the defer that restores it is registered as the very first thing in
