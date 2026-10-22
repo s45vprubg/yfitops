@@ -23,6 +23,7 @@ import type {
   GameState,
   LyricsData,
   MaskedRevealData,
+  PendingPickData,
   RevealData,
   ScoreboardData,
   ServerEnvelope,
@@ -75,6 +76,12 @@ export interface GameView {
   // The actual winner of the current round for the karaoke banner. undefined
   // until the server says (at karaoke); "" means nobody won.
   roundWinner: string | null;
+  // The cell the picker has queued for the next round (smsgPendingPick,
+  // CONTRACT-QUESTION — see engine.go), so Board.tsx can highlight it during
+  // the between-rounds countdown. null once cleared (the server re-sends a
+  // zero value the instant the next round actually starts) or outside the
+  // BOARD/TRANSITION window.
+  pendingPickCell: { row: number; col: number } | null;
   timer: TimerAnchor | null;
   animStartTime: number;
   audioMode: AudioPlayer["mode"];
@@ -137,6 +144,7 @@ export function useGame() {
     lyricsStatus: "idle",
     lockoutHandle: null,
     roundWinner: null,
+    pendingPickCell: null,
     timer: null,
     animStartTime: 0,
     audioMode: "demo",
@@ -306,6 +314,13 @@ export function useGame() {
             out.timer = null;
             out.ddPerformer = null;
           }
+          // Defensive reset: the server already re-broadcasts pendingPick
+          // cleared the instant the next round starts (the normal path), but
+          // a LOBBY bounce (e.g. admin.endGame) has no such frame — don't
+          // leave a stale highlight armed for whatever state comes next.
+          if (next === "LOBBY") {
+            out.pendingPickCell = null;
+          }
           return { ...v, ...out };
         });
       });
@@ -359,6 +374,10 @@ export function useGame() {
       client.on("roundWinner", (e: ServerEnvelope) => {
         const handle = (e.d as { handle?: string })?.handle ?? "";
         patch({ roundWinner: handle });
+      });
+      client.on("pendingPick", (e: ServerEnvelope) => {
+        const d = e.d as PendingPickData;
+        patch({ pendingPickCell: d && d.row > 0 && d.col > 0 ? { row: d.row, col: d.col } : null });
       });
       client.on("lockout", (e: ServerEnvelope) => {
         const handle = (e.d as { byHandle: string }).byHandle;

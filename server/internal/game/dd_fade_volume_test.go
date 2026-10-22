@@ -15,8 +15,9 @@ import (
 // onAdminSetVolume/onAdminEndDailyDouble in engine.go.
 
 // withFastFade shrinks DailyDoubleFadeDuration for the duration of a test,
-// mirroring TestTransition_*'s own override of TransitionDelay — these
-// tests should not take 3 real seconds each.
+// mirroring TestTransition_*'s own withFastTransition override of
+// e.revealCfg.TransitionDelayMs — these tests should not take 3 real
+// seconds each.
 func withFastFade(t *testing.T) {
 	t.Helper()
 	old := DailyDoubleFadeDuration
@@ -461,7 +462,7 @@ func TestDailyDoubleFade_MidFadeAdminSetVolumeWinsRestore(t *testing.T) {
 	h.joinAdmin("admin")
 	_, raterConn := setupDDPerformance(t, h)
 
-	h.rate(raterConn, 5) // completes the pool; admin still has to end it (2026-10-22)
+	h.rate(raterConn, 5)      // completes the pool; admin still has to end it (2026-10-22)
 	h.endDailyDouble("admin") // starts the fade (restoreTo snapshot = 100)
 
 	// Mid-fade: the operator drags the slider to 40. This must be the value

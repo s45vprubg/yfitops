@@ -114,6 +114,14 @@ export type ServerMsgType =
   // exhausted — already §4A-safe), sent ONLY to the designated picker's own
   // connection. Mirrors smsgPickableBoard in engine.go.
   | "pickableBoard"
+  // pendingPick: {row, col} — which cell the picker has queued for the next
+  // round, broadcast to stage + admin ONLY (never mobile). Carries just the
+  // coordinate; both clients already have the board/pickerStatus data to
+  // render a label themselves. The zero value ({row:0, col:0} — boards are
+  // 1-indexed) means "cleared". Sent again cleared the instant the next
+  // round actually starts. Mirrors smsgPendingPick in engine.go
+  // (CONTRACT-QUESTION — not in the fixed protocol.go).
+  | "pendingPick"
   // partialReveal: stage-only signal to fully reveal one field (artist|song)
   // after a partial guess. Mirrors smsgPartialReveal in server engine.go
   // (a CONTRACT-QUESTION type kept out of the fixed protocol.go).
@@ -229,6 +237,9 @@ export interface AdminSetRevealCfgData {
   autoKaraokeMs?: number;
   yearDelayMs?: number;
   alternate?: boolean;
+  // transitionDelayMs: the "Next track in N" countdown (ms) before the
+  // queued track begins. Mirrors revealCfg.TransitionDelayMs in reveal.go.
+  transitionDelayMs?: number;
 }
 export interface RateData { stars: number; }
 export interface DailyDoubleDecisionData { accept: boolean; }
@@ -285,6 +296,9 @@ export interface AdminRevealCfgData {
   autoKaraokeMs: number;
   yearDelayMs: number;
   alternate: boolean;
+  // transitionDelayMs: the "Next track in N" countdown (ms) before the
+  // queued track begins. Mirrors revealCfg.TransitionDelayMs in reveal.go.
+  transitionDelayMs: number;
 }
 export interface LyricLine { timeMs: number; text: string; }
 export interface LyricsData { lines: LyricLine[]; }
@@ -297,6 +311,9 @@ export interface BoardCell {
 export interface BoardData { rows: number; cols: number; cells: BoardCell[]; }
 export interface PlayerSelectCellData { row: number; col: number; }
 export interface PickerStatusData { pickerID: string; pickerHandle: string; hasPicked: boolean; }
+// PendingPickData — see the "pendingPick" ServerMsgType doc comment above.
+// {row:0, col:0} means cleared.
+export interface PendingPickData { row: number; col: number; }
 export interface AudioData { action: "play" | "pause" | "resume"; trackURI?: string; positionMs?: number; }
 export interface TelemetryConn { id: string; handle: string; rttMs: number; score: number; active: boolean; }
 export interface TelemetryData { connections: TelemetryConn[]; }

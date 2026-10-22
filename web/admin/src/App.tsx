@@ -111,6 +111,8 @@ export default function App() {
               ddPerformer={state.ddPerformer}
               ddResult={state.ddResult}
               pickerStatus={state.pickerStatus}
+              pendingPick={state.pendingPick}
+              board={state.board}
               actions={actions}
               status={state.status}
               connected={state.connected}

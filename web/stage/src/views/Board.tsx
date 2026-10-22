@@ -3,7 +3,17 @@
 
 import type { BoardData, BoardCell } from "@shared/protocol";
 
-export default function Board({ board }: { board: BoardData | null }) {
+export default function Board({
+  board,
+  highlightCell,
+}: {
+  board: BoardData | null;
+  // The cell the picker has queued for the next round (smsgPendingPick,
+  // CONTRACT-QUESTION — see engine.go), so the projector can show it's
+  // already decided during the between-rounds countdown. Optional/additive:
+  // undefined renders exactly as before.
+  highlightCell?: { row: number; col: number };
+}) {
   if (!board) {
     return <div className="flex h-full items-center justify-center text-2xl text-neon-green/50">loading board…</div>;
   }
@@ -58,6 +68,7 @@ export default function Board({ board }: { board: BoardData | null }) {
             const cell = byKey.get(`${row}:${col}`);
             const exhausted = cell?.exhausted ?? false;
             const points = cell?.points ?? 0;
+            const isHighlighted = !exhausted && highlightCell?.row === row && highlightCell?.col === col;
             return (
               <div
                 key={`${row}:${col}`}
@@ -66,6 +77,7 @@ export default function Board({ board }: { board: BoardData | null }) {
                   exhausted
                     ? "border-white/5 bg-white/[0.02] text-white/15"
                     : "border-neon-cyan/30 bg-panel text-neon-amber shadow-[0_0_24px_rgba(255,176,0,0.12)]",
+                  isHighlighted ? "animate-pulse ring-2 ring-neon-magenta shadow-[0_0_28px_rgba(255,43,214,0.6)]" : "",
                 ].join(" ")}
               >
                 <span className={["tnum font-extrabold", exhausted ? "text-4xl" : "text-5xl neon-text"].join(" ")}>

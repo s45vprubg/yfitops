@@ -79,6 +79,10 @@ const (
 	defaultAutoKaraokeMs      = 3000  // after full reveal, wait this long then auto-enter karaoke
 	defaultYearDelayMs        = 5000  // show the year hint this long after the round starts
 	revealBlockWidth          = 16    // fixed-width noise block shown during the block phase
+	// defaultTransitionDelayMs matches the old hardcoded 3s "Next track in N"
+	// countdown (engine.go's beginTransition) now that it's a live admin knob
+	// instead of a package-level var. See TransitionDelayMs below.
+	defaultTransitionDelayMs = 3000
 )
 
 // Clamp bounds for the live knob so a fat-fingered slider can't wedge the game.
@@ -97,6 +101,11 @@ const (
 	maxAutoKaraokeMs      = 15000
 	minHintDelayMs        = 0
 	maxHintDelayMs        = 20000
+	// minTransitionDelayMs/maxTransitionDelayMs: 1-10s. Below 1s the countdown
+	// banner is barely readable; above 10s it drags between-round pacing far
+	// past every other knob's range in this file.
+	minTransitionDelayMs = 1000
+	maxTransitionDelayMs = 10000
 )
 
 // revealConfig holds the tunable reveal-timing knobs. Stored on the engine and
@@ -111,19 +120,25 @@ type revealConfig struct {
 	AutoKaraokeMs int  // after the reveal fully completes, delay this long then auto-enter karaoke (0 = off)
 	YearDelayMs   int  // show the year hint this long after the round starts
 	Alternate     bool // true: one field per tick (artist,song,artist,...); false: one from each per tick
+	// TransitionDelayMs is the "Next track in N" countdown before the queued
+	// track begins (design_doc §3.9). Used by engine.go's beginTransition.
+	// Formerly the package-level var TransitionDelay; moved here so it's
+	// admin-configurable like every other round-timing knob.
+	TransitionDelayMs int
 }
 
 // defaultRevealConfig returns the built-in defaults.
 func defaultRevealConfig() revealConfig {
 	return revealConfig{
-		IntervalMs:    defaultRevealIntervalMs,
-		Phase1Ms:      defaultRevealPhase1Ms,
-		BlockMs:       defaultRevealBlockMs,
-		EaseMs:        defaultRevealEaseMs,
-		LockoutChars:  defaultRevealLockoutChars,
-		AutoKaraokeMs: defaultAutoKaraokeMs,
-		YearDelayMs:   defaultYearDelayMs,
-		Alternate:     true,
+		IntervalMs:        defaultRevealIntervalMs,
+		Phase1Ms:          defaultRevealPhase1Ms,
+		BlockMs:           defaultRevealBlockMs,
+		EaseMs:            defaultRevealEaseMs,
+		LockoutChars:      defaultRevealLockoutChars,
+		AutoKaraokeMs:     defaultAutoKaraokeMs,
+		YearDelayMs:       defaultYearDelayMs,
+		Alternate:         true,
+		TransitionDelayMs: defaultTransitionDelayMs,
 	}
 }
 
@@ -145,6 +160,7 @@ func (c revealConfig) clamp() revealConfig {
 	c.LockoutChars = clampInt(c.LockoutChars, minRevealLockoutChars, maxRevealLockoutChars)
 	c.AutoKaraokeMs = clampInt(c.AutoKaraokeMs, minAutoKaraokeMs, maxAutoKaraokeMs)
 	c.YearDelayMs = clampInt(c.YearDelayMs, minHintDelayMs, maxHintDelayMs)
+	c.TransitionDelayMs = clampInt(c.TransitionDelayMs, minTransitionDelayMs, maxTransitionDelayMs)
 	return c
 }
 
@@ -267,27 +283,29 @@ type maskedRevealData struct {
 
 // adminRevealCfgData echoes the current knob values to the admin UI.
 type adminRevealCfgData struct {
-	IntervalMs    int  `json:"intervalMs"`
-	Phase1Ms      int  `json:"phase1Ms"`
-	BlockMs       int  `json:"blockMs"`
-	EaseMs        int  `json:"easeMs"`
-	LockoutChars  int  `json:"lockoutChars"`
-	AutoKaraokeMs int  `json:"autoKaraokeMs"`
-	YearDelayMs   int  `json:"yearDelayMs"`
-	Alternate     bool `json:"alternate"`
+	IntervalMs        int  `json:"intervalMs"`
+	Phase1Ms          int  `json:"phase1Ms"`
+	BlockMs           int  `json:"blockMs"`
+	EaseMs            int  `json:"easeMs"`
+	LockoutChars      int  `json:"lockoutChars"`
+	AutoKaraokeMs     int  `json:"autoKaraokeMs"`
+	YearDelayMs       int  `json:"yearDelayMs"`
+	Alternate         bool `json:"alternate"`
+	TransitionDelayMs int  `json:"transitionDelayMs"`
 }
 
 // adminSetRevealCfgData is the admin -> server knob update. Pointer fields let
 // the client send a partial update (only the sliders it touched).
 type adminSetRevealCfgData struct {
-	IntervalMs    *int  `json:"intervalMs"`
-	Phase1Ms      *int  `json:"phase1Ms"`
-	BlockMs       *int  `json:"blockMs"`
-	EaseMs        *int  `json:"easeMs"`
-	LockoutChars  *int  `json:"lockoutChars"`
-	AutoKaraokeMs *int  `json:"autoKaraokeMs"`
-	YearDelayMs   *int  `json:"yearDelayMs"`
-	Alternate     *bool `json:"alternate"`
+	IntervalMs        *int  `json:"intervalMs"`
+	Phase1Ms          *int  `json:"phase1Ms"`
+	BlockMs           *int  `json:"blockMs"`
+	EaseMs            *int  `json:"easeMs"`
+	LockoutChars      *int  `json:"lockoutChars"`
+	AutoKaraokeMs     *int  `json:"autoKaraokeMs"`
+	YearDelayMs       *int  `json:"yearDelayMs"`
+	Alternate         *bool `json:"alternate"`
+	TransitionDelayMs *int  `json:"transitionDelayMs"`
 }
 
 // currentMask builds the frame for the current reveal state. During the block

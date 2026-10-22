@@ -29,7 +29,38 @@ column drops) for the new Mark/Jump Drop Point feature. Run
 `cd deploy && make migrate` before starting the new server/gameserver image.
 No backfill: every song's drop point starts unmarked until an admin marks it.
 
-## [Unreleased] — 2026-10-17
+## [Unreleased] — 2026-10-22
+
+### Added — Configurable transition delay + next-cell highlight/toast
+- `server/internal/game/reveal.go`: `revealConfig` gains `TransitionDelayMs`
+  (default 3000, clamped to 1000-10000ms), the admin-configurable "Next track
+  in N" countdown — same mechanism as every other reveal-timing knob
+  (`IntervalMs`, `YearDelayMs`, etc.). Echoed via `adminRevealCfgData` /
+  accepted via `adminSetRevealCfgData`.
+- `server/internal/game/engine.go`: removed the package-level `TransitionDelay`
+  var; `beginTransition()` now reads `e.revealCfg.TransitionDelayMs`.
+  `revealCfgData()`/`onAdminSetRevealCfg()` round-trip the new field like the
+  rest of the knobs.
+- New local server message `smsgPendingPick` ("pendingPick", CONTRACT-QUESTION
+  — see engine.go) broadcasts `{row, col}` to stage + admin ONLY the instant
+  the picker's cell choice resolves (`onPlayerSelectCell`), and again with the
+  zero value `{row:0, col:0}` ("cleared") at the exact point
+  `beginTransition`'s countdown continuation clears `e.pendingPick` and starts
+  the next round. Carries no category/points/track data — both clients derive
+  that from board data they already have.
+- `web/stage`: `Board.tsx` takes an optional `highlightCell` prop and renders
+  a distinct pulsing magenta ring/glow on that cell (separate from the normal
+  and `exhausted` styles); `useGame.ts`/`App.tsx` wire the new `pendingPick`
+  message into `GameView.pendingPickCell`.
+- `web/admin`: `EvaluationPanel.tsx` gets a new `PendingPickToast` reading
+  `"{handle} chose '{category}' for {points} — queued for next round"`,
+  fading in/out as `pendingPick` arrives/clears; `useAdmin.ts` wires the new
+  message into `AdminState.pendingPick`. `AudioSettingsPanel.tsx`'s Game
+  Settings draft gets a "Transition delay" row (seconds, 1-10s) alongside the
+  other reveal-timing sliders.
+- `web/shared/protocol.ts`: added the `pendingPick` `ServerMsgType`,
+  `PendingPickData`, and `transitionDelayMs`/`TransitionDelayMs`-mirroring
+  fields on `AdminRevealCfgData`/`AdminSetRevealCfgData`.
 
 ### Fixed — Kicked player's phone showed no explanation
 - `server/internal/game/engine.go`'s `onAdminKick` already sent the kicked

@@ -85,7 +85,7 @@ export default function StageApp() {
 
       case "BOARD":
       case "TRANSITION":
-        return <Board board={view.board} />;
+        return <Board board={view.board} highlightCell={view.pendingPickCell ?? undefined} />;
 
       case "ROUND_ACTIVE":
       case "LOCKED_OUT":
@@ -100,7 +100,7 @@ export default function StageApp() {
             />
           );
         }
-        return <Board board={view.board} />;
+        return <Board board={view.board} highlightCell={view.pendingPickCell ?? undefined} />;
 
       case "DAILY_DOUBLE": {
         const performer = view.ddPerformer;

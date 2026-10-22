@@ -1016,13 +1016,34 @@ func TestEphemeralResume(t *testing.T) {
 // both AND-gate halves are satisfied (vote passed AND the picker picked),
 // the countdown starts the PICKED cell directly — BOARD is only a
 // momentary pass-through, not the resting state.
-func TestTransition_PickedCellStartsAfterCountdown(t *testing.T) {
-	old := TransitionDelay
-	TransitionDelay = 10 * time.Millisecond
-	defer func() { TransitionDelay = old }()
+// withFastTransition shrinks e.revealCfg.TransitionDelayMs (the "Next track
+// in N" countdown, now an admin-configurable revealCfg knob rather than the
+// old package-level TransitionDelay var) for the duration of a test,
+// mirroring withFastFade's DailyDoubleFadeDuration override. Restored via
+// t.Cleanup even though each harness gets its own fresh Engine (so there's
+// nothing to actually leak) — kept for symmetry with that pattern.
+//
+// The restore writes the field directly (NOT via h.sync/submitSync): t.Cleanup
+// funcs run strictly after the test function (and its own defers) have
+// returned, so by the time this fires, the harness's own `defer h.run()()`
+// has already cancelled the engine's context — Run's loop exits on
+// ctx.Done() immediately (see engine.go's Run), so nothing is left reading
+// e.cmds and a submitSync call here would block forever. This is exactly
+// what happened before this comment existed: it hung every test run for
+// 10 minutes until testing's own panic-on-timeout killed it. Once the loop
+// is gone, nothing else touches e.revealCfg either, so the plain write is
+// race-free in practice, not just "probably fine."
+func withFastTransition(t *testing.T, h *harness, ms int) {
+	t.Helper()
+	var old int
+	h.sync(func() { old = h.e.revealCfg.TransitionDelayMs; h.e.revealCfg.TransitionDelayMs = ms })
+	t.Cleanup(func() { h.e.revealCfg.TransitionDelayMs = old })
+}
 
+func TestTransition_PickedCellStartsAfterCountdown(t *testing.T) {
 	h := newHarness(t)
 	defer h.run()()
+	withFastTransition(t, h, 10)
 	h.joinAdmin("admin")
 	h.join("c1", "fp1", "a")
 	h.selectCell("admin", 1, 1)
@@ -1057,12 +1078,9 @@ func TestTransition_PickedCellStartsAfterCountdown(t *testing.T) {
 // today, but guarded rather than assumed), land on BOARD and clear the
 // stale picker state instead of leaving the game stuck.
 func TestTransition_NoValidPickFallsBackToBoard(t *testing.T) {
-	old := TransitionDelay
-	TransitionDelay = 10 * time.Millisecond
-	defer func() { TransitionDelay = old }()
-
 	h := newHarness(t)
 	defer h.run()()
+	withFastTransition(t, h, 10)
 	h.joinAdmin("admin")
 	h.join("c1", "fp1", "a")
 	h.selectCell("admin", 1, 1)
@@ -1957,12 +1975,9 @@ func TestOnDisconnect_PickerClearsStaleState(t *testing.T) {
 // no-valid-pick continuation beginTransition's own stalled-pick handling
 // uses, instead of leaving the round stuck in KARAOKE forever.
 func TestOnDisconnect_PickerDisconnectWithReadyFallsThroughToBoard(t *testing.T) {
-	old := TransitionDelay
-	TransitionDelay = 20 * time.Millisecond
-	t.Cleanup(func() { TransitionDelay = old })
-
 	h := newHarness(t)
 	defer h.run()()
+	withFastTransition(t, h, 20)
 	h.joinAdmin("admin")
 	p1 := h.join("c1", "fp1", "a")
 	h.selectCell("admin", 1, 1)

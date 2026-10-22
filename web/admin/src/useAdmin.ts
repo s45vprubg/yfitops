@@ -17,6 +17,7 @@ import type {
   ErrorData,
   GameState,
   ModeLockData,
+  PendingPickData,
   PickerStatusData,
   ScoreboardData,
   ServerEnvelope,
@@ -99,6 +100,11 @@ export interface AdminState {
   // all roles; the admin had no visibility into this before (s8uim-01) even
   // though admin.select is a real manual override for a stuck picker.
   pickerStatus?: PickerStatusData;
+  // The cell the picker has queued for the next round (smsgPendingPick,
+  // CONTRACT-QUESTION — see engine.go), sanitized to {row, col}. undefined/
+  // row===0 means nothing is queued; the server re-broadcasts the cleared
+  // zero value the instant the next round actually starts.
+  pendingPick?: PendingPickData;
   // Operating playback volume (0-100), echoed from the server so the
   // slider reflects truth on connect/reconnect rather than assuming a
   // default. Also the level the Daily Double fade-out restores to.
@@ -245,6 +251,10 @@ export function useAdmin(): [AdminState, AdminActions] {
       });
       client.on("pickerStatus", (env: ServerEnvelope) => {
         patch({ pickerStatus: env.d as PickerStatusData });
+      });
+      client.on("pendingPick", (env: ServerEnvelope) => {
+        const d = env.d as PendingPickData;
+        patch({ pendingPick: d && d.row > 0 && d.col > 0 ? d : undefined });
       });
       client.on("scoreboard", (env: ServerEnvelope) => {
         patch({ scoreboard: env.d as ScoreboardData });

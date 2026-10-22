@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type {
   AdminViewData,
+  BoardData,
   DailyDoublePerformerData,
   DailyDoubleResultData,
   GameState,
   ModeLockData,
+  PendingPickData,
   PickerStatusData,
 } from "@shared/protocol";
 import type { AdminActions, ConnStatus, PlaybackPosition } from "../useAdmin";
@@ -16,6 +18,13 @@ interface Props {
   ddPerformer?: DailyDoublePerformerData;
   ddResult?: DailyDoubleResultData;
   pickerStatus?: PickerStatusData;
+  // The cell queued for the next round (smsgPendingPick), and the board data
+  // needed to turn its {row,col} into a human-readable category/points for
+  // PendingPickToast below. Both already flow into this panel's sibling
+  // props (pickerStatus for the handle); nothing new travels over the wire
+  // beyond the coordinate itself.
+  pendingPick?: PendingPickData;
+  board?: BoardData;
   actions: AdminActions;
   // Game-control-bar props (this panel's header IS the control bar now).
   status: ConnStatus;
@@ -57,7 +66,7 @@ function isRoundActive(s?: GameState): boolean {
 }
 
 export default function EvaluationPanel({
-  gameState, adminView, ddPerformer, ddResult, pickerStatus, actions,
+  gameState, adminView, ddPerformer, ddResult, pickerStatus, pendingPick, board, actions,
   status, connected, nonce, adminSecret, spotifyConnected, playback, modeLock,
 }: Props) {
   const phase = derivePhase(gameState, adminView);
@@ -99,6 +108,7 @@ export default function EvaluationPanel({
         {ddResult && <DailyDoubleResultBanner result={ddResult} />}
         {pickerWaiting && <PickerStatusBanner handle={pickerStatus!.pickerHandle} />}
         <Overrides actions={actions} roundActive={isRoundActive(gameState)} />
+        <PendingPickToast pendingPick={pendingPick} pickerHandle={pickerStatus?.pickerHandle} board={board} />
       </div>
       {ddPerforming && ddPerformer && (
         <EndDailyDoubleModal actions={actions} performer={ddPerformer} />
@@ -294,6 +304,62 @@ function PickerStatusBanner({ handle }: { handle: string }) {
       <div className="mt-1 text-sm font-semibold text-white">
         waiting on <span className="text-amber-300">{handle}</span> to pick a cell
       </div>
+    </div>
+  );
+}
+
+// PendingPickToast — surfaces the AND-gate's "picker has chosen" half the
+// instant it resolves (smsgPendingPick), so the admin sees what's queued for
+// the next round without waiting for the countdown to land. The text is
+// composed entirely from data this client already holds: pickerStatus's
+// handle (the picker who just chose) and the picked cell's category/points
+// looked up from the board prop — the server payload itself carries only
+// {row, col}, nothing else (the same minimization pendingPick/pickerStatus
+// already use elsewhere, even though admin is a trusted role).
+//
+// Fades in on arrival and fades OUT (not just disappears) when pendingPick
+// clears, via a short opacity/duration transition — the same
+// transition-utility pattern already used throughout this panel (e.g.
+// GradeButtons' hover transitions) rather than a new animation. `last` keeps
+// rendering the most recent pick while the fade-out plays, since the prop
+// itself has already gone undefined by then.
+function PendingPickToast({
+  pendingPick, pickerHandle, board,
+}: { pendingPick?: PendingPickData; pickerHandle?: string; board?: BoardData }) {
+  const [mounted, setMounted] = useState(false);
+  const [visible, setVisible] = useState(false);
+  const [last, setLast] = useState<{ row: number; col: number; handle?: string } | null>(null);
+
+  useEffect(() => {
+    if (pendingPick) {
+      setLast({ row: pendingPick.row, col: pendingPick.col, handle: pickerHandle });
+      setMounted(true);
+      const id = requestAnimationFrame(() => setVisible(true));
+      return () => cancelAnimationFrame(id);
+    }
+    if (mounted) {
+      setVisible(false);
+      const id = setTimeout(() => setMounted(false), 300);
+      return () => clearTimeout(id);
+    }
+  }, [pendingPick, pickerHandle, mounted]);
+
+  if (!mounted || !last) return null;
+  const cell = board?.cells.find((c) => c.row === last.row && c.col === last.col);
+  const handle = last.handle || "someone";
+  const category = cell?.category ?? "—";
+  const points = cell?.points ?? 0;
+
+  return (
+    <div
+      className={[
+        "rounded-lg border border-sky-700 bg-sky-950/30 p-3 text-sm font-semibold text-sky-200",
+        "transition-opacity duration-300",
+        visible ? "opacity-100" : "opacity-0",
+      ].join(" ")}
+    >
+      <span className="text-white">{handle}</span> chose &ldquo;{category}&rdquo; for{" "}
+      <span className="text-accent">{points}</span> — queued for next round
     </div>
   );
 }

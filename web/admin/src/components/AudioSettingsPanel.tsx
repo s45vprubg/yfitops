@@ -33,6 +33,7 @@ const SEC = {
   ease: [0, 10, 0.1] as const,
   autoKaraoke: [0, 15, 0.5] as const,
   hintDelay: [0, 20, 0.5] as const,
+  transitionDelay: [1, 10, 0.5] as const,
 };
 const LOCKOUT = [0, 20, 1] as const;
 // Floor matches the server's own clamp (engine.go) and the original spec
@@ -70,6 +71,7 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
   const [autoKaraokeSec, setAutoKaraokeSec] = useState(3);
   const [yearDelaySec, setYearDelaySec] = useState(5);
   const [alternate, setAlternate] = useState(true);
+  const [transitionDelaySec, setTransitionDelaySec] = useState(3);
   const [dirty, setDirty] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -81,7 +83,7 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
   const DEFAULTS = {
     thresh: 50, intervalSec: 3, phase1Sec: 10, blockSec: 15, easeSec: 3,
     lockoutChars: 2, autoKaraokeSec: 3, yearDelaySec: 5,
-    alternate: true,
+    alternate: true, transitionDelaySec: 3,
   };
 
   // Seed the draft from the live server echo, but only while nothing is
@@ -97,6 +99,7 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
     setAutoKaraokeSec(revealCfg.autoKaraokeMs / 1000);
     setYearDelaySec(revealCfg.yearDelayMs / 1000);
     setAlternate(revealCfg.alternate);
+    setTransitionDelaySec(revealCfg.transitionDelayMs / 1000);
   }, [revealCfg, dirty]);
 
   const edit = <T,>(setter: (v: T) => void) => (v: T) => {
@@ -117,6 +120,7 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
       autoKaraokeMs: Math.round(autoKaraokeSec * 1000),
       yearDelayMs: Math.round(yearDelaySec * 1000),
       alternate,
+      transitionDelayMs: Math.round(transitionDelaySec * 1000),
     });
     setDirty(false);
     setSaved(true);
@@ -137,6 +141,7 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
     setAutoKaraokeSec(DEFAULTS.autoKaraokeSec);
     setYearDelaySec(DEFAULTS.yearDelaySec);
     setAlternate(DEFAULTS.alternate);
+    setTransitionDelaySec(DEFAULTS.transitionDelaySec);
     setDirty(true);
     setSaved(false);
   };
@@ -176,6 +181,11 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
         <SettingRow label="Skip vote threshold" sub="% of players voting to skip a track"
           value={thresh} min={THRESH[0]} max={THRESH[1]} step={THRESH[2]} suffix="%"
           onChange={editThresh} />
+
+        <Divider label="Between rounds — apply next round" />
+        <SettingRow label="Transition delay" sub="seconds the board shows before the next track starts"
+          value={transitionDelaySec} min={SEC.transitionDelay[0]} max={SEC.transitionDelay[1]} step={SEC.transitionDelay[2]} suffix="s"
+          onChange={edit(setTransitionDelaySec)} />
 
         <Divider label="Hints — apply next round" />
         <SettingRow label="Reveal year after" sub="seconds into the track"

@@ -31,9 +31,13 @@ import (
 // trusted roles (stage/admin); mobile only ever sees sanitized StateData and
 // the lockout/buzzResult/voteState control frames.
 
-// TransitionDelay is the "Next track in N" countdown before the queued track
-// begins (design_doc §3.9). Exposed for tests to shrink.
-var TransitionDelay = 3 * time.Second
+// The "Next track in N" countdown before the queued track begins (design_doc
+// §3.9) used to live here as a package-level var (TransitionDelay) purely so
+// tests could shrink it. It is now e.revealCfg.TransitionDelayMs — an
+// admin-configurable knob, same mechanism as every other round-timing knob
+// in reveal.go — read by beginTransition below. Tests now override
+// e.revealCfg.TransitionDelayMs on the harness's own engine instance instead
+// (see withFastTransition in engine_test.go).
 
 // defaultBuzzWindowMs is the buzz-collection window (§4B fairness). All buzzes
 // are serialized on the Run loop, so a short window lets contenders that arrived
@@ -177,11 +181,11 @@ type Engine struct {
 	// arrives for the current track.
 	lastPlayback *playbackPositionData
 	curRow       int
-	roundKey       string // BuzzLock key for the active buzz round
-	trackStartMs   int64  // server epoch ms when the current track started
-	pausedAtMs     int64  // playback position when paused on a buzz
-	buzzWinner     string // playerID currently holding the lock
-	partial        pendingPartial
+	roundKey     string // BuzzLock key for the active buzz round
+	trackStartMs int64  // server epoch ms when the current track started
+	pausedAtMs   int64  // playback position when paused on a buzz
+	buzzWinner   string // playerID currently holding the lock
+	partial      pendingPartial
 
 	// ---- buzz-collection window (§4B fairness, Run-loop-owned) ----
 	// buzzWindowMs is the resolved window length. >0 opens an async collection
@@ -717,7 +721,25 @@ const (
 	// picker's own connection(s) so their phone can render a tappable grid.
 	// No other mobile client ever receives this.
 	smsgPickableBoard protocol.ServerMsgType = "pickableBoard"
+
+	// CONTRACT-QUESTION: smsgPendingPick tells stage + admin which cell the
+	// picker has queued for the next round, once both AND-gate halves are
+	// satisfied (see onPlayerSelectCell / karaokeConditionMet) — the stage
+	// highlights that cell and the admin shows a "queued for next round"
+	// toast. Sanitized: carries only {row, col}, never category/points/track
+	// — both clients already hold the board/pickerStatus data needed to
+	// render a human-readable label and derive it themselves. Stage- and
+	// admin-only (mobile has no board view at all). The zero value
+	// ({row:0, col:0} — boards are 1-indexed, so 0 is never a real cell)
+	// means "cleared"; see broadcastPendingPick.
+	smsgPendingPick protocol.ServerMsgType = "pendingPick"
 )
+
+// pendingPickData is the sanitized payload for smsgPendingPick — see above.
+type pendingPickData struct {
+	Row int `json:"row"`
+	Col int `json:"col"`
+}
 
 // cellCoord is a 1-indexed (row, col) board coordinate — used to hold the
 // picker's chosen cell between onPlayerSelectCell and the AND-gated
@@ -2070,7 +2092,7 @@ func (e *Engine) beginTransition() {
 	// Countdown then return to board. Done off-loop with a timer that re-enters
 	// the loop via submit so state stays single-threaded. The delay is read here
 	// on the loop goroutine (not inside the timer goroutine) to stay race-free.
-	delay := TransitionDelay
+	delay := time.Duration(e.revealCfg.TransitionDelayMs) * time.Millisecond
 	go func() {
 		time.Sleep(delay)
 		e.submit(func() {
@@ -2080,6 +2102,12 @@ func (e *Engine) beginTransition() {
 				e.curCell = nil
 				pending := e.pendingPick
 				e.pendingPick = nil
+				// The next round is actually starting now — clear the
+				// stage/admin "queued cell" signal at this exact instant (see
+				// smsgPendingPick / broadcastPendingPick) so the stage
+				// highlight and admin toast disappear in lockstep with the
+				// real state change, not an earlier/later approximation of it.
+				e.broadcastPendingPick(pendingPickData{})
 				e.transitionTo(protocol.StateBoard)
 				e.broadcastBoard()
 				if pending != nil {
@@ -2198,6 +2226,16 @@ func (e *Engine) broadcastPickerStatus() {
 	e.bcast.BroadcastAll(e.envelope(smsgPickerStatus, e.pickerStatusData()))
 }
 
+// broadcastPendingPick fans ONE envelope to stage and admin only (mirroring
+// broadcastMask's single-envelope pattern) — never mobile, which has no
+// board view to highlight. See smsgPendingPick's doc comment for the
+// sanitization rationale and the "zero value means cleared" convention.
+func (e *Engine) broadcastPendingPick(d pendingPickData) {
+	env := e.envelope(smsgPendingPick, d)
+	e.bcast.Broadcast(protocol.RoleStage, env)
+	e.bcast.Broadcast(protocol.RoleAdmin, env)
+}
+
 // sendPickableBoard delivers the board (category/points/exhausted — already
 // §4A-safe, no track metadata) to ONLY the designated picker's own
 // connection(s), so their phone can render a tappable grid. No other mobile
@@ -2274,6 +2312,11 @@ func (e *Engine) onPlayerSelectCell(connID string, env protocol.ClientEnvelope) 
 	}
 	e.pendingPick = &cellCoord{Row: d.Row, Col: d.Col}
 	e.broadcastPickerStatus()
+	// Both AND-gate halves are now resolvable (the picker has chosen) — tell
+	// stage/admin which cell is queued, regardless of whether the OTHER half
+	// (karaokeReady) has fired yet, so the highlight/toast appear the moment
+	// the pick itself registers, not only once the transition actually starts.
+	e.broadcastPendingPick(pendingPickData{Row: d.Row, Col: d.Col})
 	if e.karaokeReady {
 		e.beginTransition()
 	}
@@ -2869,7 +2912,8 @@ type volumeStatusData struct {
 
 // dailyDoubleFadeSteps/DailyDoubleFadeDuration control the graceful
 // fade-out's granularity. DailyDoubleFadeDuration is a var (not const) so
-// tests can shrink it, mirroring TransitionDelay's own override pattern.
+// tests can shrink it, mirroring how tests shrink e.revealCfg.TransitionDelayMs
+// (the "Next track in N" countdown) on their own harness's engine instance.
 const dailyDoubleFadeSteps = 6
 
 var DailyDoubleFadeDuration = 3 * time.Second
@@ -3120,14 +3164,15 @@ func (e *Engine) onAdminSetThresh(connID string, env protocol.ClientEnvelope) {
 func (e *Engine) revealCfgData() adminRevealCfgData {
 	c := e.revealCfg
 	return adminRevealCfgData{
-		IntervalMs:    c.IntervalMs,
-		Phase1Ms:      c.Phase1Ms,
-		BlockMs:       c.BlockMs,
-		EaseMs:        c.EaseMs,
-		LockoutChars:  c.LockoutChars,
-		AutoKaraokeMs: c.AutoKaraokeMs,
-		YearDelayMs:   c.YearDelayMs,
-		Alternate:     c.Alternate,
+		IntervalMs:        c.IntervalMs,
+		Phase1Ms:          c.Phase1Ms,
+		BlockMs:           c.BlockMs,
+		EaseMs:            c.EaseMs,
+		LockoutChars:      c.LockoutChars,
+		AutoKaraokeMs:     c.AutoKaraokeMs,
+		YearDelayMs:       c.YearDelayMs,
+		Alternate:         c.Alternate,
+		TransitionDelayMs: c.TransitionDelayMs,
 	}
 }
 
@@ -3164,6 +3209,9 @@ func (e *Engine) onAdminSetRevealCfg(connID string, env protocol.ClientEnvelope)
 	}
 	if d.Alternate != nil {
 		cfg.Alternate = *d.Alternate
+	}
+	if d.TransitionDelayMs != nil {
+		cfg.TransitionDelayMs = *d.TransitionDelayMs
 	}
 	e.revealCfg = cfg.clamp()
 	// Echo the applied values to every admin so all control-room tabs agree.
