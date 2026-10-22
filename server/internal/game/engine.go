@@ -967,6 +967,12 @@ func (e *Engine) dispatchAdmin(connID string, env protocol.ClientEnvelope) {
 	case cmsgAdminSoloKaraokeSetRepeat:
 		e.onAdminSoloKaraokeSetRepeat(connID, env)
 	case protocol.CMsgAdminEndGame:
+		// Stop whatever's playing — End Game used to leave a track running on
+		// stage indefinitely since nothing here ever told the device to pause.
+		if e.curTrack != nil {
+			_ = e.audio.Pause(context.Background())
+			e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{Action: "pause"}))
+		}
 		e.transitionTo(protocol.StateGameOver)
 		e.persistScores()
 		// trivia -> GAME_OVER releases the mode-lock (back to "none" unless

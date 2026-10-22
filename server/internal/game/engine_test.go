@@ -2143,3 +2143,63 @@ func TestJoinBurst_CoalescesScoreboardBoardTelemetry(t *testing.T) {
 		}
 	})
 }
+
+// TestAdminEndGame_StopsPlayback: the admin.endGame handler used to only
+// transition to GAME_OVER and persist scores -- a track actively playing
+// kept playing on stage indefinitely, since nothing told the device to
+// pause. Pins that ending the game while a track is loaded stops it, the
+// same pause+stage-broadcast pattern every other "stop playback" path uses.
+func TestAdminEndGame_StopsPlayback(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.joinStage("stage")
+	h.selectCell("admin", 1, 1)
+	if h.state() != protocol.StateRoundActive {
+		t.Fatalf("state after selectCell = %s, want ROUND_ACTIVE", h.state())
+	}
+
+	h.e.OnMessage("admin", protocol.RoleAdmin, protocol.ClientEnvelope{Type: protocol.CMsgAdminEndGame, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+
+	if h.state() != protocol.StateGameOver {
+		t.Fatalf("state = %s, want GAME_OVER", h.state())
+	}
+	if got := len(h.audio.ofMethod("pause")); got != 1 {
+		t.Errorf("audio.Pause call count = %d, want exactly 1", got)
+	}
+
+	var sawStagePause bool
+	h.bcast.mu.Lock()
+	for _, f := range h.bcast.frames {
+		if f.role == protocol.RoleStage && f.env.Type == protocol.SMsgAudio {
+			var d protocol.AudioData
+			if err := json.Unmarshal(f.env.Data, &d); err == nil && d.Action == "pause" {
+				sawStagePause = true
+			}
+		}
+	}
+	h.bcast.mu.Unlock()
+	if !sawStagePause {
+		t.Error("no pause AudioData frame broadcast to stage after admin.endGame")
+	}
+}
+
+// TestAdminEndGame_NoTrackLoadedIsSafe: ending the game with no track
+// playing (e.g. straight from the lobby/board between rounds) must not
+// call Pause at all -- mirrors onAdminPlayback's own curTrack nil-guard.
+func TestAdminEndGame_NoTrackLoadedIsSafe(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+
+	h.e.OnMessage("admin", protocol.RoleAdmin, protocol.ClientEnvelope{Type: protocol.CMsgAdminEndGame, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+
+	if h.state() != protocol.StateGameOver {
+		t.Fatalf("state = %s, want GAME_OVER", h.state())
+	}
+	if got := len(h.audio.ofMethod("pause")); got != 0 {
+		t.Errorf("audio.Pause call count = %d, want 0 (no track was loaded)", got)
+	}
+}
