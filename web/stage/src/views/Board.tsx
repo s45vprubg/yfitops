@@ -37,7 +37,7 @@ export default function Board({ board }: { board: BoardData | null }) {
   }
 
   return (
-    <div className="flex h-full w-full flex-col px-10 py-12">
+    <div className="flex h-full w-full flex-col pl-[320px] pr-[300px] py-12">
       <h2 className="mb-6 text-center text-3xl font-bold uppercase tracking-[0.4em] text-neon-cyan neon-cyan">
         select a track
       </h2>

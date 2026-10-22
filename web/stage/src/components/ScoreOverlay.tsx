@@ -5,7 +5,7 @@
 import type { ScoreboardData } from "@shared/protocol";
 
 export default function ScoreOverlay({ scoreboard }: { scoreboard: ScoreboardData | null }) {
-  const players = [...(scoreboard?.players ?? [])].sort((a, b) => b.score - a.score).slice(0, 8);
+  const players = [...(scoreboard?.players ?? [])].sort((a, b) => b.score - a.score).slice(0, 10);
   if (players.length === 0) return null;
 
   return (
