@@ -684,6 +684,19 @@ func TestGrade_PartialLeavesRemainingPool(t *testing.T) {
 	if rem != 100 {
 		t.Errorf("remaining after second partial = %d, want 100", rem)
 	}
+
+	// A second partial ends the round (into KARAOKE) with a real winner —
+	// stage must show bob, never the "nobody :(" banner (s10/2026-10-22 fix:
+	// gradePartial's secondPartial branch used to skip setting roundWinner,
+	// the one field gradeCorrect always sets).
+	if h.state() != protocol.StateKaraoke {
+		t.Fatalf("state after second partial = %s, want KARAOKE", h.state())
+	}
+	var rw string
+	h.sync(func() { rw = h.e.roundWinner })
+	if rw != "bob" {
+		t.Errorf("roundWinner = %q after second partial, want %q", rw, "bob")
+	}
 }
 
 func (h *harness) lockHolderFor(key string) string {

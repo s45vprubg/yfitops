@@ -1676,6 +1676,9 @@ func (e *Engine) gradePartial(winner *Player, elapsed int64, kind string) {
 
 	if secondPartial {
 		// Two partials exhaust guessing; clear admin evaluation and enter karaoke.
+		e.roundWinner = winner.Handle // the real winner for the karaoke banner
+		// (same field gradeCorrect sets) — missing here made stage show the
+		// whole-room "nobody :(" banner despite a real, scoring winner.
 		e.buzzWinner = ""
 		e.lock.Release(context.Background(), e.roundKey)
 		e.bcast.Broadcast(protocol.RoleAdmin, e.adminViewEnvelope())
