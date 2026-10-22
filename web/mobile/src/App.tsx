@@ -20,6 +20,29 @@ export default function App() {
   const iAmPicker = !!view.pickerStatus && view.pickerStatus.pickerID === view.myPlayerID;
   const stillPicking = iAmPicker && !view.pickerStatus!.hasPicked;
 
+  // Checked FIRST, above every other branch (including !view.joined below):
+  // a kick must be seen regardless of whatever `joined`/`state`/`conn` the
+  // view was already in when it landed — see the "kicked" handling in
+  // useGame.ts for why there's no disconnect race to worry about here, and
+  // why this deliberately does NOT fall through to the bare join form.
+  if (view.kicked) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-6 px-6 text-center animate-fadeIn">
+        <h1 className="text-2xl font-bold text-danger">Removed from the game</h1>
+        <p className="text-base text-neutral-300">
+          {view.error ?? "You've been removed from the game by the admin."}
+        </p>
+        <button
+          type="button"
+          onClick={() => connect(getSavedHandle())}
+          className="rounded-xl bg-guess px-6 py-4 text-lg font-bold text-black transition active:scale-[0.98]"
+        >
+          Rejoin
+        </button>
+      </div>
+    );
+  }
+
   if (!view.joined) {
     return (
       <JoinScreen conn={view.conn} error={view.error} onJoin={connect} />

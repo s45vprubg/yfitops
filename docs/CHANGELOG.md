@@ -31,6 +31,34 @@ No backfill: every song's drop point starts unmarked until an admin marks it.
 
 ## [Unreleased] — 2026-10-17
 
+### Fixed — Kicked player's phone showed no explanation
+- `server/internal/game/engine.go`'s `onAdminKick` already sent the kicked
+  connection an `SMsgError{Code: "kicked"}` frame before marking the player
+  inactive — it never closes the transport itself (Kick is a soft removal,
+  distinct from Ban: `p.Banned` stays false, so the same deviceFP can still
+  rejoin). The gap was entirely client-side: `web/mobile/src/lib/useGame.ts`
+  had no special case for this error code, so it just landed in the generic
+  `error` string, which is only ever rendered on `JoinScreen` — a screen the
+  kicked player wasn't on. The player's connection stayed open with no
+  visible change; their buzzes/votes/picks would have just silently done
+  nothing from then on (server-side `p.Active`/`p.Banned` guards).
+- `web/mobile/src/lib/useGame.ts`: the `error` handler now special-cases
+  `Code: "kicked"` via a new `handleKicked` path: it tears the client's own
+  connection down and cancels/resets the reconnect-backoff latch itself
+  (deliberately WITHOUT scheduling a reconnect), then sets a new `kicked`
+  flag on `GameView`. Because the server never closes the transport here,
+  there is no disconnect-vs-error race to lose either side of — but the
+  teardown is written to be safe regardless of ordering if that ever
+  changes (closing the client sets `GameClient.closed`, which suppresses
+  any later `handleClose`/`onState(false)` for the same client).
+- `web/mobile/src/App.tsx`: added a `view.kicked` branch checked before
+  every other branch (including `!view.joined`), so the message can't be
+  swallowed by whatever screen/connection state the player happened to be
+  in. Shows "Removed from the game" + the server's message, with a
+  "Rejoin" button (kick is soft, not a ban, so the same handle/deviceFP can
+  reconnect and resume its score) that calls `connect()`, which clears the
+  `kicked` latch.
+
 ### Removed — Points silently halved on a fully-correct guess (one-field-first gate)
 - `server/internal/game/engine.go` / `reveal.go`: Removed the "one field
   revealed ahead of the other" halve gate — if the artist's or song's hidden

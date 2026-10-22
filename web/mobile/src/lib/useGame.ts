@@ -58,6 +58,12 @@ export interface GameView {
   scoreboard: ScoreboardData | null;
   // Most recent server error message (e.g. bad nonce, kicked).
   error: string | null;
+  // True once a "kicked" error (admin Telemetry panel's Kick button) has
+  // been latched. Distinct from a routine disconnect: no auto-reconnect is
+  // scheduled while this is true, and App.tsx renders an explicit, unmissable
+  // screen instead of silently reverting to the bare join form. Cleared the
+  // moment the player manually rejoins (see `connect`).
+  kicked: boolean;
   rttMs: number | null;
   // This device's own player ID (from welcome), used to tell whether WE are
   // the Daily Double contestant.
@@ -126,6 +132,7 @@ const INITIAL: GameView = {
   maskedReveal: null,
   scoreboard: null,
   error: null,
+  kicked: false,
   rttMs: null,
   myPlayerID: null,
   ddPerformer: null,
@@ -196,6 +203,42 @@ export function useGame() {
     void sendHeartbeat();
     heartbeatRef.current = setInterval(() => void sendHeartbeat(), HEARTBEAT_MS);
   }, [sendHeartbeat, stopHeartbeat]);
+
+  // Runs when a "kicked" error arrives (admin Telemetry panel's Kick
+  // button). onAdminKick (server/internal/game/engine.go) sends this error
+  // frame to the kicked connection but never closes the transport itself —
+  // the connection is left open and the player's actions are just silently
+  // ignored server-side from then on (p.Active/p.Banned checks). That means
+  // there is no transport-drop race to worry about: this error frame is the
+  // ONLY signal the client will ever get, so it must be impossible to miss.
+  // Unlike handleDisconnect (which assumes an unintentional drop and
+  // schedules a reconnect), a kick is deliberate: we proactively tear our
+  // own end down — so no pointless heartbeats and, critically, no
+  // auto-reconnect backoff ever fires and silently re-joins/obscures this —
+  // and latch `kicked` so App.tsx renders an explicit, unmissable screen
+  // instead of whatever the normal disconnect path would otherwise show.
+  const handleKicked = useCallback(
+    (message: string) => {
+      stopHeartbeat();
+      pendingPing.current = null;
+      awaitingBuzzResult.current = false;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      reconnectAttemptRef.current = 0;
+      const prev = clientRef.current;
+      clientRef.current = null;
+      // close() sets GameClient.closed, which suppresses that client's own
+      // handleClose -> onState(false) -> handleDisconnect/scheduleReconnect
+      // if it fires later for any reason — we've already done the
+      // equivalent cleanup here, deliberately WITHOUT scheduling a
+      // reconnect, regardless of the order these two things happen in.
+      void prev?.close();
+      patch({ kicked: true, error: message, conn: "disconnected" });
+    },
+    [patch, stopHeartbeat],
+  );
 
   const wireHandlers = useCallback(
     (c: GameClient) => {
@@ -428,10 +471,14 @@ export function useGame() {
 
       c.on("error", (env: ServerEnvelope) => {
         const d = env.d as ErrorData | undefined;
+        if (d?.code === "kicked") {
+          handleKicked(d.message || "You've been removed from the game by the admin.");
+          return;
+        }
         patch({ error: d?.message ?? "Server error" });
       });
     },
-    [patch],
+    [patch, handleKicked],
   );
 
   // Schedule a reconnect attempt with capped exponential backoff. Guards
@@ -582,8 +629,15 @@ export function useGame() {
   }, [establish]);
 
   const connect = useCallback(
-    (handle: string) => void establish(handle, false),
-    [establish],
+    (handle: string) => {
+      // A manual (re)join always supersedes a prior kick (kick is a soft
+      // removal, not a ban — see the "kicked" vs "banned" error codes in
+      // onAdminKick/onHello) — clear the latch so the kicked screen doesn't
+      // linger over the fresh connect attempt.
+      patch({ kicked: false });
+      void establish(handle, false);
+    },
+    [establish, patch],
   );
 
   const buzz = useCallback(() => {
