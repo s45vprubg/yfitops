@@ -198,6 +198,13 @@ export function useAdmin(): [AdminState, AdminActions] {
         patch({
           gameState: state,
           ...(state === "DAILY_DOUBLE" ? {} : { ddPerformer: undefined }),
+          // The DD result banner used to only clear when the NEXT Daily
+          // Double started (ddPerformer going non-performing, above) — an
+          // ordinary round in between left it stuck on screen through the
+          // whole round. Clear it once a genuinely new round goes live;
+          // finishDailyDouble() always routes through BOARD first, so the
+          // result has already rendered by the time ROUND_ACTIVE is reachable.
+          ...(state === "ROUND_ACTIVE" ? { ddResult: undefined } : {}),
           // uia7-5: a remounted Scrubber must not briefly render the PREVIOUS
           // track's stale duration/position/drop-point marker. Clear playback
           // whenever we leave a playing state; the next track's first
