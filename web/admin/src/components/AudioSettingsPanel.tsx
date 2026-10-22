@@ -68,20 +68,19 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
   const [easeSec, setEaseSec] = useState(3);
   const [lockoutChars, setLockoutChars] = useState(2);
   const [autoKaraokeSec, setAutoKaraokeSec] = useState(3);
-  const [genreDelaySec, setGenreDelaySec] = useState(3);
   const [yearDelaySec, setYearDelaySec] = useState(5);
   const [alternate, setAlternate] = useState(true);
   const [dirty, setDirty] = useState(false);
   const [saved, setSaved] = useState(false);
 
   // Mirrors the server's real defaults exactly (reveal.go's
-  // defaultReveal*/defaultAutoKaraokeMs/defaultGenreDelayMs/defaultYearDelayMs
+  // defaultReveal*/defaultAutoKaraokeMs/defaultYearDelayMs
   // constants, engine.go's SkipThresholdPct==0 fallback) — "Reset to
   // Defaults" below restores these into the draft, not whatever the admin
   // last saved, same as a fresh game would start with.
   const DEFAULTS = {
     thresh: 50, intervalSec: 3, phase1Sec: 10, blockSec: 15, easeSec: 3,
-    lockoutChars: 2, autoKaraokeSec: 3, genreDelaySec: 3, yearDelaySec: 5,
+    lockoutChars: 2, autoKaraokeSec: 3, yearDelaySec: 5,
     alternate: true,
   };
 
@@ -96,7 +95,6 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
     setEaseSec(revealCfg.easeMs / 1000);
     setLockoutChars(revealCfg.lockoutChars);
     setAutoKaraokeSec(revealCfg.autoKaraokeMs / 1000);
-    setGenreDelaySec(revealCfg.genreDelayMs / 1000);
     setYearDelaySec(revealCfg.yearDelayMs / 1000);
     setAlternate(revealCfg.alternate);
   }, [revealCfg, dirty]);
@@ -117,7 +115,6 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
       easeMs: Math.round(easeSec * 1000),
       lockoutChars: Math.round(lockoutChars),
       autoKaraokeMs: Math.round(autoKaraokeSec * 1000),
-      genreDelayMs: Math.round(genreDelaySec * 1000),
       yearDelayMs: Math.round(yearDelaySec * 1000),
       alternate,
     });
@@ -138,7 +135,6 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
     setEaseSec(DEFAULTS.easeSec);
     setLockoutChars(DEFAULTS.lockoutChars);
     setAutoKaraokeSec(DEFAULTS.autoKaraokeSec);
-    setGenreDelaySec(DEFAULTS.genreDelaySec);
     setYearDelaySec(DEFAULTS.yearDelaySec);
     setAlternate(DEFAULTS.alternate);
     setDirty(true);
@@ -182,9 +178,6 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
           onChange={editThresh} />
 
         <Divider label="Hints — apply next round" />
-        <SettingRow label="Reveal genre after" sub="seconds into the track"
-          value={genreDelaySec} min={SEC.hintDelay[0]} max={SEC.hintDelay[1]} step={SEC.hintDelay[2]} suffix="s"
-          onChange={edit(setGenreDelaySec)} />
         <SettingRow label="Reveal year after" sub="seconds into the track"
           value={yearDelaySec} min={SEC.hintDelay[0]} max={SEC.hintDelay[1]} step={SEC.hintDelay[2]} suffix="s"
           onChange={edit(setYearDelaySec)} />

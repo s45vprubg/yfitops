@@ -3126,7 +3126,6 @@ func (e *Engine) revealCfgData() adminRevealCfgData {
 		EaseMs:        c.EaseMs,
 		LockoutChars:  c.LockoutChars,
 		AutoKaraokeMs: c.AutoKaraokeMs,
-		GenreDelayMs:  c.GenreDelayMs,
 		YearDelayMs:   c.YearDelayMs,
 		Alternate:     c.Alternate,
 	}
@@ -3159,9 +3158,6 @@ func (e *Engine) onAdminSetRevealCfg(connID string, env protocol.ClientEnvelope)
 	}
 	if d.AutoKaraokeMs != nil {
 		cfg.AutoKaraokeMs = *d.AutoKaraokeMs
-	}
-	if d.GenreDelayMs != nil {
-		cfg.GenreDelayMs = *d.GenreDelayMs
 	}
 	if d.YearDelayMs != nil {
 		cfg.YearDelayMs = *d.YearDelayMs
@@ -3357,7 +3353,6 @@ func (e *Engine) startReveal() {
 		artistOrder: buildRevealOrder(upper(e.curTrack.Artist), seedFromRoundKey(e.roundKey, 0x9e3779b97f4a7c15)),
 		songOrder:   buildRevealOrder(upper(e.curTrack.Song), seedFromRoundKey(e.roundKey, 0xc2b2ae3d27d4eb4f)),
 		phase:       startPhase,
-		genre:       e.curTrack.Genre,
 		year:        e.curTrack.Year,
 		cfg:         cfg,
 	}
@@ -3366,22 +3361,10 @@ func (e *Engine) startReveal() {
 
 	rk := e.roundKey
 
-	// Pre-reveal hints: show the genre after GenreDelayMs, then the year after a
-	// further YearDelayMs (genre first, then year, then the letters). Only armed
-	// if the track actually has that datum.
-	if e.curTrack.Genre != "" {
-		time.AfterFunc(time.Duration(cfg.GenreDelayMs)*time.Millisecond, func() {
-			e.submit(func() {
-				if e.rc.roundKey != rk || !e.rc.active {
-					return
-				}
-				e.rc.showGenre = true
-				e.broadcastMask()
-			})
-		})
-	}
+	// Pre-reveal hint: show the year after YearDelayMs (before the letters).
+	// Only armed if the track actually has that datum.
 	if e.curTrack.Year > 0 {
-		time.AfterFunc(time.Duration(cfg.GenreDelayMs+cfg.YearDelayMs)*time.Millisecond, func() {
+		time.AfterFunc(time.Duration(cfg.YearDelayMs)*time.Millisecond, func() {
 			e.submit(func() {
 				if e.rc.roundKey != rk || !e.rc.active {
 					return

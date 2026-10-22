@@ -21,9 +21,12 @@ type Track struct {
 	// lyrics OR an admin override. Lyric-less non-overridden tracks are skipped
 	// by default (karaoke needs words). Computed from the store at load time.
 	Playable bool
-	// Year / Genre are pre-reveal hints (not worth points): revealed before the
-	// artist/song letters. 0 / "" = unknown (hint hidden).
-	Year  int
+	// Year is a pre-reveal hint (not worth points): revealed before the
+	// artist/song letters. 0 = unknown (hint hidden).
+	Year int
+	// Genre is reserved track metadata — not currently populated anywhere in
+	// the backend (see server/internal/spotify/search.go) and not surfaced to
+	// players. Kept as a data-model field for admin-side storage/API use.
 	Genre string
 }
 

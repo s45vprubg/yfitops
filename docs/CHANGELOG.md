@@ -1469,3 +1469,38 @@ contract. If accepted, it should be moved into the fixed contract on a version b
 - `web/stage/src/main.tsx`: Sets `document.title` based on which route
   mounted (`"yfitops // STAGE"` for `/stage`, `"yfitops"` for the public
   landing page) instead of relying on `index.html`'s single hardcoded title.
+
+### Removed — Genre pre-reveal hint (permanently inert, never populated)
+- `server/internal/game/reveal.go`: Removed `GenreDelayMs` (config field,
+  default, clamp), `revealClock.genre`/`showGenre`, and the `Genre` field on
+  `maskedRevealData`/`adminRevealCfgData`/`adminSetRevealCfgData`.
+- `server/internal/game/engine.go`: Removed the genre `time.AfterFunc` hint
+  scheduler in `startReveal`, the `genre: e.curTrack.Genre` clock seed, and
+  `GenreDelayMs` plumbing in `revealCfgData`/`onAdminSetRevealCfg`. The year
+  hint's delay (`YearDelayMs`) now counts directly from round start instead
+  of from the end of the (now-removed) genre delay — previously it fired at
+  `GenreDelayMs + YearDelayMs`.
+- `server/internal/game/model.go`: Updated the `Track.Genre` doc comment —
+  it's reserved/unused metadata, no longer described as a hint.
+- `web/shared/protocol.ts`: Removed `genre`/`genreDelayMs` from
+  `MaskedRevealData`, `AdminRevealCfgData`, `AdminSetRevealCfgData`.
+- `web/stage/src/views/ActiveRound.tsx`: Removed the genre hint badge
+  (`hintGenre`) above the point timer.
+- `web/mobile/src/components/RevealStrip.tsx`: Removed the genre pill from
+  the hint row (year pill unchanged).
+- `web/admin/src/components/AudioSettingsPanel.tsx`: Removed the
+  `genreDelaySec` draft state, its default, its save mapping to
+  `genreDelayMs`, and the "Reveal genre after" settings row.
+
+**Reason:** `Track.Genre` was never populated anywhere in the Go backend (no
+writer exists outside admin-curated board storage), so this hint could never
+have anything to show. Fully wired on the display side but permanently inert
+by data. Decision: remove the dead reveal mechanism rather than wire up genre
+data. The `Track.Genre` data-model field itself (and its admin API/Postgres
+storage plumbing) was intentionally left in place — it has independent
+existence as curated board-track metadata with its own storage/API surface,
+separate from this broken hint feature. The sibling year hint mechanism is
+unchanged in shape, only its delay is now measured from round start instead
+of from the genre delay.
+
+**No fixed contract files modified.**
