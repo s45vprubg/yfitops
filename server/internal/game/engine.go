@@ -170,7 +170,13 @@ type Engine struct {
 	// onAdminSetDropPoint successfully writes one — avoids a DB round-trip on
 	// every onAdminJumpToDropPoint call and every admin position broadcast.
 	curDropPointMs *int64
-	curRow         int
+	// lastPlayback caches the most recent playbackPositionData broadcast to
+	// admin (stage's self-reported position/pause state), so a reconnecting
+	// admin can be re-sent it immediately in sendFullSync instead of staying
+	// blank until stage's next periodic report — nil until the first report
+	// arrives for the current track.
+	lastPlayback *playbackPositionData
+	curRow       int
 	roundKey       string // BuzzLock key for the active buzz round
 	trackStartMs   int64  // server epoch ms when the current track started
 	pausedAtMs     int64  // playback position when paused on a buzz
@@ -1114,6 +1120,17 @@ func (e *Engine) sendFullSync(connID string, role protocol.Role) {
 		e.bcast.SendTo(connID, e.envelope(protocol.SMsgTelemetry, e.telemetryData()))
 		e.bcast.SendTo(connID, e.envelope(smsgCheatReport, e.cheatReportData()))
 		e.bcast.SendTo(connID, e.envelope(smsgVolumeStatus, e.volumeStatusData()))
+		// The trusted answer/worth readout and the actual pause/position state
+		// used to only ever reach admin from the NEXT buzz/grade event or the
+		// NEXT periodic stage position report — a reload landed blank and
+		// stayed blank until one of those happened to fire on its own (the
+		// "worth 0, artist/song blank, Pause/Play toggle lies after reload"
+		// bug). Re-send both here from live/cached server state so a
+		// reconnecting admin resyncs immediately, not eventually.
+		e.bcast.SendTo(connID, e.adminViewEnvelope())
+		if e.lastPlayback != nil {
+			e.bcast.SendTo(connID, e.envelope(smsgPlaybackPosition, *e.lastPlayback))
+		}
 	}
 	// Scoreboard goes to everyone (handles + scores only, §4A-safe) so mobile
 	// players see standings on connect too.
@@ -1306,6 +1323,7 @@ func (e *Engine) startTrack(cell *Cell, track *Track) {
 	e.buzzWinner = ""
 	e.roundWinner = "" // no winner yet this round
 	e.partial = pendingPartial{}
+	e.lastPlayback = nil // stale snapshot from the previous track, if any
 	// Fresh round: any buzz window from a prior round is dead. A stale AfterFunc
 	// is already neutralized by the roundKey compare in resolveBuzzWindow, but
 	// clearing here is belt-and-suspenders (and the new roundKey below rearms).
@@ -3282,6 +3300,7 @@ func (e *Engine) broadcastPlaybackPosition(d protocol.StagePlayerStateData) {
 		pd.HasDropPoint = true
 		pd.DropPointMs = *e.curDropPointMs
 	}
+	e.lastPlayback = &pd
 	e.bcast.Broadcast(protocol.RoleAdmin, e.envelope(smsgPlaybackPosition, pd))
 }
 

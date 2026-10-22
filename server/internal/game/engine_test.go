@@ -1559,6 +1559,67 @@ func TestBroadcastPlaybackPosition_AdminOnly(t *testing.T) {
 	}
 }
 
+// TestAdminReconnect_ResyncsPausedStateAndTrustedReveal: a reconnecting
+// admin (page reload = fresh connID) used to get neither the trusted
+// answer/worth readout (adminViewEnvelope) nor the real pause state
+// (playbackPositionData) in sendFullSync — both stayed blank/wrong until
+// whatever NEXT buzz/grade event or stage position report happened to fire
+// on its own, which could be the rest of the round. Pins that a fresh admin
+// connection gets both immediately.
+func TestAdminReconnect_ResyncsPausedStateAndTrustedReveal(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.selectCell("admin", 1, 1)
+
+	// Stage reports the track is paused (e.g. the admin just clicked Pause).
+	d, _ := json.Marshal(protocol.StagePlayerStateData{PositionMs: 3000, Paused: true})
+	h.e.OnMessage("admin", protocol.RoleAdmin, protocol.ClientEnvelope{Type: protocol.CMsgStagePlayerState, Data: d, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+
+	var wantArtist, wantSong string
+	h.sync(func() { wantArtist, wantSong = h.e.curTrack.Artist, h.e.curTrack.Song })
+
+	h.bcast.reset()
+	h.joinAdmin("admin2") // simulates a page reload: a fresh connID, fresh hello
+
+	var sawView, sawPlayback bool
+	var view protocol.AdminViewData
+	var pb playbackPositionData
+	h.bcast.mu.Lock()
+	for _, f := range h.bcast.frames {
+		if f.connID != "admin2" {
+			continue
+		}
+		switch f.env.Type {
+		case protocol.SMsgAdminView:
+			sawView = true
+			_ = json.Unmarshal(f.env.Data, &view)
+		case smsgPlaybackPosition:
+			sawPlayback = true
+			_ = json.Unmarshal(f.env.Data, &pb)
+		}
+	}
+	h.bcast.mu.Unlock()
+
+	if !sawView {
+		t.Fatal("reconnecting admin got no adminView frame on resync")
+	}
+	if view.CorrectArtist != wantArtist || view.CorrectSong != wantSong {
+		t.Errorf("resynced adminView = {artist:%q song:%q}, want {%q %q}", view.CorrectArtist, view.CorrectSong, wantArtist, wantSong)
+	}
+	if view.CurrentPoints <= 0 {
+		t.Errorf("resynced adminView.CurrentPoints = %d, want > 0", view.CurrentPoints)
+	}
+
+	if !sawPlayback {
+		t.Fatal("reconnecting admin got no playbackPosition frame on resync")
+	}
+	if !pb.Paused {
+		t.Error("resynced playbackPosition.Paused = false, want true (track was paused before reconnect)")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Player-driven cell picking: whoever most recently scored (e.cellPicker)
 // can pick the next board cell from their own phone. During KARAOKE this is

@@ -173,15 +173,6 @@ export default function GameControls({
     }
   };
 
-  const [manuallyPaused, setManuallyPaused] = useState(false);
-  const prevState = useRef(gameState);
-  useEffect(() => {
-    if (prevState.current !== gameState) {
-      setManuallyPaused(false);
-      prevState.current = gameState;
-    }
-  }, [gameState]);
-
   // uia7-3: in-flight guards against rapid double-click, mirroring
   // HoldingArea.tsx's rescanning/building/requeryingId boolean-guard pattern.
   // markDropPoint/jumpToDrop are fire-and-forget sendAction calls (no
@@ -221,8 +212,16 @@ export default function GameControls({
   // controls are disabled — previously Play looked enabled but the server
   // (correctly) no-oped it because there was no track loaded.
   const trackLoaded = isPlaying(gameState) && spotifyConnected;
-  const canPause = trackLoaded && !manuallyPaused;
-  const canResume = trackLoaded && manuallyPaused;
+  // Server truth (stage's own self-reported playback state), not local
+  // optimism (§9: "the admin client holds NO authoritative state") — a
+  // local-only toggle here used to always reset to "not paused" on every
+  // mount, so an admin page reload showed Pause available even if the round
+  // was genuinely still paused server-side. playback is re-sent immediately
+  // on reconnect now (see sendFullSync's admin block in engine.go), so this
+  // resyncs promptly instead of staying wrong until the next report.
+  const isPaused = playback?.paused ?? false;
+  const canPause = trackLoaded && !isPaused;
+  const canResume = trackLoaded && isPaused;
 
   return (
     <header className="relative flex items-center gap-3 border-b border-edge bg-panel2 px-3 py-2">
@@ -235,17 +234,17 @@ export default function GameControls({
       {/* Play/Pause toggle */}
       {canPause ? (
         <button
-          onClick={() => { actions.playback("pause"); setManuallyPaused(true); }}
+          onClick={() => actions.playback("pause")}
           className="rounded border border-edge bg-panel px-3 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-950/40"
         >
           Pause
         </button>
       ) : canResume ? (
         <button
-          onClick={() => { actions.playback("resume"); setManuallyPaused(false); }}
+          onClick={() => actions.playback("resume")}
           className="rounded border border-edge bg-panel px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-950/40"
         >
-          Play
+          Resume
         </button>
       ) : (
         <button
