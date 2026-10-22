@@ -1638,6 +1638,57 @@ func TestAdminReconnect_ResyncsPausedStateAndTrustedReveal(t *testing.T) {
 	}
 }
 
+// TestAdminReconnect_NoStalePlaybackAfterRoundEnds (s12-engine-03): e.lastPlayback
+// used to only ever get overwritten by the NEXT track's own position report
+// (startTrack already clears it) -- every OTHER way a track stops (force-end,
+// the transition countdown, a Daily Double resolving, End Game, resetting to
+// lobby) left the stale snapshot sitting in e.lastPlayback. A reconnecting
+// admin landing in that window (no track loaded) got sendFullSync resending
+// the DEAD track's last position/duration/paused state. Pins that after
+// admin.endRound specifically, the resync carries no playbackPosition frame
+// at all once the round is over.
+func TestAdminReconnect_NoStalePlaybackAfterRoundEnds(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.selectCell("admin", 1, 1)
+
+	d, _ := json.Marshal(protocol.StagePlayerStateData{PositionMs: 3000, Paused: false})
+	h.e.OnMessage("admin", protocol.RoleAdmin, protocol.ClientEnvelope{Type: protocol.CMsgStagePlayerState, Data: d, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+	var hadPlayback bool
+	h.sync(func() { hadPlayback = h.e.lastPlayback != nil })
+	if !hadPlayback {
+		t.Fatalf("lastPlayback not set after a stage position report")
+	}
+
+	h.e.OnMessage("admin", protocol.RoleAdmin, protocol.ClientEnvelope{Type: protocol.CMsgAdminEndRound, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+	if h.state() != protocol.StateBoard {
+		t.Fatalf("state = %s, want BOARD after admin.endRound", h.state())
+	}
+	var stalePlayback bool
+	h.sync(func() { stalePlayback = h.e.lastPlayback != nil })
+	if stalePlayback {
+		t.Fatalf("lastPlayback still set after admin.endRound, want cleared")
+	}
+
+	h.bcast.reset()
+	h.joinAdmin("admin2") // simulates a page reload: a fresh connID, fresh hello
+
+	var sawPlayback bool
+	h.bcast.mu.Lock()
+	for _, f := range h.bcast.frames {
+		if f.connID == "admin2" && f.env.Type == smsgPlaybackPosition {
+			sawPlayback = true
+		}
+	}
+	h.bcast.mu.Unlock()
+	if sawPlayback {
+		t.Error("reconnecting admin got a playbackPosition frame for a round that already ended — stale scrubber state")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Player-driven cell picking: whoever most recently scored (e.cellPicker)
 // can pick the next board cell from their own phone. During KARAOKE this is
@@ -1750,6 +1801,7 @@ func TestPlayerPicker_AdminOverrideClearsPending(t *testing.T) {
 	h.sync(func() {})
 	h.grade("admin", protocol.VerdictCorrect)
 	h.playerSelectCell("c1", 5, 1) // pending pick recorded, vote hasn't passed
+	h.bcast.reset()
 
 	h.selectCell("admin", 5, 2) // admin overrides mid-karaoke with a DIFFERENT cell
 	if h.state() != protocol.StateRoundActive {
@@ -1772,6 +1824,32 @@ func TestPlayerPicker_AdminOverrideClearsPending(t *testing.T) {
 	if pending != nil {
 		t.Errorf("pendingPick = %+v, want cleared by the admin override", pending)
 	}
+
+	// s12-engine-01: a cleared smsgPendingPick must actually go out — this is
+	// what makes stage's highlight and admin's "queued" toast disappear.
+	// Clearing e.pendingPick in memory alone (asserted above) is not enough.
+	if !broadcastHasClearedPendingPick(h) {
+		t.Error("no cleared pendingPick broadcast after the admin override — stage/admin UI would stay stuck")
+	}
+}
+
+// broadcastHasClearedPendingPick scans the harness's captured broadcast
+// frames for a smsgPendingPick envelope carrying the zero value (row==0 &&
+// col==0), which is this codebase's "cleared" signal (see
+// broadcastPendingPick's doc comment).
+func broadcastHasClearedPendingPick(h *harness) bool {
+	h.bcast.mu.Lock()
+	defer h.bcast.mu.Unlock()
+	for _, f := range h.bcast.frames {
+		if f.env.Type == smsgPendingPick {
+			var d pendingPickData
+			_ = json.Unmarshal(f.env.Data, &d)
+			if d.Row == 0 && d.Col == 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // TestPlayerPicker_NoScorerYetAdminOnly: before anyone has scored,
@@ -1906,6 +1984,12 @@ func TestOnAdminKick_ClearsCellPicker(t *testing.T) {
 	h.bcast.mu.Unlock()
 	if !foundCleared {
 		t.Error("no pickerStatus broadcast reflecting the cleared picker after kick")
+	}
+
+	// s12-engine-01: pickerStatus clearing alone left stage's highlight /
+	// admin's "queued" toast stuck — a cleared smsgPendingPick must also go out.
+	if !broadcastHasClearedPendingPick(h) {
+		t.Error("no cleared pendingPick broadcast after kicking the picker — stage/admin UI would stay stuck")
 	}
 
 	// Belt-and-suspenders: the kicked player's hostile client still can't
@@ -2173,6 +2257,11 @@ func TestAdminEndGame_StopsPlayback(t *testing.T) {
 	if h.state() != protocol.StateRoundActive {
 		t.Fatalf("state after selectCell = %s, want ROUND_ACTIVE", h.state())
 	}
+	// A live position snapshot is cached for the admin scrubber, same as
+	// TestAdminReconnect_NoStalePlaybackAfterRoundEnds's setup.
+	pd, _ := json.Marshal(protocol.StagePlayerStateData{PositionMs: 3000, Paused: false})
+	h.e.OnMessage("admin", protocol.RoleAdmin, protocol.ClientEnvelope{Type: protocol.CMsgStagePlayerState, Data: pd, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
 
 	h.e.OnMessage("admin", protocol.RoleAdmin, protocol.ClientEnvelope{Type: protocol.CMsgAdminEndGame, Nonce: h.gate.Current()}, nowMs())
 	h.sync(func() {})
@@ -2182,6 +2271,14 @@ func TestAdminEndGame_StopsPlayback(t *testing.T) {
 	}
 	if got := len(h.audio.ofMethod("pause")); got != 1 {
 		t.Errorf("audio.Pause call count = %d, want exactly 1", got)
+	}
+	// s12-engine-03: a stale lastPlayback snapshot must not survive the
+	// game ending -- a reconnecting admin must not get handed a position
+	// snapshot for a track that was just stopped.
+	var stalePlayback bool
+	h.sync(func() { stalePlayback = h.e.lastPlayback != nil })
+	if stalePlayback {
+		t.Error("lastPlayback still set after admin.endGame, want cleared")
 	}
 
 	var sawStagePause bool
@@ -2216,5 +2313,130 @@ func TestAdminEndGame_NoTrackLoadedIsSafe(t *testing.T) {
 	}
 	if got := len(h.audio.ofMethod("pause")); got != 0 {
 		t.Errorf("audio.Pause call count = %d, want 0 (no track was loaded)", got)
+	}
+}
+
+// TestAdminEndGame_MidDailyDoublePaysOutBeforeStopping (s12-engine-02): ending
+// the game while a Daily Double performance is in progress used to just stop
+// the track via the generic pause path -- the performer's payout never
+// happened, silently costing them the points for a performance they'd
+// already committed to. admin.endGame must route through the real payout
+// (finishDailyDouble) first, exactly like a normal admin-ended DD would, and
+// still land in GAME_OVER with no double pause/double award.
+func TestAdminEndGame_MidDailyDoublePaysOutBeforeStopping(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.joinStage("stage")
+	performer := h.join("c1", "fp1", "perf")
+
+	// 1st pick: a normal round on the DD cell so the winner becomes lastScorer.
+	h.selectCell("admin", 1, 2)
+	h.sync(func() { h.e.trackStartMs = nowMs() })
+	n := h.gate.Current()
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: n}, nowMs())
+	h.sync(func() {})
+	h.grade("admin", protocol.VerdictCorrect)
+	if got := h.score(performer); got != 100 {
+		t.Fatalf("performer after 1st pick = %d, want 100 (row1 max within hold)", got)
+	}
+	h.sync(func() {
+		h.e.curTrack = nil
+		h.e.curCell = nil
+		h.e.state = protocol.StateBoard
+	})
+
+	// 2nd pick: the DD offer goes to the contestant (lastScorer); accept and
+	// choose a song so a performance is actually in progress (curTrack set,
+	// state DAILY_DOUBLE) -- same setup as TestDailyDouble_BonusApplied, but
+	// with NO rating ever submitted before the game is ended.
+	h.selectCell("admin", 1, 2)
+	if h.state() != protocol.StateDailyDouble {
+		t.Fatalf("state after 2nd pick = %s, want DAILY_DOUBLE", h.state())
+	}
+	h.ddDecide("c1", true)
+	choices := h.lastDailyDoubleOfferTrackIDs("c1")
+	if len(choices) == 0 {
+		t.Fatalf("contestant received no song choices after accepting")
+	}
+	h.ddChoose("c1", choices[0])
+
+	var curTrackSet bool
+	h.sync(func() { curTrackSet = h.e.curTrack != nil })
+	if !curTrackSet {
+		t.Fatalf("curTrack not set after choosing a song -- performance never actually started")
+	}
+
+	h.e.OnMessage("admin", protocol.RoleAdmin, protocol.ClientEnvelope{Type: protocol.CMsgAdminEndGame, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+
+	if h.state() != protocol.StateGameOver {
+		t.Fatalf("state = %s, want GAME_OVER", h.state())
+	}
+	// No ratings submitted -> finishDailyDouble's default avg (1.0) ->
+	// DailyDoubleMultiplier(1.0) = 1.00x -> MaxPointsForRow(1) = 100.
+	if got := h.score(performer); got != 200 {
+		t.Errorf("performer after admin.endGame mid-DD = %d, want 200 (100 from round 1 + 100 DD payout), payout was skipped", got)
+	}
+	// Exactly one pause: finishDailyDouble's own pause. The generic
+	// "stop whatever's playing" block in admin.endGame must see curTrack
+	// already nil (finishDailyDouble cleared it) and become a no-op, not
+	// double-pause.
+	if got := len(h.audio.ofMethod("pause")); got != 1 {
+		t.Errorf("audio.Pause call count = %d, want exactly 1 (no double pause)", got)
+	}
+}
+
+// TestAdminView_BlankDuringDailyDouble (s12-engine-04): adminViewEnvelope's
+// CorrectArtist/CorrectSong/CurrentPoints guard only checked e.curTrack !=
+// nil, which is ALSO true during a Daily Double performance
+// (startDailyDoublePerformance sets it) -- but e.roundPool()/CurrentPoints
+// price a NORMAL round's decay pool, a number with zero relation to the
+// real DD payout (MaxPointsForRow * DailyDoubleMultiplier(avg stars),
+// known only once rating is in). The grader saw a plausible-looking but
+// meaningless "worth" readout during every DD performance. Pins that
+// adminView stays blank (not just wrong) while state == DAILY_DOUBLE.
+func TestAdminView_BlankDuringDailyDouble(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.join("c1", "fp1", "perf")
+
+	h.selectCell("admin", 1, 2)
+	h.sync(func() { h.e.trackStartMs = nowMs() })
+	n := h.gate.Current()
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: n}, nowMs())
+	h.sync(func() {})
+	h.grade("admin", protocol.VerdictCorrect)
+	h.sync(func() {
+		h.e.curTrack = nil
+		h.e.curCell = nil
+		h.e.state = protocol.StateBoard
+	})
+
+	h.selectCell("admin", 1, 2)
+	if h.state() != protocol.StateDailyDouble {
+		t.Fatalf("state after 2nd pick = %s, want DAILY_DOUBLE", h.state())
+	}
+	h.ddDecide("c1", true)
+	choices := h.lastDailyDoubleOfferTrackIDs("c1")
+	if len(choices) == 0 {
+		t.Fatalf("contestant received no song choices after accepting")
+	}
+	h.ddChoose("c1", choices[0])
+
+	var curTrackSet bool
+	h.sync(func() { curTrackSet = h.e.curTrack != nil })
+	if !curTrackSet {
+		t.Fatalf("curTrack not set after choosing a song -- performance never actually started")
+	}
+
+	var av protocol.AdminViewData
+	h.sync(func() {
+		env := h.e.adminViewEnvelope()
+		_ = json.Unmarshal(env.Data, &av)
+	})
+	if av.CorrectArtist != "" || av.CorrectSong != "" || av.CurrentPoints != 0 {
+		t.Errorf("adminView during DAILY_DOUBLE = %+v, want blank (CurrentPoints meaningless mid-performance)", av)
 	}
 }

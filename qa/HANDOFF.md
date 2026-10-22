@@ -1168,3 +1168,76 @@ Unchanged from sweep 10, not re-litigated. New: s11fe-03 (deferred above).
 
 Low urgency on a hunt basis. Re-scope again per the established rule if more
 features land.
+
+# SWEEP 12 (2026-10-22) — DONE
+
+Full writeup: `docs/security/qa-sweep-12.md`. Scope: diff against sweep 11's
+actual HEAD (`849f694`) through the 11-commit batch of owner-reported
+fixes/features landed this session (End Game playback stop, DD result
+banner clearing, admin reconnect resync, "nobody :(" misattribution fix, DD
+ending only via admin/track-finish, dev-cert expiry, deploy Makefile fix,
+kick messaging, genre-hint removal, stage layout fix, and the configurable
+transition delay + next-cell highlight + admin "queued" toast batch).
+`git diff --stat 849f694..HEAD` = 24 files, 1083 insertions, 236 deletions.
+
+## Outcome
+
+**8 findings across 2 surfaces: 8 CONFIRMED, 0 REFUTED. 7 MEDIUM, 1 LOW. 6
+fixed directly, 2 (s12fe-01, s12fe-02) resolved as a side effect of one of
+the 6** — their root cause was identical to s12-engine-01; no frontend
+change was needed once the server stopped skipping the clear-broadcast.
+
+## Fixed & verified
+
+- **s12-engine-01 (MEDIUM)**: `broadcastPendingPick(pendingPickData{})` was
+  missing from `selectCell`'s admin-override reset and `onAdminKick`'s
+  cell-picker-kick branch (a third site, `OnDisconnect`, was already fixed
+  earlier this session). Fixed by adding the same call at both sites.
+  Existing tests extended with a broadcast assertion, proven non-vacuous.
+- **s12-engine-02 (MEDIUM)**: `admin.endGame` skipped the Daily Double
+  payout entirely when ending the game mid-performance. Fixed by routing
+  through `e.finishDailyDouble()` first when `state == DAILY_DOUBLE &&
+  curTrack != nil`. New test, proven non-vacuous.
+- **s12-engine-03 (MEDIUM)**: `e.lastPlayback` was never cleared outside
+  `startTrack`, so a reconnecting admin during any inter-round/DD-offer gap
+  got a stale scrubber snapshot. Fixed by adding `e.lastPlayback = nil` at
+  6 sites (`ResetToLobby`, `beginTransition`'s continuation,
+  `startDailyDoublePerformance`, `finishDailyDouble`, `endRound`,
+  `admin.endGame`'s non-DD pause block). New/extended tests, proven
+  non-vacuous.
+- **s12-engine-04 (MEDIUM)**: `adminViewEnvelope()` showed a fabricated
+  "worth N pts" during a live Daily Double (priced off the wrong formula).
+  Fixed by guarding the whole block on `e.state != StateDailyDouble`. New
+  test, proven non-vacuous.
+- **s12fe-03 (LOW)**: `sendFullSync` resync gap for `pendingPick` — already
+  fixed earlier this session, reconfirmed correct by this sweep's hunt.
+- **s12fe-04 (LOW)**: missing `highlightCell` prop on stage's DAILY_DOUBLE
+  no-performer Board fallback. Fixed for consistency with the other two
+  call sites.
+
+## Resolved as a side effect (no frontend change needed)
+
+- **s12fe-01 (MEDIUM)**: stage's stale `pendingPickCell` highlight after an
+  admin override/kick — root cause was s12-engine-01 (server never sent the
+  clear broadcast); stage's own handler was already correct.
+- **s12fe-02 (MEDIUM)**: admin's `PendingPickToast` relabeling a stale pick
+  to the wrong player — same root cause as above; the toast's own
+  fade-out-on-falsy logic was already correct.
+
+## Still open after sweep 12
+
+None carried forward — all 8 findings resolved.
+
+## Resume checklist
+
+- Sweep 12's fixes are committed/pushed/deployed as of the end of this
+  sweep — see the commit log for the exact SHA.
+- `e.lastPlayback` clearing (s12-engine-03) is now duplicated across 6
+  sites with no shared helper — a 7th future "stop/replace curTrack" site
+  must remember this too; worth factoring into a helper if one more comes
+  up.
+
+## Sweep 13 recommendation
+
+Low urgency on a hunt basis. Re-scope again per the established rule if more
+features land.

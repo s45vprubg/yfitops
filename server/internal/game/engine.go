@@ -525,6 +525,7 @@ func (e *Engine) ResetToLobby() error {
 		e.clearReveal()
 		e.curCell = nil
 		e.curTrack = nil
+		e.lastPlayback = nil // s12-engine-03: stale scrubber snapshot, dead track
 		e.curRow = 0
 		e.roundKey = ""
 		e.trackStartMs = 0
@@ -852,6 +853,11 @@ func (e *Engine) OnDisconnect(connID string) {
 				e.pendingPick = nil
 				e.karaokeReady = false
 				e.broadcastPickerStatus()
+				// s12-engine-01: broadcastPickerStatus clears "waiting on X",
+				// but stage's highlight / admin's "queued" toast are driven
+				// by smsgPendingPick, a separate broadcast — without this,
+				// both stayed stuck showing a pick that's no longer pending.
+				e.broadcastPendingPick(pendingPickData{})
 				if wasReady && e.state == protocol.StateKaraoke {
 					// The OTHER AND-gate half had already fired (skip-vote
 					// threshold reached / track ended) before the picker
@@ -989,11 +995,27 @@ func (e *Engine) dispatchAdmin(connID string, env protocol.ClientEnvelope) {
 	case cmsgAdminSoloKaraokeSetRepeat:
 		e.onAdminSoloKaraokeSetRepeat(connID, env)
 	case protocol.CMsgAdminEndGame:
+		// s12-engine-02: ending the game mid-Daily-Double used to skip the
+		// payout entirely -- the generic "stop whatever's playing" pause
+		// below just killed the track, leaving the performer's rating
+		// unresolved and their points never awarded. Route through the real
+		// payout path first; finishDailyDouble leaves curTrack nil, so the
+		// pause block below becomes a no-op here (no double pause/double
+		// award, even if a fade-out was already in flight -- see
+		// fadeOutAndFinishDailyDouble's own roundKey/curTrack bail-out).
+		if e.state == protocol.StateDailyDouble && e.curTrack != nil {
+			e.finishDailyDouble()
+		}
 		// Stop whatever's playing — End Game used to leave a track running on
 		// stage indefinitely since nothing here ever told the device to pause.
 		if e.curTrack != nil {
 			_ = e.audio.Pause(context.Background())
 			e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{Action: "pause"}))
+			// s12-engine-03: a non-DD track ending here (finishDailyDouble
+			// already cleared it for the DD branch above) left e.lastPlayback
+			// pointing at the now-dead track for anyone who reconnects before
+			// a later admin.resetToLobby clears it.
+			e.lastPlayback = nil
 		}
 		e.transitionTo(protocol.StateGameOver)
 		e.persistScores()
@@ -1160,6 +1182,14 @@ func (e *Engine) sendFullSync(connID string, role protocol.Role) {
 			e.bcast.SendTo(connID, e.envelope(smsgPlaybackPosition, *e.lastPlayback))
 		}
 	}
+	// s12fe-03: a reconnecting stage or admin mid-pick (the between-rounds
+	// AND-gate window) got no pendingPick at all on resync -- no highlight,
+	// no "queued" toast -- until the NEXT pick/clear happened to fire on its
+	// own. broadcastPendingPick's own contract is stage+admin only, never
+	// mobile; mirror that here.
+	if (role == protocol.RoleStage || role == protocol.RoleAdmin) && e.pendingPick != nil {
+		e.bcast.SendTo(connID, e.envelope(smsgPendingPick, pendingPickData{Row: e.pendingPick.Row, Col: e.pendingPick.Col}))
+	}
 	// Scoreboard goes to everyone (handles + scores only, §4A-safe) so mobile
 	// players see standings on connect too.
 	e.bcast.SendTo(connID, e.envelope(protocol.SMsgScoreboard, e.scoreboardData()))
@@ -1247,6 +1277,11 @@ func (e *Engine) selectCell(row, col int) {
 		e.pendingPick = nil
 		e.karaokeReady = false
 		e.broadcastPickerStatus()
+		// s12-engine-01: broadcastPickerStatus clears "waiting on X", but
+		// stage's highlight / admin's "queued" toast are driven by
+		// smsgPendingPick, a separate broadcast — without this, both stayed
+		// stuck showing a pick that's no longer pending.
+		e.broadcastPendingPick(pendingPickData{})
 	}
 	cell := cellAt(e.board, row, col)
 	if cell == nil {
@@ -2099,6 +2134,7 @@ func (e *Engine) beginTransition() {
 			if e.state == protocol.StateTransition {
 				e.clearReveal()
 				e.curTrack = nil
+				e.lastPlayback = nil // s12-engine-03: stale scrubber snapshot, dead track
 				e.curCell = nil
 				pending := e.pendingPick
 				e.pendingPick = nil
@@ -2442,6 +2478,7 @@ func (e *Engine) startDailyDoublePerformance(performer *Player, track *Track) {
 	e.clearReveal() // defensive: no masked-reveal clock is used for a performance
 	e.curCell = cell
 	e.curTrack = track
+	e.lastPlayback = nil // s12-engine-03: stale snapshot from the previous track, if any
 	e.curRow = cell.Row
 	e.trackStartMs = nowMs()
 	e.cellPicker = performer.ID
@@ -2623,6 +2660,7 @@ func (e *Engine) finishDailyDouble() {
 	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{Action: "pause"}))
 	e.clearReveal()
 	e.curTrack = nil
+	e.lastPlayback = nil // s12-engine-03: stale scrubber snapshot, dead track
 	e.curCell = nil
 	e.ratingPool = nil
 	e.ratings = nil
@@ -3138,6 +3176,10 @@ func (e *Engine) onAdminKick(connID string, env protocol.ClientEnvelope) {
 		e.pendingPick = nil
 		e.karaokeReady = false
 		e.broadcastPickerStatus()
+		// s12-engine-01: see the same fix in selectCell's admin-override
+		// reset — broadcastPickerStatus alone doesn't clear the separate
+		// smsgPendingPick highlight/toast broadcast.
+		e.broadcastPendingPick(pendingPickData{})
 	}
 }
 
@@ -3255,6 +3297,7 @@ func (e *Engine) endRound() {
 	e.bcast.Broadcast(protocol.RoleStage, e.envelope(protocol.SMsgAudio, protocol.AudioData{Action: "pause"}))
 	e.clearReveal()
 	e.curTrack = nil
+	e.lastPlayback = nil // s12-engine-03: stale scrubber snapshot, dead track
 	e.curCell = nil
 	e.buzzWinner = ""
 	e.buzzWindowOpen = false
@@ -3631,7 +3674,14 @@ func (e *Engine) stopRevealTimer() {
 
 func (e *Engine) adminViewEnvelope() protocol.ServerEnvelope {
 	av := protocol.AdminViewData{}
-	if e.curTrack != nil {
+	// s12-engine-04: during a Daily Double, e.curTrack is the performance
+	// track (startDailyDoublePerformance), but e.roundPool()/CurrentPoints
+	// here price a NORMAL round's decay pool -- a number with no relation
+	// to the real DD payout (MaxPointsForRow * DailyDoubleMultiplier(avg
+	// stars), computed only once rating is in). Showing it was actively
+	// misleading to the admin grading a performance; DD's own dedicated
+	// ddPerformer/ddResult broadcasts already cover this state.
+	if e.curTrack != nil && e.state != protocol.StateDailyDouble {
 		av.CorrectArtist = e.curTrack.Artist
 		av.CorrectSong = e.curTrack.Song
 		// From the live pool, so the grader sees what CORRECT will actually pay

@@ -104,7 +104,7 @@ export default function StageApp() {
 
       case "DAILY_DOUBLE": {
         const performer = view.ddPerformer;
-        if (!performer) return <Board board={view.board} />;
+        if (!performer) return <Board board={view.board} highlightCell={view.pendingPickCell ?? undefined} />;
         if (performer.performing) {
           return (
             <DailyDoublePerformance

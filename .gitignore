@@ -11,6 +11,11 @@ temp/
 qa/findings*/
 qa/validation*/
 
+# UX-test harness run output (screenshots/timeline/report) -- machine
+# generated per run, not committed. The harness script itself (qa/uxtest/*.ts)
+# IS tracked.
+qa/uxtest/run-*/
+
 # Go
 server/bin/
 *.test
