@@ -89,17 +89,31 @@ export default function AudioSettingsPanel({ volumePct, onSetVolume, revealCfg, 
   // Seed the draft from the live server echo, but only while nothing is
   // being edited — the same "touched" guard the old sliders used, so a
   // broadcast landing mid-edit can never clobber what's being typed.
+  //
+  // seedSec guards against a field the server echo doesn't actually carry
+  // (e.g. a newly-added knob like transitionDelayMs echoed by a backend
+  // build that predates it): `undefined / 1000` is NaN, String(NaN) is
+  // "NaN", and a type=number input renders a "NaN" value as BLANK — the
+  // typed value visibly "disappearing" on Save even though the commit
+  // itself succeeded. Falling back to the field's own current draft value
+  // keeps the box showing something real instead of silently going blank.
   useEffect(() => {
     if (dirty || !revealCfg) return;
-    setIntervalSec(revealCfg.intervalMs / 1000);
-    setPhase1Sec(revealCfg.phase1Ms / 1000);
-    setBlockSec(revealCfg.blockMs / 1000);
-    setEaseSec(revealCfg.easeMs / 1000);
-    setLockoutChars(revealCfg.lockoutChars);
-    setAutoKaraokeSec(revealCfg.autoKaraokeMs / 1000);
-    setYearDelaySec(revealCfg.yearDelayMs / 1000);
-    setAlternate(revealCfg.alternate);
-    setTransitionDelaySec(revealCfg.transitionDelayMs / 1000);
+    const seedSec = (ms: number | undefined, fallbackSec: number) =>
+      typeof ms === "number" && Number.isFinite(ms) ? ms / 1000 : fallbackSec;
+    setIntervalSec(seedSec(revealCfg.intervalMs, intervalSec));
+    setPhase1Sec(seedSec(revealCfg.phase1Ms, phase1Sec));
+    setBlockSec(seedSec(revealCfg.blockMs, blockSec));
+    setEaseSec(seedSec(revealCfg.easeMs, easeSec));
+    setLockoutChars(
+      typeof revealCfg.lockoutChars === "number" && Number.isFinite(revealCfg.lockoutChars)
+        ? revealCfg.lockoutChars
+        : lockoutChars,
+    );
+    setAutoKaraokeSec(seedSec(revealCfg.autoKaraokeMs, autoKaraokeSec));
+    setYearDelaySec(seedSec(revealCfg.yearDelayMs, yearDelaySec));
+    setAlternate(typeof revealCfg.alternate === "boolean" ? revealCfg.alternate : alternate);
+    setTransitionDelaySec(seedSec(revealCfg.transitionDelayMs, transitionDelaySec));
   }, [revealCfg, dirty]);
 
   const edit = <T,>(setter: (v: T) => void) => (v: T) => {

@@ -1300,6 +1300,137 @@ func TestDailyDouble_DeclineRerollsToNewCell(t *testing.T) {
 	}
 }
 
+// TestDailyDouble_UnchosenCandidatesReturnToBucket (dd-eng-bucket-01): the
+// offer draws up to 5 candidates from DDBucket with no replacement, but the
+// contestant only ever plays ONE of them. Before the fix, the other
+// (up to 4) songs were discarded forever instead of going back into the
+// bucket -- a small bucket (e.g. 7 tracks for 3 DD cells, the user's exact
+// report) could run out of choices after just one or two Daily Doubles even
+// though most of the drawn songs were never actually played.
+func TestDailyDouble_UnchosenCandidatesReturnToBucket(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.join("c1", "fp1", "perf")
+
+	bucket := make([]*Track, 7)
+	for i := range bucket {
+		bucket[i] = &Track{ID: fmt.Sprintf("bucket-%d", i), Playable: true}
+	}
+	h.sync(func() { h.e.board.DDBucket = bucket })
+
+	// 1st pick: normal round so the performer becomes lastScorer.
+	h.selectCell("admin", 1, 2)
+	n := h.gate.Current()
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: n}, nowMs())
+	h.sync(func() {})
+	h.grade("admin", protocol.VerdictCorrect)
+	h.sync(func() {
+		h.e.curTrack = nil
+		h.e.curCell = nil
+		h.e.state = protocol.StateBoard
+	})
+
+	// 2nd pick: triggers the Daily Double offer, drawing 5 of the 7 bucket tracks.
+	h.selectCell("admin", 1, 2)
+	if h.state() != protocol.StateDailyDouble {
+		t.Fatalf("state after 2nd pick = %s, want DAILY_DOUBLE", h.state())
+	}
+	h.ddDecide("c1", true)
+	offered := h.lastDailyDoubleOfferTrackIDs("c1")
+	if len(offered) != 5 {
+		t.Fatalf("offered %d candidates, want 5", len(offered))
+	}
+	var bucketAfterDraw int
+	h.sync(func() { bucketAfterDraw = len(h.e.board.DDBucket) })
+	if bucketAfterDraw != 2 {
+		t.Fatalf("bucket after draw = %d, want 2 (7 - 5 drawn)", bucketAfterDraw)
+	}
+
+	h.ddChoose("c1", offered[0]) // play exactly ONE of the 5 offered
+
+	var curTrackSet bool
+	h.sync(func() { curTrackSet = h.e.curTrack != nil })
+	if !curTrackSet {
+		t.Fatalf("curTrack not set after choosing a song -- performance never actually started")
+	}
+
+	var bucketAfterChoose []*Track
+	h.sync(func() { bucketAfterChoose = h.e.board.DDBucket })
+	if got := len(bucketAfterChoose); got != 6 {
+		t.Fatalf("bucket after choosing 1 of 5 = %d, want 6 (7 - 1 actually played; the other 4 must return)", got)
+	}
+	// The 4 unchosen offered tracks must be back in the bucket; the chosen
+	// one must NOT be (it's now playing, not available to draw again).
+	present := map[string]bool{}
+	for _, trk := range bucketAfterChoose {
+		present[trk.ID] = true
+	}
+	for _, id := range offered {
+		if id == offered[0] {
+			if present[id] {
+				t.Errorf("chosen track %q is back in the bucket -- it's currently playing, should not be re-offerable", id)
+			}
+			continue
+		}
+		if !present[id] {
+			t.Errorf("unchosen offered track %q never returned to the bucket", id)
+		}
+	}
+}
+
+// TestDailyDouble_DeclineWithDrawnCandidatesReturnsThemAll (dd-eng-bucket-01):
+// declineDailyDouble() is also reached with candidates already drawn via
+// startDailyDoublePerformance's own cell-vanished hard-cancel (an admin
+// swaps the board mid-offer). Pins that declineDailyDouble's own call to
+// returnUnusedDDCandidates returns ALL drawn candidates (no `except`, since
+// none was ever chosen in a decline) rather than just some or none.
+func TestDailyDouble_DeclineWithDrawnCandidatesReturnsThemAll(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.join("c1", "fp1", "perf")
+
+	bucket := make([]*Track, 7)
+	for i := range bucket {
+		bucket[i] = &Track{ID: fmt.Sprintf("bucket-%d", i), Playable: true}
+	}
+	h.sync(func() { h.e.board.DDBucket = bucket })
+
+	h.selectCell("admin", 1, 2)
+	n := h.gate.Current()
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: n}, nowMs())
+	h.sync(func() {})
+	h.grade("admin", protocol.VerdictCorrect)
+	h.sync(func() {
+		h.e.curTrack = nil
+		h.e.curCell = nil
+		h.e.state = protocol.StateBoard
+	})
+	h.selectCell("admin", 1, 2)
+	if h.state() != protocol.StateDailyDouble {
+		t.Fatalf("state after 2nd pick = %s, want DAILY_DOUBLE", h.state())
+	}
+	h.ddDecide("c1", true) // draws 5 candidates, leaving 2 in the bucket
+	var bucketAfterDraw int
+	h.sync(func() { bucketAfterDraw = len(h.e.board.DDBucket) })
+	if bucketAfterDraw != 2 {
+		t.Fatalf("bucket after draw = %d, want 2", bucketAfterDraw)
+	}
+
+	// Simulate the cell vanishing from under the offer (e.g. an admin
+	// ReloadBoard mid-offer) by directly invoking declineDailyDouble with
+	// the drawn candidates still attached -- the same state
+	// startDailyDoublePerformance's own hard-cancel reaches it in.
+	h.sync(func() { h.e.declineDailyDouble() })
+
+	var bucketAfterDecline int
+	h.sync(func() { bucketAfterDecline = len(h.e.board.DDBucket) })
+	if bucketAfterDecline != 7 {
+		t.Errorf("bucket after decline-with-drawn-candidates = %d, want 7 (all 5 drawn candidates returned, none chosen)", bucketAfterDecline)
+	}
+}
+
 // TestDailyDouble_DeclineCancelsWhenNoEligibleCell: with no other eligible
 // cell anywhere, a decline cancels outright rather than stalling.
 func TestDailyDouble_DeclineCancelsWhenNoEligibleCell(t *testing.T) {

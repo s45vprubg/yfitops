@@ -2494,6 +2494,9 @@ func (e *Engine) startDailyDoublePerformance(performer *Player, track *Track) {
 	// come after roundKey is minted so refreshCurDropPoint's staleness guard
 	// checks against THIS performance's round, not the one that just ended.
 	e.refreshCurDropPoint()
+	// dd-eng-bucket-01: return every OTHER drawn candidate (not the one
+	// actually chosen) to the bucket so it's eligible for a future offer.
+	e.returnUnusedDDCandidates(e.ddOffer.candidates, track)
 	e.ddOffer = nil
 	// trackStartEnvelope derives its pool from roundPool(), same as startTrack
 	// — reset here for the same reason startTrack does: a stale partial from
@@ -2530,6 +2533,29 @@ func (e *Engine) startDailyDoublePerformance(performer *Player, track *Track) {
 	// floors at 1★ if literally nobody ends up rating.
 }
 
+// returnUnusedDDCandidates (dd-eng-bucket-01): the offer draws up to 5
+// candidates out of e.board.DDBucket with NO replacement (dd-eng-2's own
+// comment above calls this out explicitly: "no-replacement draw across the
+// whole game"), but only ONE of those candidates is ever actually played.
+// Without this, the other (up to 4) songs the contestant did NOT choose
+// were silently lost forever -- never returned to the bucket, never
+// eligible for a later Daily Double -- so a small bucket (e.g. 7 tracks for
+// 3 DD cells) could run out of choices well before every cell had even
+// fired once. Appends every candidate except the one actually used (pass
+// nil for `except` when none was used, e.g. on a decline) back onto the
+// bucket so it's available again for the next offer drawn from it.
+func (e *Engine) returnUnusedDDCandidates(candidates []*Track, except *Track) {
+	if e.board == nil {
+		return
+	}
+	for _, t := range candidates {
+		if t == except {
+			continue
+		}
+		e.board.DDBucket = append(e.board.DDBucket, t)
+	}
+}
+
 // declineDailyDouble handles a decline (contestant or admin force-skip): the
 // original cell permanently reverts to normal, and a new random cell with ≥1
 // unplayed track (looser than the initial ≥2/different-category rule, which
@@ -2544,6 +2570,11 @@ func (e *Engine) declineDailyDouble() {
 		declined.DailyDouble = false
 		declined.DDTriggerVisit = 0
 	}
+	// dd-eng-bucket-01: a decline before any song was chosen (the normal
+	// contestant-declines path) never has candidates drawn yet, but the
+	// cell-vanished hard-cancel in startDailyDoublePerformance calls THIS
+	// function after candidates were already drawn -- return them too.
+	e.returnUnusedDDCandidates(e.ddOffer.candidates, nil)
 	e.ddOffer = nil
 
 	var candidates []*Cell
