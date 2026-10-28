@@ -29,6 +29,68 @@ column drops) for the new Mark/Jump Drop Point feature. Run
 `cd deploy && make migrate` before starting the new server/gameserver image.
 No backfill: every song's drop point starts unmarked until an admin marks it.
 
+## [Unreleased] — 2026-10-28
+
+### Fixed — Board builder crashed to a black screen on any board with an empty cell
+- `server/internal/store/admin_store.go` (`GetLayout`): an empty cell (no
+  tracks placed) left `LayoutCell.Tracks` at its Go zero value, `nil`.
+  `encoding/json` marshals a nil slice as `null`, not `[]`. The admin
+  frontend's `allTracks` memo (`BoardBuilderPage.tsx`) flattened every
+  cell's `tracks` with `flatMap`, which does not spread a non-array return
+  value — so that literal `null` landed as an element of `allTracks`, and
+  `HoldingArea.tsx`'s lyrics-count filters (`t.lyricsStatus`) threw on it,
+  taking down the whole page. Fixed at the source (`Tracks` now
+  initializes to `[]admin.Track{}`) plus a defensive `?? []` guard at both
+  `BoardBuilderPage.tsx` read sites, so a future nil from any other path
+  can't reintroduce the same crash.
+
+### Fixed — Daily Double offer discarded unchosen song choices forever
+- `server/internal/game/engine.go`: a Daily Double offer draws up to 5
+  candidate tracks from the board's DD bucket with no replacement, but only
+  the one the contestant actually picks ever plays — the other (up to 4)
+  were silently discarded instead of returning to the bucket. A small
+  bucket (e.g. 7 tracks for 3 DD cells) could run out of choices after just
+  one or two Daily Doubles even though most drawn songs were never played.
+  New `returnUnusedDDCandidates` helper returns every unchosen candidate to
+  `e.board.DDBucket`, called from both `startDailyDoublePerformance` (the
+  contestant actually plays one) and `declineDailyDouble` (none are
+  chosen, including the cell-vanished hard-cancel path).
+
+### Fixed — "Transition Delay" field went blank after Save
+- `web/admin/src/components/AudioSettingsPanel.tsx`: the Game Settings
+  draft-seeding effect computed `revealCfg.transitionDelayMs / 1000`
+  unconditionally; if a field the server echo doesn't carry (e.g. a newly
+  added knob echoed by a backend build that predates it) is `undefined`,
+  that division is `NaN`, and a `type="number"` input renders a `NaN`
+  value as blank — exactly the "disappears on Save" symptom, and why only
+  this one (newest) field was affected while the longer-lived sibling
+  sliders weren't. The seeding effect now falls back to the field's
+  current draft value instead of propagating `NaN` for any field that's
+  missing or non-finite.
+
+### Changed — Unchecking "Alternate Title and Artist" now reveals one field at random, not both at once
+- `server/internal/game/reveal.go` (`revealClock.revealOneLetter`): with
+  "Alternate" unchecked, the reveal previously advanced ONE letter in
+  BOTH the artist and the song every tick simultaneously — reported as
+  confusing ("one of each at the same time"), since the setting reads as
+  "don't alternate, just reveal randomly." Each tick now picks title OR
+  artist at random (via the engine's existing seeded `e.rng`, falling back
+  to whichever field still has hidden letters once the other is fully
+  revealed) and reveals a letter in only that field. The checked
+  (strictly-alternating) behavior is unchanged.
+
+### Changed — Stage board layout reworked: full-width board, 3-player leaderboard
+- `web/stage`: the persistent leaderboard and join-QR box used to float as
+  fixed corner overlays on top of the board grid; a prior fix added
+  asymmetric padding to the grid so its columns wouldn't sit underneath
+  them, which read as cramped. `ScoreOverlay`/`CornerJoin` now take an
+  `inline` prop; `Board.tsx` renders both inline in a header row (capped
+  to the top 3 players, down from 10 — enough to see who's leading without
+  competing for room) above a now full-width, edge-to-edge grid. The
+  floating corner overlays are suppressed by `App.tsx` specifically while
+  Board is on screen (every other view keeps the original floating
+  behavior, since only the board was reported as cramped).
+
 ## [Unreleased] — 2026-10-22
 
 ### Added — Configurable transition delay + next-cell highlight/toast

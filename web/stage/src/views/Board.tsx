@@ -1,11 +1,21 @@
 // Board — clean Jeopardy-style grid from the board payload (§8A). Top row =
 // categories; cells show point values; exhausted cells faded.
+//
+// Renders its own header row (leaderboard + join QR, both `inline`) above
+// the grid instead of leaving App.tsx's floating corner overlays on top of
+// it — a fixed-position leaderboard/QR over a full-width grid had no room
+// that didn't collide with a column, so App.tsx suppresses those floating
+// overlays specifically while Board is on screen and lets Board compose its
+// own header instead. The grid itself is full width, no side padding.
 
-import type { BoardData, BoardCell } from "@shared/protocol";
+import type { BoardData, BoardCell, ScoreboardData } from "@shared/protocol";
+import ScoreOverlay from "../components/ScoreOverlay";
+import CornerJoin from "../components/CornerJoin";
 
 export default function Board({
   board,
   highlightCell,
+  scoreboard,
 }: {
   board: BoardData | null;
   // The cell the picker has queued for the next round (smsgPendingPick,
@@ -13,6 +23,7 @@ export default function Board({
   // already decided during the between-rounds countdown. Optional/additive:
   // undefined renders exactly as before.
   highlightCell?: { row: number; col: number };
+  scoreboard?: ScoreboardData | null;
 }) {
   if (!board) {
     return <div className="flex h-full items-center justify-center text-2xl text-neon-green/50">loading board…</div>;
@@ -47,10 +58,14 @@ export default function Board({
   }
 
   return (
-    <div className="flex h-full w-full flex-col pl-[320px] pr-[300px] py-12">
-      <h2 className="mb-6 text-center text-3xl font-bold uppercase tracking-[0.4em] text-neon-cyan neon-cyan">
-        select a track
-      </h2>
+    <div className="flex h-full w-full flex-col px-8 py-6">
+      <div className="mb-4 flex items-start justify-between gap-4">
+        <ScoreOverlay scoreboard={scoreboard ?? null} inline />
+        <h2 className="flex-1 pt-3 text-center text-3xl font-bold uppercase tracking-[0.4em] text-neon-cyan neon-cyan">
+          select a track
+        </h2>
+        <CornerJoin inline />
+      </div>
       <div className="grid flex-1 gap-3" style={{ gridTemplateColumns: `repeat(${c}, minmax(0, 1fr))` }}>
         {categories.map((cat, col) => (
           <div

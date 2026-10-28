@@ -34,8 +34,15 @@ export default function BoardBuilderPage({ secret }: Props) {
   // requery/manual-entry) needs this, not just `unplaced`: once a board is
   // built out most tracks live in cells, and scoping lyrics tooling to the
   // library alone makes it silently blind to most of the board.
+  // `c.tracks ?? []`: an empty cell's `tracks` has shipped as JSON `null`
+  // in the past (a nil Go slice marshals to `null`, not `[]`) -- flatMap
+  // does NOT spread a non-array return value, so that null landed as a
+  // literal element of allTracks, crashing every `.lyricsStatus` read
+  // downstream (HoldingArea's lyrics-count filters). Fixed at the source
+  // too (internal/store/admin_store.go), but this guard costs nothing and
+  // keeps allTracks safe even if another code path reintroduces a nil.
   const allTracks = useMemo(
-    () => [...unplaced, ...cells.flatMap((c) => c.tracks)],
+    () => [...unplaced, ...cells.flatMap((c) => c.tracks ?? [])],
     [unplaced, cells],
   );
 
@@ -167,7 +174,7 @@ export default function BoardBuilderPage({ secret }: Props) {
     const inHolding = unplaced.find((t) => t.id === trackId);
     if (inHolding) return inHolding;
     for (const c of cells) {
-      const inCell = c.tracks.find((t) => t.id === trackId);
+      const inCell = (c.tracks ?? []).find((t) => t.id === trackId);
       if (inCell) return inCell;
     }
     return undefined;

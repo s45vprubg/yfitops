@@ -3555,7 +3555,7 @@ func (e *Engine) revealTick(rk string) {
 		e.startRevealTicker(rk)
 		return
 	}
-	if e.rc.revealOneLetter() {
+	if e.rc.revealOneLetter(e.rng) {
 		if e.rc.allDone() {
 			e.rc.phase = revealPhaseDone
 		}

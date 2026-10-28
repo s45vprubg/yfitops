@@ -36,6 +36,12 @@ export default function StageApp() {
   const usingSpotify = view.audioMode === "spotify";
   const needsActivation = usingSpotify && !view.audioActivated;
 
+  // Set by renderView() (called below, before the two floating-overlay
+  // expressions are evaluated) whenever it renders Board — Board renders its
+  // own inline leaderboard/join header, so the floating corner overlays must
+  // be suppressed for exactly those renders to avoid showing both at once.
+  let showingBoard = false;
+
   return (
     <div className="crt-overlay relative h-full w-full overflow-hidden">
       <ConnDot connected={view.connected} />
@@ -55,11 +61,14 @@ export default function StageApp() {
       )}
 
       {/* Persistent corner QR on every view except the lobby (which already has
-          a giant one). */}
-      {view.state !== "LOBBY" && <CornerJoin />}
+          a giant one) and Board/Transition, which renders its own inline copy
+          in a header row above the now-full-width grid instead. */}
+      {view.state !== "LOBBY" && !showingBoard && <CornerJoin />}
 
-      {/* Persistent standings during the board/round flow. */}
-      {SCORE_OVERLAY_STATES.includes(view.state) && <ScoreOverlay scoreboard={view.scoreboard} />}
+      {/* Persistent standings during the board/round flow — Board itself
+          renders its own inline copy (see above); skip the floating one
+          there to avoid showing the leaderboard twice. */}
+      {SCORE_OVERLAY_STATES.includes(view.state) && !showingBoard && <ScoreOverlay scoreboard={view.scoreboard} />}
     </div>
   );
 
@@ -85,7 +94,14 @@ export default function StageApp() {
 
       case "BOARD":
       case "TRANSITION":
-        return <Board board={view.board} highlightCell={view.pendingPickCell ?? undefined} />;
+        showingBoard = true;
+        return (
+          <Board
+            board={view.board}
+            highlightCell={view.pendingPickCell ?? undefined}
+            scoreboard={view.scoreboard}
+          />
+        );
 
       case "ROUND_ACTIVE":
       case "LOCKED_OUT":
@@ -100,11 +116,27 @@ export default function StageApp() {
             />
           );
         }
-        return <Board board={view.board} highlightCell={view.pendingPickCell ?? undefined} />;
+        showingBoard = true;
+        return (
+          <Board
+            board={view.board}
+            highlightCell={view.pendingPickCell ?? undefined}
+            scoreboard={view.scoreboard}
+          />
+        );
 
       case "DAILY_DOUBLE": {
         const performer = view.ddPerformer;
-        if (!performer) return <Board board={view.board} highlightCell={view.pendingPickCell ?? undefined} />;
+        if (!performer) {
+          showingBoard = true;
+          return (
+            <Board
+              board={view.board}
+              highlightCell={view.pendingPickCell ?? undefined}
+              scoreboard={view.scoreboard}
+            />
+          );
+        }
         if (performer.performing) {
           return (
             <DailyDoublePerformance

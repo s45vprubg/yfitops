@@ -33,6 +33,30 @@ func newRevealHarness(t *testing.T) *harness {
 	return &harness{e: e, bcast: bc, lock: lk, repo: repo, audio: audio, gate: gate, t: t}
 }
 
+// newRevealHarnessNonAlternating is newRevealHarness with Alternate forced
+// false (dd-eng-reveal-01's target config), same fast/deterministic timing.
+func newRevealHarnessNonAlternating(t *testing.T) *harness {
+	t.Helper()
+	bc := newFakeBcast()
+	lk := newFakeLock()
+	repo := newFakeRepo()
+	audio := &fakeAudio{}
+	gate := anticheat.NewNonceGate([]byte("test-secret"))
+	e := NewEngine(repo, lk, audio, fakeLyrics{}, nil, nil, bc, gate, Config{
+		SessionID:          "s1",
+		SkipThresholdPct:   50,
+		RevealIntervalMs:   250,
+		RevealPhase1Ms:     10,
+		RevealBlockMs:      1,
+		BuzzWindowMs:       -1,
+		RevealAlternate:    false,
+		RevealAlternateSet: true,
+		Rand:               rand.New(rand.NewSource(1)),
+	})
+	e.SetBoard(testBoard())
+	return &harness{e: e, bcast: bc, lock: lk, repo: repo, audio: audio, gate: gate, t: t}
+}
+
 // maskFramesFor returns the maskedReveal payloads a given role received.
 func (b *fakeBcast) maskFramesForRole(role protocol.Role) []maskedRevealData {
 	b.mu.Lock()
@@ -148,6 +172,87 @@ func TestReveal_AlternatesFields(t *testing.T) {
 				t.Fatalf("fields not alternating: artist=%d song=%d", a, s)
 			}
 		}
+	}
+}
+
+// TestReveal_NonAlternateAdvancesOneFieldPerTick (dd-eng-reveal-01): with
+// Alternate=false, each tick must advance exactly ONE field (artist XOR
+// song) -- NOT both fields simultaneously every tick (the old behavior,
+// which read to the owner as "one of each appeared at once" rather than
+// "random"). End-to-end through the real engine/timer, unlike the
+// lower-level randomness check below.
+func TestReveal_NonAlternateAdvancesOneFieldPerTick(t *testing.T) {
+	h := newRevealHarnessNonAlternating(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.joinStage("stage")
+	h.join("c1", "fp1", "alice")
+
+	h.selectCell("admin", 1, 1)
+	time.Sleep(900 * time.Millisecond)
+	h.sync(func() {})
+
+	masks := h.bcast.maskFramesForRole(protocol.RoleStage)
+	if len(masks) < 2 {
+		t.Fatalf("expected several masks, got %d", len(masks))
+	}
+
+	prevA, prevS := 0, 0
+	for _, m := range masks {
+		if m.Final {
+			continue
+		}
+		a, s := revealedCount(m.Artist), revealedCount(m.Song)
+		da, ds := a-prevA, s-prevS
+		prevA, prevS = a, s
+		if da != 0 && ds != 0 {
+			t.Fatalf("tick advanced BOTH fields at once: artist +%d, song +%d (want exactly one)", da, ds)
+		}
+		if da < 0 || ds < 0 || da > 1 || ds > 1 {
+			t.Fatalf("tick advanced a field by an unexpected amount: artist +%d, song +%d", da, ds)
+		}
+	}
+}
+
+// TestRevealOneLetter_NonAlternateChoosesFieldRandomly (dd-eng-reveal-01):
+// isolates revealOneLetter from the engine/timer entirely (long synthetic
+// fields, many direct calls, no wall-clock sleeps) to prove the field choice
+// is actually RANDOM -- not just "never both at once" (covered above) and
+// not a fixed always-artist/always-song bias either.
+func TestRevealOneLetter_NonAlternateChoosesFieldRandomly(t *testing.T) {
+	order := make([]int, 500) // long enough that neither field exhausts
+	for i := range order {
+		order[i] = i
+	}
+	rc := &revealClock{
+		artist:      "a",
+		song:        "b",
+		artistOrder: order,
+		songOrder:   append([]int(nil), order...),
+		cfg:         revealConfig{Alternate: false},
+	}
+	rng := rand.New(rand.NewSource(42))
+	var artistPicks, songPicks int
+	for i := 0; i < 200; i++ {
+		prevA, prevS := rc.artistRevealed, rc.songRevealed
+		if !rc.revealOneLetter(rng) {
+			t.Fatalf("revealOneLetter returned false before either field exhausted (iteration %d)", i)
+		}
+		da, ds := rc.artistRevealed-prevA, rc.songRevealed-prevS
+		if da != 0 && ds != 0 {
+			t.Fatalf("iteration %d advanced BOTH fields: artist +%d, song +%d", i, da, ds)
+		}
+		switch {
+		case da == 1:
+			artistPicks++
+		case ds == 1:
+			songPicks++
+		default:
+			t.Fatalf("iteration %d advanced neither field", i)
+		}
+	}
+	if artistPicks == 0 || songPicks == 0 {
+		t.Fatalf("field choice was not random over 200 ticks: artist picked %d times, song picked %d times (want both > 0)", artistPicks, songPicks)
 	}
 }
 

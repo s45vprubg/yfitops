@@ -363,22 +363,29 @@ func (rc *revealClock) remainingHidden() int {
 
 // revealOneLetter advances the reveal by a single letter, honoring the
 // alternation setting. Returns false if there was nothing left to reveal.
-func (rc *revealClock) revealOneLetter() bool {
+// rng picks the field for a non-alternating reveal (see below); it may be
+// nil (falls back to always preferring artist, only reachable from
+// finalizeReveal's edge-case clock, which never actually ticks).
+func (rc *revealClock) revealOneLetter(rng *rand.Rand) bool {
 	if rc.allDone() {
 		return false
 	}
 	if !rc.cfg.Alternate {
-		// One from each field per tick.
-		advanced := false
-		if !rc.artistDone() {
-			rc.artistRevealed++
-			advanced = true
-		}
-		if !rc.songDone() {
+		// One letter in ONE field per tick, chosen at random -- NOT both
+		// fields at once (the old behavior read as "two letters appear
+		// simultaneously" rather than "random", which is what unchecking
+		// "Alternate" is supposed to mean).
+		switch {
+		case rc.artistDone():
 			rc.songRevealed++
-			advanced = true
+		case rc.songDone():
+			rc.artistRevealed++
+		case rng == nil || rng.Intn(2) == 0:
+			rc.artistRevealed++
+		default:
+			rc.songRevealed++
 		}
-		return advanced
+		return true
 	}
 	// Alternate artist -> song -> artist, skipping a finished field.
 	for tries := 0; tries < 2; tries++ {

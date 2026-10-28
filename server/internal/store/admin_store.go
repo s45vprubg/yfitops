@@ -653,7 +653,13 @@ func (r *PostgresRepo) GetLayout(ctx context.Context, boardID string) (*admin.La
 		key := cellCoord{row, col}
 		cell := cells[key]
 		if cell == nil {
-			cell = &admin.LayoutCell{Row: row, Col: col, Category: category}
+			// Tracks starts as []admin.Track{}, not the zero-value nil slice --
+			// an empty cell (no track rows join in below) would otherwise
+			// leave Tracks nil, and encoding/json marshals a nil slice as
+			// JSON `null` rather than `[]`. The admin frontend's layout
+			// flatMap took that null as a literal array element, crashing
+			// the whole board builder on any board with an empty cell.
+			cell = &admin.LayoutCell{Row: row, Col: col, Category: category, Tracks: []admin.Track{}}
 			cells[key] = cell
 		}
 		if tID != nil {
