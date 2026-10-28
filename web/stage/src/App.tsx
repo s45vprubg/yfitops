@@ -5,6 +5,7 @@ import { useGame } from "./net/useGame";
 import Login from "./components/Login";
 import CornerJoin from "./components/CornerJoin";
 import ScoreOverlay from "./components/ScoreOverlay";
+import VoteProgress from "./components/VoteProgress";
 import DailyDoubleResultBanner from "./components/DailyDoubleResultBanner";
 import Lobby from "./views/Lobby";
 import Board from "./views/Board";
@@ -69,6 +70,11 @@ export default function StageApp() {
           renders its own inline copy (see above); skip the floating one
           there to avoid showing the leaderboard twice. */}
       {SCORE_OVERLAY_STATES.includes(view.state) && !showingBoard && <ScoreOverlay scoreboard={view.scoreboard} />}
+
+      {/* Live skip-vote progress, top-left — the corner ScoreOverlay would
+          use, but is deliberately excluded from KARAOKE (see
+          SCORE_OVERLAY_STATES above), leaving it free. */}
+      {view.state === "KARAOKE" && <VoteProgress progress={view.voteProgress} />}
     </div>
   );
 

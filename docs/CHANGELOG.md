@@ -91,6 +91,54 @@ No backfill: every song's drop point starts unmarked until an admin marks it.
   Board is on screen (every other view keeps the original floating
   behavior, since only the board was reported as cramped).
 
+### Added — Stage shows live skip-vote progress during Karaoke
+- Stage had zero visibility into skip-vote progress — `SMsgVoteState`/
+  `VoteStateData` is mobile-only and per-recipient (carries that player's
+  own `Voted` flag, no pool-size field), so stage couldn't derive a
+  have/active or need/active fraction even if it listened. New local
+  message `smsgStageVoteProgress` (`server/internal/game/engine.go`,
+  CONTRACT-QUESTION — not in the fixed protocol.go) carries
+  `{have, need, active}`, broadcast to stage alongside the existing mobile
+  broadcast in `broadcastVoteState()` (now also called from
+  `OnDisconnect`'s karaoke branch, so the pool shrinking mid-vote updates
+  the readout immediately rather than only on the next vote) and resent on
+  a stage reconnect via `sendFullSync`. `web/stage`: new
+  `components/VoteProgress.tsx`, pinned top-left during `KARAOKE` (the
+  corner `ScoreOverlay` deliberately leaves free in that state), showing
+  "{have}/{active}" plus a bar filled to `have/active` with a vertical
+  threshold-line marker at `need/active` — computed from the real values,
+  not a hardcoded 50%, since the admin's skip-threshold percentage is
+  configurable.
+
+### Fixed — Unanimous skip vote did nothing after a round nobody won
+- `server/internal/game/engine.go`: when a round's reveal fully completes
+  with nobody having guessed correctly, `scheduleAutoKaraoke` enters
+  `KARAOKE` without ever setting `e.cellPicker` (only `gradeCorrect`/a
+  Daily Double performance do that) — so there is no one who could ever
+  supply a `pendingPick`. `karaokeConditionMet()`'s AND-gate unconditionally
+  waited for `e.pendingPick != nil` before advancing the game, meaning a
+  unanimous skip vote just set `karaokeReady = true` and left the track
+  playing indefinitely; the only way out was an admin manually clicking a
+  board cell or Force-Ending the round. `karaokeConditionMet()` now checks
+  `e.cellPicker == ""` first and calls `beginTransition()` immediately in
+  that case, falling through to the same "no pending pick → BOARD, admin
+  picks" fallback the player-picking feature already had before it existed.
+
+### Changed — Declining (or skipping) a Daily Double now plays that cell immediately
+- `server/internal/game/engine.go`: a decline used to just un-flag the cell
+  and return to BOARD with nothing played — wasting the pick that got the
+  room there in the first place. The SAME gap existed when a Daily Double's
+  armed visit fired but nobody was online/eligible to receive the offer
+  (`beginDailyDoubleOffer`'s `len(online)==0` branch). Both paths now call
+  a new `startCellNormally(cell)` helper that immediately plays a normal
+  track from that cell's own (untouched) pool, exactly as if it had been
+  picked with no Daily Double involved — selectCell's DD-trigger branch
+  never consumes the pool on the triggering visit, so it's just as
+  available here as on a fresh pick. Declining still rerolls the Daily
+  Double onto a different random eligible cell (unchanged) so the board's
+  configured Daily Double count doesn't shrink; only what happens to the
+  declined cell itself changed.
+
 ## [Unreleased] — 2026-10-22
 
 ### Added — Configurable transition delay + next-cell highlight/toast

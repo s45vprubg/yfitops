@@ -30,6 +30,7 @@ import type {
   SoloKaraokeActiveData,
   SoloKaraokeLyricsStatusData,
   SoloKaraokeNowPlayingData,
+  StageVoteProgressData,
   StateData,
   TrackStartData,
   WelcomeData,
@@ -82,6 +83,10 @@ export interface GameView {
   // zero value the instant the next round actually starts) or outside the
   // BOARD/TRANSITION window.
   pendingPickCell: { row: number; col: number } | null;
+  // Live skip-vote progress during KARAOKE (smsgStageVoteProgress,
+  // CONTRACT-QUESTION — see engine.go). Null outside karaoke or before the
+  // first readout arrives (entering karaoke always sends one immediately).
+  voteProgress: { have: number; need: number; active: number } | null;
   timer: TimerAnchor | null;
   animStartTime: number;
   audioMode: AudioPlayer["mode"];
@@ -145,6 +150,7 @@ export function useGame() {
     lockoutHandle: null,
     roundWinner: null,
     pendingPickCell: null,
+    voteProgress: null,
     timer: null,
     animStartTime: 0,
     audioMode: "demo",
@@ -313,6 +319,7 @@ export function useGame() {
             out.trackStart = null;
             out.timer = null;
             out.ddPerformer = null;
+            out.voteProgress = null;
           }
           // Defensive reset: the server already re-broadcasts pendingPick
           // cleared the instant the next round starts (the normal path), but
@@ -378,6 +385,10 @@ export function useGame() {
       client.on("pendingPick", (e: ServerEnvelope) => {
         const d = e.d as PendingPickData;
         patch({ pendingPickCell: d && d.row > 0 && d.col > 0 ? { row: d.row, col: d.col } : null });
+      });
+      client.on("stageVoteProgress", (e: ServerEnvelope) => {
+        const d = e.d as StageVoteProgressData;
+        patch({ voteProgress: { have: d.have, need: d.need, active: d.active } });
       });
       client.on("lockout", (e: ServerEnvelope) => {
         const handle = (e.d as { byHandle: string }).byHandle;

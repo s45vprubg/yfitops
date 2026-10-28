@@ -122,6 +122,13 @@ export type ServerMsgType =
   // round actually starts. Mirrors smsgPendingPick in engine.go
   // (CONTRACT-QUESTION — not in the fixed protocol.go).
   | "pendingPick"
+  // stageVoteProgress: {have, need, active} — live skip-vote progress during
+  // KARAOKE, stage-only. "voteState" is mobile-only and per-recipient
+  // (carries that player's own Voted flag, no pool-size field), so stage
+  // can't derive a have/active or need/active fraction from it. Mirrors
+  // smsgStageVoteProgress in engine.go (CONTRACT-QUESTION — not in the
+  // fixed protocol.go).
+  | "stageVoteProgress"
   // partialReveal: stage-only signal to fully reveal one field (artist|song)
   // after a partial guess. Mirrors smsgPartialReveal in server engine.go
   // (a CONTRACT-QUESTION type kept out of the fixed protocol.go).
@@ -314,6 +321,9 @@ export interface PickerStatusData { pickerID: string; pickerHandle: string; hasP
 // PendingPickData — see the "pendingPick" ServerMsgType doc comment above.
 // {row:0, col:0} means cleared.
 export interface PendingPickData { row: number; col: number; }
+// StageVoteProgressData — see the "stageVoteProgress" ServerMsgType doc
+// comment above.
+export interface StageVoteProgressData { have: number; need: number; active: number; }
 export interface AudioData { action: "play" | "pause" | "resume"; trackURI?: string; positionMs?: number; }
 export interface TelemetryConn { id: string; handle: string; rttMs: number; score: number; active: boolean; }
 export interface TelemetryData { connections: TelemetryConn[]; }

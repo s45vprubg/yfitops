@@ -734,12 +734,29 @@ const (
 	// ({row:0, col:0} — boards are 1-indexed, so 0 is never a real cell)
 	// means "cleared"; see broadcastPendingPick.
 	smsgPendingPick protocol.ServerMsgType = "pendingPick"
+
+	// CONTRACT-QUESTION: smsgStageVoteProgress gives stage a live skip-vote
+	// progress readout during KARAOKE (owner-requested: "6/24" + a bar with
+	// a threshold line) — protocol.go's SMsgVoteState/VoteStateData already
+	// covers this for mobile, but that payload is per-player (Voted differs
+	// per recipient) and has no pool-size field, so stage can't derive a
+	// have/active or need/active fraction from it. Defined locally rather
+	// than extending the locked VoteStateData. Stage-only; carries counts
+	// only, never player identities.
+	smsgStageVoteProgress protocol.ServerMsgType = "stageVoteProgress"
 )
 
 // pendingPickData is the sanitized payload for smsgPendingPick — see above.
 type pendingPickData struct {
 	Row int `json:"row"`
 	Col int `json:"col"`
+}
+
+// stageVoteProgressData is the payload for smsgStageVoteProgress — see above.
+type stageVoteProgressData struct {
+	Have   int `json:"have"`
+	Need   int `json:"need"`
+	Active int `json:"active"`
 }
 
 // cellCoord is a 1-indexed (row, col) board coordinate — used to hold the
@@ -829,6 +846,12 @@ func (e *Engine) OnDisconnect(connID string) {
 				p.Active = false
 			}
 			if e.state == protocol.StateKaraoke {
+				// Re-broadcast first: the pool just shrank (playerID was
+				// just dropped from e.votingPool above), so mobile's own
+				// progress readout and stage's vote-progress bar both need
+				// the recalculated Need/Active even when this disconnect
+				// alone doesn't meet the threshold.
+				e.broadcastVoteState()
 				e.evaluateSkipVotes()
 			}
 			if e.state == protocol.StateDailyDouble {
@@ -1189,6 +1212,15 @@ func (e *Engine) sendFullSync(connID string, role protocol.Role) {
 	// mobile; mirror that here.
 	if (role == protocol.RoleStage || role == protocol.RoleAdmin) && e.pendingPick != nil {
 		e.bcast.SendTo(connID, e.envelope(smsgPendingPick, pendingPickData{Row: e.pendingPick.Row, Col: e.pendingPick.Col}))
+	}
+	// A stage reconnecting mid-KARAOKE got no vote-progress readout at all
+	// until the next vote happened to fire -- the bar just silently never
+	// appeared on a reload. Re-send the live count from the same source
+	// broadcastVoteState uses.
+	if role == protocol.RoleStage && e.state == protocol.StateKaraoke {
+		e.bcast.SendTo(connID, e.envelope(smsgStageVoteProgress, stageVoteProgressData{
+			Have: e.haveVotes(), Need: e.needVotes(), Active: e.activeVoters(),
+		}))
 	}
 	// Scoreboard goes to everyone (handles + scores only, §4A-safe) so mobile
 	// players see standings on connect too.
@@ -2049,15 +2081,22 @@ func (e *Engine) onVote(connID string, env protocol.ClientEnvelope) {
 	e.evaluateSkipVotes()
 }
 
-// needVotes computes the dynamic threshold: votes must STRICTLY EXCEED pct% of
-// the active pool, or EQUAL 100% when the slider is maxed (§3.8).
-func (e *Engine) needVotes() int {
+// activeVoters counts the voting pool members who are currently online —
+// the denominator for both needVotes and the stage vote-progress bar.
+func (e *Engine) activeVoters() int {
 	active := 0
 	for id := range e.votingPool {
 		if e.reg.online(id) {
 			active++
 		}
 	}
+	return active
+}
+
+// needVotes computes the dynamic threshold: votes must STRICTLY EXCEED pct% of
+// the active pool, or EQUAL 100% when the slider is maxed (§3.8).
+func (e *Engine) needVotes() int {
+	active := e.activeVoters()
 	pct := e.session.SkipThresholdPct
 	if pct >= 100 {
 		return active // 100% => everyone must vote (equal, not exceed)
@@ -2093,6 +2132,9 @@ func (e *Engine) broadcastVoteState() {
 			}))
 		}
 	}
+	e.bcast.Broadcast(protocol.RoleStage, e.envelope(smsgStageVoteProgress, stageVoteProgressData{
+		Have: have, Need: need, Active: e.activeVoters(),
+	}))
 }
 
 // evaluateSkipVotes triggers the transition once the dynamic threshold is met
@@ -2202,6 +2244,12 @@ func (e *Engine) beginDailyDoubleOffer(cell *Cell) {
 			cell.DailyDouble = false
 			cell.DDTriggerVisit = 0
 			e.sendErrorAll("noDailyDoubleContestant", "no eligible player online; skipping this Daily Double")
+			// dd-eng-autoplay-01: same owner decision as declineDailyDouble --
+			// don't waste the pick that got the room here. No DD-bucket
+			// candidates were ever drawn at this point (that only happens
+			// once a contestant accepts), so there's nothing to return to
+			// the bucket here.
+			e.startCellNormally(cell)
 			return
 		}
 		contestantID = online[e.rng.Intn(len(online))].ID
@@ -2294,6 +2342,17 @@ func (e *Engine) sendPickableBoard() {
 // wait for onPlayerSelectCell to catch up: whichever of the two resolves
 // second is what actually fires beginTransition.
 func (e *Engine) karaokeConditionMet() {
+	if e.cellPicker == "" {
+		// Nobody won this round (full reveal with no correct guess) -- there
+		// is no one who could ever supply a pendingPick (onPlayerSelectCell
+		// requires p.ID == e.cellPicker, which is unsatisfiable while it's
+		// ""), so the OTHER AND-gate half must not wait on it forever. Fall
+		// through exactly like the admin-only fallback this feature already
+		// had before player-picking existed: beginTransition's own "no
+		// pending pick" branch lands on BOARD and waits for the admin.
+		e.beginTransition()
+		return
+	}
 	if e.pendingPick != nil {
 		e.beginTransition()
 		return
@@ -2556,11 +2615,35 @@ func (e *Engine) returnUnusedDDCandidates(candidates []*Track, except *Track) {
 	}
 }
 
+// startCellNormally begins an ordinary round from cell's own track pool, as
+// if it had been picked with no Daily Double involved at all. Used when a
+// Daily Double offer doesn't happen after all (declined, or nobody eligible
+// to receive it) so the pick that already consumed a board turn isn't
+// wasted on an empty return to BOARD -- selectCell's own DD-trigger branch
+// never touches the cell's pool (see its doc comment), so it's exactly as
+// untouched here as it would have been on a non-DD pick of this same cell.
+// Falls back to BOARD (no track) only if the pool somehow turns up empty.
+func (e *Engine) startCellNormally(cell *Cell) {
+	track := pickTrack(cell, e.rng)
+	if track == nil {
+		e.curCell = nil
+		e.transitionTo(protocol.StateBoard)
+		e.broadcastBoard()
+		return
+	}
+	e.startTrack(cell, track)
+}
+
 // declineDailyDouble handles a decline (contestant or admin force-skip): the
-// original cell permanently reverts to normal, and a new random cell with ≥1
-// unplayed track (looser than the initial ≥2/different-category rule, which
-// only governs the initial balanced assignment) is armed to fire on its very
-// next selection. Cancels outright (no replacement) if none exists.
+// original cell permanently reverts to normal and immediately plays a
+// normal track from its own pool (owner decision, 2026-10-28 -- a decline
+// used to just return to BOARD with nothing played, wasting the pick that
+// got the room here), while a new random cell with ≥1 unplayed track
+// (looser than the initial ≥2/different-category rule, which only governs
+// the initial balanced assignment) is armed to fire on its very next
+// selection, so declining doesn't shrink the board's configured Daily
+// Double count. No replacement cell exists -> Daily Double is simply done
+// for the rest of the game; the declined cell still plays normally either way.
 func (e *Engine) declineDailyDouble() {
 	if e.state != protocol.StateDailyDouble || e.ddOffer == nil {
 		return
@@ -2597,6 +2680,14 @@ func (e *Engine) declineDailyDouble() {
 	}
 	// else: no eligible cell anywhere — cancel this Daily Double for the game.
 
+	if declined != nil {
+		// dd-eng-autoplay-01: play the declined cell's own pool immediately
+		// instead of returning to an empty BOARD. The cell-vanished
+		// hard-cancel path (declined == nil, admin swapped the board
+		// mid-offer) has nothing left to play -- fall back to BOARD there.
+		e.startCellNormally(declined)
+		return
+	}
 	e.curCell = nil
 	e.transitionTo(protocol.StateBoard)
 	e.broadcastBoard()

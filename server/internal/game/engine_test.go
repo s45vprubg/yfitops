@@ -850,6 +850,105 @@ func TestSkipVote_HundredPercentRequiresAll(t *testing.T) {
 	}
 }
 
+// lastStageVoteProgress scans the harness's captured broadcast frames for the
+// most recent smsgStageVoteProgress -- either a Broadcast(RoleStage, ...)
+// (connID is empty on those frames; fakeBcast.Broadcast records role, not
+// connID) or a SendTo a specific connID (the resync path).
+func lastStageVoteProgress(h *harness, connID string) (stageVoteProgressData, bool) {
+	h.bcast.mu.Lock()
+	defer h.bcast.mu.Unlock()
+	var out stageVoteProgressData
+	found := false
+	for _, f := range h.bcast.frames {
+		if f.env.Type != smsgStageVoteProgress {
+			continue
+		}
+		if f.role == protocol.RoleStage || (connID != "" && f.connID == connID) {
+			_ = json.Unmarshal(f.env.Data, &out)
+			found = true
+		}
+	}
+	return out, found
+}
+
+// TestStageVoteProgress_BroadcastsLiveCounts: stage has no visibility into
+// skip-vote progress at all today (SMsgVoteState/VoteStateData is mobile-only
+// and per-player) -- the owner asked for a "6/24"-style readout on stage.
+// Pins that smsgStageVoteProgress fires with the right Have/Need/Active as
+// votes accumulate and the pool changes.
+func TestStageVoteProgress_BroadcastsLiveCounts(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.joinStage("stage")
+	h.join("c1", "fp1", "a")
+	h.join("c2", "fp2", "b")
+	h.join("c3", "fp3", "c")
+
+	h.selectCell("admin", 1, 1)
+	n := h.gate.Current()
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: n}, nowMs())
+	h.sync(func() {})
+	h.grade("admin", protocol.VerdictCorrect)
+	if h.state() != protocol.StateKaraoke {
+		t.Fatalf("state = %s, want KARAOKE", h.state())
+	}
+
+	// Entering karaoke itself must have already sent an initial readout
+	// (0 votes so far, 3 active, need 2 @ default 50%).
+	got, ok := lastStageVoteProgress(h, "stage")
+	if !ok {
+		t.Fatalf("no smsgStageVoteProgress sent to stage on entering KARAOKE")
+	}
+	if got.Have != 0 || got.Need != 2 || got.Active != 3 {
+		t.Fatalf("initial progress = %+v, want {Have:0 Need:2 Active:3}", got)
+	}
+
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgVote, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+	got, ok = lastStageVoteProgress(h, "stage")
+	if !ok || got.Have != 1 || got.Need != 2 || got.Active != 3 {
+		t.Fatalf("progress after 1 vote = %+v (ok=%v), want {Have:1 Need:2 Active:3}", got, ok)
+	}
+
+	// p3 disconnects -> pool shrinks to 2 active.
+	h.e.OnDisconnect("c3")
+	h.sync(func() {})
+	got, ok = lastStageVoteProgress(h, "stage")
+	if !ok || got.Have != 1 || got.Need != 2 || got.Active != 2 {
+		t.Fatalf("progress after disconnect = %+v (ok=%v), want {Have:1 Need:2 Active:2}", got, ok)
+	}
+}
+
+// TestStageVoteProgress_ResyncOnReconnect: a stage reconnecting mid-KARAOKE
+// (e.g. a page reload) must get the live vote-progress readout immediately
+// via sendFullSync, not just on the next vote.
+func TestStageVoteProgress_ResyncOnReconnect(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	h.join("c1", "fp1", "a")
+	h.join("c2", "fp2", "b")
+
+	h.selectCell("admin", 1, 1)
+	n := h.gate.Current()
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgBuzz, Nonce: n}, nowMs())
+	h.sync(func() {})
+	h.grade("admin", protocol.VerdictCorrect)
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgVote, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+
+	// Stage connects for the FIRST time only now, mid-karaoke, mid-vote.
+	h.joinStage("stage2")
+	got, ok := lastStageVoteProgress(h, "stage2")
+	if !ok {
+		t.Fatalf("reconnecting stage got no smsgStageVoteProgress on resync")
+	}
+	if got.Have != 1 || got.Need != 2 || got.Active != 2 {
+		t.Fatalf("resync progress = %+v, want {Have:1 Need:2 Active:2}", got)
+	}
+}
+
 // TestGrade_SecondConcurrentGradeIgnored: first-packet-wins (§9). The second
 // grade arrives after the state has left ADJUDICATE and is a no-op.
 func TestGrade_SecondConcurrentGradeIgnored(t *testing.T) {
@@ -1251,7 +1350,9 @@ func TestSelectCell_DailyDoubleTriggersOnSecondVisitOnly(t *testing.T) {
 
 // TestDailyDouble_DeclineRerollsToNewCell: declining clears the original
 // cell's flag permanently and arms a different eligible cell to fire on its
-// very next selection.
+// very next selection. The declined cell itself immediately plays a normal
+// track from its own pool (owner decision, 2026-10-28) rather than wasting
+// the pick that got the room here.
 func TestDailyDouble_DeclineRerollsToNewCell(t *testing.T) {
 	h := newHarness(t)
 	defer h.run()()
@@ -1281,8 +1382,17 @@ func TestDailyDouble_DeclineRerollsToNewCell(t *testing.T) {
 	}
 
 	h.ddDecide("c1", false) // decline
-	if h.state() != protocol.StateBoard {
-		t.Fatalf("state after decline = %s, want BOARD", h.state())
+	if h.state() != protocol.StateRoundActive {
+		t.Fatalf("state after decline = %s, want ROUND_ACTIVE (declined cell auto-plays)", h.state())
+	}
+	var curRow, curCol int
+	h.sync(func() {
+		if h.e.curCell != nil {
+			curRow, curCol = h.e.curCell.Row, h.e.curCell.Col
+		}
+	})
+	if curRow != 1 || curCol != 2 {
+		t.Errorf("curCell after decline = (%d,%d), want (1,2) — the declined cell's own pool", curRow, curCol)
 	}
 	if board.Cells[0][1].DailyDouble {
 		t.Errorf("declined cell (1,2) still flagged DailyDouble")
@@ -1293,7 +1403,10 @@ func TestDailyDouble_DeclineRerollsToNewCell(t *testing.T) {
 			other.DailyDouble, other.DDTriggerVisit)
 	}
 
-	// Confirm it actually fires on the very next (1st) pick of the reroll cell.
+	// End the auto-started round, then confirm the reroll actually fires on
+	// the very next (1st) pick of the reroll cell.
+	h.e.OnMessage("admin", protocol.RoleAdmin, protocol.ClientEnvelope{Type: protocol.CMsgAdminEndRound, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
 	h.selectCell("admin", 1, 1)
 	if h.state() != protocol.StateDailyDouble {
 		t.Errorf("reroll cell's next pick state = %s, want DAILY_DOUBLE", h.state())
@@ -1432,7 +1545,10 @@ func TestDailyDouble_DeclineWithDrawnCandidatesReturnsThemAll(t *testing.T) {
 }
 
 // TestDailyDouble_DeclineCancelsWhenNoEligibleCell: with no other eligible
-// cell anywhere, a decline cancels outright rather than stalling.
+// cell anywhere to reroll the Daily Double onto, the flag is simply dropped
+// (no replacement) -- but the declined cell's own pick still isn't wasted:
+// it immediately plays a normal track from its own remaining pool, same as
+// TestDailyDouble_DeclineRerollsToNewCell.
 func TestDailyDouble_DeclineCancelsWhenNoEligibleCell(t *testing.T) {
 	h := newHarness(t)
 	defer h.run()()
@@ -1459,11 +1575,71 @@ func TestDailyDouble_DeclineCancelsWhenNoEligibleCell(t *testing.T) {
 	}
 
 	h.ddDecide("c1", false)
-	if h.state() != protocol.StateBoard {
-		t.Fatalf("state after decline = %s, want BOARD", h.state())
+	if h.state() != protocol.StateRoundActive {
+		t.Fatalf("state after decline = %s, want ROUND_ACTIVE (declined cell auto-plays its remaining track)", h.state())
 	}
 	if board.Cells[0][0].DailyDouble {
 		t.Errorf("cell still flagged after cancel-with-no-replacement")
+	}
+	var curRow, curCol int
+	h.sync(func() {
+		if h.e.curCell != nil {
+			curRow, curCol = h.e.curCell.Row, h.e.curCell.Col
+		}
+	})
+	if curRow != 1 || curCol != 1 {
+		t.Errorf("curCell after decline = (%d,%d), want (1,1) — the declined cell's own remaining track", curRow, curCol)
+	}
+}
+
+// TestDailyDouble_NoEligibleContestantAutoPlaysCell (dd-eng-autoplay-01):
+// when a Daily Double's armed visit fires but nobody is online/eligible to
+// receive the offer, beginDailyDoubleOffer used to un-flag the cell and
+// just bail out with an error -- wasting the pick that got the room here,
+// exactly like a decline used to. It must now immediately play a normal
+// track from that cell's own pool instead (owner decision, 2026-10-28).
+func TestDailyDouble_NoEligibleContestantAutoPlaysCell(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	h.joinAdmin("admin")
+	// Deliberately no mobile players joined at all -- e.lastScorer is "" and
+	// the online-fallback pool is empty, hitting the len(online)==0 branch.
+
+	board := &Board{
+		Rows: 1, Cols: 1,
+		Cells: [][]*Cell{{ddCell(1, 1, "A", 2)}},
+	}
+	board.Cells[0][0].DailyDouble = true
+	board.Cells[0][0].DDTriggerVisit = 2
+	h.sync(func() { h.e.board = board })
+
+	h.selectCell("admin", 1, 1) // 1st pick: visit 1, not the armed visit
+	h.sync(func() {
+		h.e.curTrack = nil
+		h.e.curCell = nil
+		h.e.state = protocol.StateBoard
+	})
+
+	h.selectCell("admin", 1, 1) // 2nd pick: visit 2, the armed Daily Double visit
+	if h.state() != protocol.StateRoundActive {
+		t.Fatalf("state after no-eligible-contestant = %s, want ROUND_ACTIVE (cell auto-plays)", h.state())
+	}
+	if board.Cells[0][0].DailyDouble {
+		t.Errorf("cell still flagged DailyDouble after no-eligible-contestant skip")
+	}
+	var curRow, curCol int
+	var curTrackSet bool
+	h.sync(func() {
+		if h.e.curCell != nil {
+			curRow, curCol = h.e.curCell.Row, h.e.curCell.Col
+		}
+		curTrackSet = h.e.curTrack != nil
+	})
+	if curRow != 1 || curCol != 1 {
+		t.Errorf("curCell after no-eligible-contestant skip = (%d,%d), want (1,1)", curRow, curCol)
+	}
+	if !curTrackSet {
+		t.Error("curTrack not set after no-eligible-contestant skip -- pick was wasted")
 	}
 }
 
@@ -1487,8 +1663,10 @@ func TestAdminSkipDailyDouble_TreatedAsDecline(t *testing.T) {
 
 	h.e.OnMessage("admin", protocol.RoleAdmin, protocol.ClientEnvelope{Type: cmsgAdminSkipDailyDouble, Nonce: h.gate.Current()}, nowMs())
 	h.sync(func() {})
-	if h.state() != protocol.StateBoard {
-		t.Fatalf("state after admin skip = %s, want BOARD", h.state())
+	// Treated as a decline (dd-eng-autoplay-01): the skipped cell immediately
+	// plays a normal track from its own pool rather than wasting the pick.
+	if h.state() != protocol.StateRoundActive {
+		t.Fatalf("state after admin skip = %s, want ROUND_ACTIVE (skipped cell auto-plays)", h.state())
 	}
 	var dd bool
 	h.sync(func() { dd = h.e.board.Cells[0][1].DailyDouble })
@@ -2239,6 +2417,65 @@ func TestOnDisconnect_PickerDisconnectWithReadyFallsThroughToBoard(t *testing.T)
 	// continuation lands after TransitionDelay and returns to BOARD.
 	if !waitUntil(t, time.Second, func() bool { return h.state() == protocol.StateBoard }) {
 		t.Fatalf("state = %s after waiting out TransitionDelay, want BOARD (must not get stuck in TRANSITION/KARAOKE forever)", h.state())
+	}
+}
+
+// TestKaraoke_NoWinnerSkipVoteStillEndsRound: when nobody buzzes correctly
+// before the reveal fully completes, scheduleAutoKaraoke enters KARAOKE
+// without ever setting e.cellPicker -- there is no one who could ever
+// satisfy onPlayerSelectCell's p.ID == e.cellPicker check, so e.pendingPick
+// can NEVER become non-nil. Before the fix, karaokeConditionMet's AND-gate
+// waited on that unsatisfiable half forever: the skip vote passing just set
+// karaokeReady=true and returned, leaving audio playing indefinitely with no
+// way to advance except an admin manual override. Pins that a no-winner
+// round's skip vote alone is now sufficient to end it.
+func TestKaraoke_NoWinnerSkipVoteStillEndsRound(t *testing.T) {
+	h := newHarness(t)
+	defer h.run()()
+	withFastTransition(t, h, 20)
+	h.joinAdmin("admin")
+	h.joinStage("stage")
+	h.join("c1", "fp1", "a")
+	h.selectCell("admin", 1, 1)
+	if h.state() != protocol.StateRoundActive {
+		t.Fatalf("state after selectCell = %s, want ROUND_ACTIVE", h.state())
+	}
+
+	// Simulate scheduleAutoKaraoke's own no-winner path exactly (full reveal,
+	// nobody ever buzzed correctly) without waiting on the real reveal timer.
+	h.sync(func() {
+		h.e.consumeTrack()
+		h.e.buzzWinner = ""
+		h.e.lock.Release(context.Background(), h.e.roundKey)
+		h.e.enterKaraoke()
+	})
+	if h.state() != protocol.StateKaraoke {
+		t.Fatalf("state after no-winner entry = %s, want KARAOKE", h.state())
+	}
+	var cellPicker string
+	h.sync(func() { cellPicker = h.e.cellPicker })
+	if cellPicker != "" {
+		t.Fatalf("cellPicker = %q after a no-winner round, want \"\" (nobody to pick)", cellPicker)
+	}
+
+	// The lone active player votes to skip -- with one voter in the pool,
+	// needVotes()'s default threshold is satisfied by a single vote.
+	h.e.OnMessage("c1", protocol.RoleMobile, protocol.ClientEnvelope{Type: protocol.CMsgVote, Nonce: h.gate.Current()}, nowMs())
+	h.sync(func() {})
+
+	// Must have fallen through to beginTransition immediately -- it must NOT
+	// still be sitting in KARAOKE waiting on a pick nobody can ever supply.
+	if h.state() != protocol.StateTransition {
+		t.Fatalf("state = %s immediately after the skip vote passed, want TRANSITION (stuck waiting on an unsatisfiable pick)", h.state())
+	}
+	if got := len(h.audio.ofMethod("pause")); got != 1 {
+		t.Errorf("audio.Pause call count = %d, want exactly 1 (playback must actually stop)", got)
+	}
+
+	// And it must not get stuck there -- falls back to BOARD for the admin
+	// to pick next, exactly like the pre-player-picking fallback.
+	if !waitUntil(t, time.Second, func() bool { return h.state() == protocol.StateBoard }) {
+		t.Fatalf("state = %s after waiting out TransitionDelay, want BOARD", h.state())
 	}
 }
 
