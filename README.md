@@ -150,6 +150,53 @@ npm run build   # production build
 The apps share types and the transport client from `web/shared/` (a TS mirror of
 the Go protocol and scoring contracts).
 
+## Production Server Installation
+
+To deploy yfitops on a public-facing server for a real event, follow these steps to ensure it is secure and fully functional:
+
+1. **Clone the repository:**
+   ```bash
+   git clone <your-repo-url> yfitops
+   cd yfitops/deploy
+   ```
+
+2. **Configure Secrets & Environment:**
+   Copy the example environment file and edit it.
+   ```bash
+   cp .env.example .env
+   ```
+   Edit `.env` and set the following critically important variables:
+   - `YFI_ENV=prod` (Arms the security gates and prevents the server from booting with default secrets)
+   - `ADMIN_SECRET=your_secure_password` (Protects the Admin Control Room and the Stage)
+   - `YFI_NONCE_SECRET=your_secure_random_string`
+   - `YFI_JOIN_SECRET=another_secure_random_string`
+   - `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` (Required for actual audio playback)
+   - `SPOTIFY_REDIRECT_URI=https://<your-domain>/auth/spotify/callback` (Must exactly match the URI in your Spotify Developer Dashboard)
+
+3. **SSL/TLS Certificates:**
+   WebTransport requires a secure context (TLS). For a production deployment, do **not** rely on the self-signed dev flow. You must either:
+   - Place a valid SSL cert/key pair (e.g., from Let's Encrypt) in the `deploy/certs/` volume directory, ensuring the server reads them via `YFI_CERT_FILE` and `YFI_KEY_FILE`.
+   - Or, run a reverse proxy (like Nginx or Caddy) in front of the gameserver that terminates SSL and properly proxies HTTP/3 (UDP 4433) and HTTP (TCP 8777).
+
+4. **Start the Backend:**
+   Run the backend services in the background using Docker Compose.
+   ```bash
+   make up
+   # or: docker compose up -d --build
+   ```
+
+5. **Configure and Build the Frontends:**
+   The frontends in the `web/` directory (`stage`, `mobile`, `admin`) are built with Vite. Since Vite bakes environment variables in at build time, ensure you set the `VITE_WT_URL`, `VITE_HTTP_URL`, and `VITE_JOIN_URL` variables to match your public domain *before* building.
+   ```bash
+   for app in stage mobile admin; do
+       cd web/$app
+       npm install
+       npm run build
+       cd ../..
+   done
+   ```
+   Once built, serve the static files in the output directories (`web/stage/dist`, `web/mobile/dist`, `web/admin/dist`) using a web server (e.g., Nginx, Caddy, or an S3 bucket).
+
 ## Board Builder — creating game boards
 
 The Board Builder (in the Admin UI) is how you curate the Jeopardy-style grid:

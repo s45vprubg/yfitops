@@ -1,4 +1,4 @@
-// PublicLanding — what yfitops.us/ shows to anyone who loads it. Deliberately
+// PublicLanding — what the root URL shows to anyone who loads it. Deliberately
 // inert: no useGame(), no secret, no privileged connection of any kind. Just
 // the QR code to join and a live player count from a dedicated unauthenticated
 // endpoint (/api/public/player-count carries nothing but a bare integer — no
